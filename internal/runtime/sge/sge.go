@@ -467,7 +467,8 @@ func (h *jobHandle) Stop(ctx context.Context) error {
 
 // StopUnit implements runtime.UnitStopper: after a SRCOS restart only the
 // persisted job id survives, and the reaper must still be able to stop it.
-func (b *Backend) StopUnit(ctx context.Context, ref string, t *tool.Tool) error {
+func (b *Backend) StopUnit(ctx context.Context, inst *runtime.Instance) error {
+	ref := inst.BackendRef
 	if ref == "" {
 		return nil
 	}
@@ -482,8 +483,10 @@ func (b *Backend) StopUnit(ctx context.Context, ref string, t *tool.Tool) error 
 	return nil
 }
 
-// UnitAlive implements runtime.UnitProber.
-func (b *Backend) UnitAlive(ctx context.Context, ref string, t *tool.Tool) bool {
+// UnitAlive implements runtime.UnitProber: the scheduler is the authority on
+// whether a job exists, so a persisted job id is enough.
+func (b *Backend) UnitAlive(ctx context.Context, inst *runtime.Instance) bool {
+	ref := inst.BackendRef
 	if ref == "" {
 		return false
 	}

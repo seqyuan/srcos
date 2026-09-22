@@ -428,6 +428,12 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		return fail("%v", err), nil
 	}
 	inst.BackendRef = h.Ref()
+	if pr, ok := h.(PidReporter); ok {
+		// Degraded mode: SRCOS owns the process, so its pid — with the start
+		// time that pins the incarnation — is what a later `svc stop`, or a
+		// reaper running in another process, has to work with.
+		inst.PID, inst.PIDStart = pr.ChildPID()
+	}
 	inst.Command = h.Command()
 	inst.Limiter = h.Limiter()
 	inst.Mounts = renderMounts(prep.spec)
@@ -543,9 +549,9 @@ func (r *Runner) StopService(ctx context.Context, t *tool.Tool, inst *Instance) 
 	}
 
 	var err error
-	if b, ok := r.opts.Backends[inst.Backend]; ok && inst.BackendRef != "" {
+	if b, ok := r.opts.Backends[inst.Backend]; ok {
 		if stopper, ok := b.(UnitStopper); ok {
-			err = stopper.StopUnit(ctx, inst.BackendRef, t)
+			err = stopper.StopUnit(ctx, inst)
 		}
 	}
 	if r.ports != nil {
@@ -563,11 +569,15 @@ func (r *Runner) StopService(ctx context.Context, t *tool.Tool, inst *Instance) 
 	return SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
 }
 
-// UnitStopper is implemented by backends that can stop a unit by its reference
-// without holding the live Handle (needed after a SRCOS restart, when only the
-// persisted record survives).
+// UnitStopper is implemented by backends that can stop a unit without holding
+// the live Handle: the reaper, `svc stop`, and startup reconciliation all run
+// in a process that may not be the one that started the unit (and after a
+// restart, no process holds it at all).
+//
+// It receives the whole record because a backend may not have a name to work
+// with: in the degraded mode there is no unit, only the pid SRCOS started.
 type UnitStopper interface {
-	StopUnit(ctx context.Context, ref string, t *tool.Tool) error
+	StopUnit(ctx context.Context, inst *Instance) error
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -662,8 +672,10 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 		if inst.Kind != string(tool.KindService) {
 			continue
 		}
-		t, terr := findTool(r.opts.ToolsDir, inst.Tool)
-		if terr != nil {
+		// The tool package has to still exist: reconcile needs its record to be
+		// meaningful, and a missing package is a problem worth reporting rather
+		// than something to silently adopt.
+		if _, terr := findTool(r.opts.ToolsDir, inst.Tool); terr != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, terr))
 			continue
 		}
@@ -675,7 +687,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 		alive := false
 		if b, ok := r.opts.Backends[inst.Backend]; ok {
 			if prober, ok := b.(UnitProber); ok {
-				alive = prober.UnitAlive(ctx, inst.BackendRef, t)
+				alive = prober.UnitAlive(ctx, inst)
 			}
 		}
 
@@ -727,9 +739,11 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 }
 
 // UnitProber is implemented by backends that can answer "is this unit still
-// running?" from a persisted reference.
+// running?" from a persisted record — which is all that survives a SRCOS
+// restart. A backend with a name to probe (a systemd unit, an SGE job) uses
+// it; the degraded mode has only the pid SRCOS recorded.
 type UnitProber interface {
-	UnitAlive(ctx context.Context, ref string, t *tool.Tool) bool
+	UnitAlive(ctx context.Context, inst *Instance) bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────

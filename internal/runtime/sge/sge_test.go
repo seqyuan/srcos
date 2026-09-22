@@ -406,7 +406,7 @@ func TestUnitAliveTreatsSuspendedAsAlive(t *testing.T) {
 	fake := &fakeRunner{reply: func(string, []string) (string, error) { return suspended, nil }}
 	cfg := testConfig(t, fake)
 	b := &Backend{Config: cfg}
-	if !b.UnitAlive(context.Background(), "4242", nil) {
+	if !b.UnitAlive(context.Background(), &runtime.Instance{BackendRef: "4242"}) {
 		t.Fatal("a suspended job must count as alive")
 	}
 
@@ -414,7 +414,7 @@ func TestUnitAliveTreatsSuspendedAsAlive(t *testing.T) {
 	fake2 := &fakeRunner{reply: func(string, []string) (string, error) { return gone, nil }}
 	cfg2 := testConfig(t, fake2)
 	b2 := &Backend{Config: cfg2}
-	if b2.UnitAlive(context.Background(), "4242", nil) {
+	if b2.UnitAlive(context.Background(), &runtime.Instance{BackendRef: "4242"}) {
 		t.Fatal("a job the scheduler does not know must not be alive")
 	}
 }

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -162,6 +164,35 @@ func TestStartServicePublishesRouteAndStops(t *testing.T) {
 	if saved.State != StateStopped {
 		t.Fatalf("recorded state = %s", saved.State)
 	}
+
+	// The stop has to actually end the process. In the degraded mode (no user
+	// systemd, ADR-014) there is no unit to stop by name, so the recorded pid is
+	// the only handle there is — and a service that survives its own stop is
+	// exactly how the port pool got exhausted and instances looked stopped while
+	// still serving (found 2026-09-22).
+	if inst.PID <= 0 || inst.PIDStart == 0 {
+		t.Fatalf("a degraded service must record its pid and start time: pid=%d start=%d", inst.PID, inst.PIDStart)
+	}
+	if saved.PID != inst.PID || saved.PIDStart != inst.PIDStart {
+		t.Fatalf("the record lost the pid: %d/%d vs %d/%d", saved.PID, saved.PIDStart, inst.PID, inst.PIDStart)
+	}
+	if processAlive(inst.PID) {
+		t.Fatalf("the service process %d survived its stop", inst.PID)
+	}
+
+	// And its endpoint must be free, not merely unreserved.
+	_, port, err := splitEndpoint(inst.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.ports.Owner(port); ok {
+		t.Fatalf("port %d is still reserved", port)
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("port %d is still bound: %v", port, err)
+	}
+	ln.Close()
 }
 
 func TestStartServiceFailsWhenHealthcheckNeverPasses(t *testing.T) {
@@ -223,6 +254,42 @@ exec python3 -m http.server "${SRCOS_PORT}" --bind 127.0.0.1 --directory "${SRCO
 	}
 }
 
+// After a restart the record is all that is left, so reconcile has to be able
+// to tell a live degraded service from a dead one — otherwise it either orphans
+// a running service (losing its route) or adopts a corpse (a card that 502s).
+func TestReconcileAdoptsALiveDegradedService(t *testing.T) {
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	if inst.PID <= 0 || inst.PIDStart == 0 {
+		t.Fatalf("a degraded service must record its pid: pid=%d start=%d", inst.PID, inst.PIDStart)
+	}
+
+	// Simulate a restart: the routing table is empty again while the record
+	// still says running, and no process holds a handle any more.
+	h.routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
+
+	adopted, orphaned, err := h.runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !containsString(adopted, inst.ID) {
+		t.Fatalf("a live service must be adopted: adopted=%v orphaned=%v", adopted, orphaned)
+	}
+	if _, _, ok := h.routes.GetByPath(inst.RoutePath); !ok {
+		t.Fatal("an adopted instance must have its route re-published")
+	}
+	if _, port, err := splitEndpoint(inst.Endpoint); err == nil {
+		if owner, ok := h.ports.Owner(port); !ok || owner != inst.ID {
+			t.Fatalf("port %d must be re-pinned to %s, owner=%q", port, inst.ID, owner)
+		}
+	}
+}
+
 func TestReconcileMarksDeadInstancesStopped(t *testing.T) {
 	h := newServiceHarness(t)
 	tl := h.tool(t)
@@ -230,33 +297,40 @@ func TestReconcileMarksDeadInstancesStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a SRCOS restart: the in-memory routing table is empty again
-	// while the record still says running.
+	// Kill the process behind SRCOS's back: the record still says running.
+	if err := stopRecordedProcess(context.Background(), inst.PID, inst.PIDStart); err != nil {
+		t.Fatal(err)
+	}
 	h.routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
 
-	// Reconcile must not claim an instance is alive when its process is gone.
 	adopted, orphaned, _ := h.runner.Reconcile(context.Background())
-	// Either it was adopted (process still alive) or reported as orphaned; what
-	// must never happen is a route pointing at nothing.
-	for _, id := range adopted {
-		if id == inst.ID {
-			if _, _, ok := h.routes.GetByPath(inst.RoutePath); !ok {
-				t.Fatal("an adopted instance must have its route re-published")
-			}
+	if containsString(adopted, inst.ID) {
+		t.Fatal("a service whose process is gone must not be adopted")
+	}
+	if !containsString(orphaned, inst.ID) {
+		t.Fatalf("a dead service must be reported as orphaned: %v", orphaned)
+	}
+	saved, err := LoadInstance(InstancePath(h.configDir, inst.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.State.Terminal() {
+		t.Fatalf("an orphaned instance must be marked terminal, got %s", saved.State)
+	}
+	if _, port, err := splitEndpoint(inst.Endpoint); err == nil {
+		if _, ok := h.ports.Owner(port); ok {
+			t.Fatalf("port %d must be released", port)
 		}
 	}
-	for _, id := range orphaned {
-		if id == inst.ID {
-			saved, err := LoadInstance(InstancePath(h.configDir, inst.ID))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !saved.State.Terminal() {
-				t.Fatalf("an orphaned instance must be marked terminal, got %s", saved.State)
-			}
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
 		}
 	}
-	_ = h.runner.StopService(context.Background(), tl, inst)
+	return false
 }
 
 func TestReaperStopsIdleService(t *testing.T) {

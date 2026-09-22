@@ -95,6 +95,21 @@ type Handle interface {
 	Limiter() string
 }
 
+// PidReporter is implemented by handles that run a plain child process on this
+// host, so the pid can be written into the instance record.
+//
+// It exists for the degraded path (no user systemd, ADR-014): there is no unit
+// to stop by name, so a later SRCOS process — `svc stop`, the reaper, after a
+// restart — has nothing but the recorded pid. A backend that owns its
+// processes (a systemd unit, an SGE job) reports (0, 0) and is stopped through
+// its own reference instead.
+type PidReporter interface {
+	// ChildPID returns the pid SRCOS started and its start time in clock ticks
+	// (0 when unknown). The pair identifies one process incarnation; a bare pid
+	// is a number the OS reuses.
+	ChildPID() (pid int, start uint64)
+}
+
 // Backend launches units somewhere.
 //
 // Start returns as soon as the unit is launched, not when it finishes: that is

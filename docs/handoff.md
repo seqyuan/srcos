@@ -113,6 +113,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
+| **降级模式的停止/回收** | 把 `systemd-run` 从 PATH 里拿掉（等价于无 user systemd 的登录节点）启动 service → 记录里有 `pid` + `pid_start`；**另起一个进程** `svc stop` → 进程消失、端口释放、记录 `stopped` 且无 error；`svc reap` 同样停掉；`svc reconcile` 对活着的降级实例 `adopted 1`、杀掉进程后 `orphaned 1`；systemd 可用时行为不变（`limiter=systemd-run` → `is-active` 变 inactive、unit 无残留） |
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
@@ -184,7 +185,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **降级模式下替换外层 `cmd.Env` 会弄丢 `DBUS_SESSION_BUS_ADDRESS`** | `systemd-run --user` 起不来，报 `Failed to connect to bus`。正解：用**内层 `env -i`** 清环境，让外层 limiter 继承宿主环境 |
 | **`pkill -f '<pattern>'` 会匹配到执行它的 shell 自身** | 如果 pattern 出现在 shell 的命令行里（通常都会），pkill 会杀掉自己。用不自匹配的模式（如 `srcos[-]dev`）或改用 `lsof -ti:<port> \| xargs kill` |
 | **`pkill -f 'srcos[-]dev serve'` 也自救不了** 如果同一条命令行里另有 `srcos-dev serve` 字面量（如 `nohup /tmp/srcos-dev serve ...`） | 括号只能避开「pattern 自己」，避不开同行其他字面量。症状：整条命令静默无输出（shell 被杀）。安全做法：**kill 与 start 分两次命令**，kill 用 `lsof -ti:<port> \| xargs kill` |
-| **`go test ./internal/runtime/` 每次泄漏 5 个 `python3 -m http.server`**（测试端口范围 24100–24120） | 服务测试用 `SystemdUser=false` 强制走 fallback，而 `StartService` 成功后**丢掉了活跃 Handle**，`StopService` 只能走 `UnitStopper.StopUnit(ref)`（按名停）—— 降级模式没有 unit 可停，于是 `_ = h.Stop()` 永远不会发生，但实例被标成 stopped。连跑 **4 次**就占满测试端口池，服务测试全部变红（`no free port: port pool exhausted`）；这不是测试特有的，**降级模式下 `svc stop` 真的停不掉自己启动的服务**。真正的修法：`Runner` 保存活跃 `Handle`（map[instanceID]Handle），`StopService` 优先用活跃 handle，仅重启后才回退到 `StopUnit(ref)`（另立一项做）。暂时每轮测试后清（见 §6） |
+| **降级模式下 `svc stop` 停不掉自己启动的服务**（2026-09-22 已修） | 症状：`go test ./internal/runtime/` 每次泄漏 5 个 `python3 -m http.server`，连跑 4 次占满测试端口池（24100–24120）→ 服务测试全红（`no free port: port pool exhausted`）；生产上等于无 user systemd 的登录节点里**服务停不掉**（`_ = h.Stop()` 从不发生，实例却被标 stopped）。根因：`StartService` 成功后丢掉了活跃 Handle，`StopService` 只能按名停（`systemctl --user stop <ref>`），降级模式没有 unit 可停。修法：把 SRCOS 直接启动的子进程 `pid` + `/proc/<pid>/stat` 的 `starttime`（内核时钟节拍，标识「这个 pid 的这一次实例」）写进实例记录，`Local.StopUnit/UnitAlive` 在没有 user systemd 时用它停止/判断存活 —— **且发信号前必须校验 starttime 一致**（pid 会被 OS 复用，裸 pid 不能杀）。副作用收益：`Reconcile` 在降级模式下也能区分活着/已死（修前一律判成 orphaned，于是把正在服务的实例标成 stopped） |
 
 ### 4.3 契约与幂等
 
@@ -318,8 +319,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
 systemctl --user stop 'srcos-*' && systemctl --user reset-failed 'srcos-*'
 lsof -ti:20000-30000 2>/dev/null | xargs -r kill    # 端口池范围
 lsof -ti:31111,31112,31113 2>/dev/null | xargs -r kill
-pkill -f 'http[.]server 241'                        # runtime 服务测试泄漏的 python3（见 §4.2）
-ss -tln | awk '$4 ~ /:241[0-9][0-9]$/'              # 应为空；不为空则服务测试将变红
+pkill -f 'http[.]server 241'                        # 历史遗留：降级模式的 stop 修好后已不再泄漏，留着当保险
+ss -tln | awk '$4 ~ /:241[0-9][0-9]$/'              # 应为空（不为空说明有旧进程残留）
 ```
 
 ---
@@ -354,6 +355,7 @@ internal/runtime/           编排层
   ├ instance.go             Instance 记录（task/service 共用）+ Paths + PathView
   ├ backend.go              Backend / Handle 接口 + Limiter(spawn) + Runner(build)
   ├ local.go                local backend（task=scope，service=unit）+ BuildInner
+  ├ proc_unix.go            processAlive + pid starttime（降级模式停止进程的身份校验）
   ├ run.go                  RunTask / StartService / StopService / Reap / Reconcile
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/rate/              令牌桶限速（登录 + 带宽）

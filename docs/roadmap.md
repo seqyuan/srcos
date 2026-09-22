@@ -635,6 +635,10 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `internal/portpool` 端口池（真 bind 探测、并发安全、`Reserve` 供 reconcile）
 - [x] **`Reconcile`**：重启后收养仍活着的实例（重新占端口 + 重发路由），把记录与真实状态对齐
 - [x] **`Reaper`**：`maxLifetime` / `idleTTL`；有开放 WebSocket 时不算空闲；SGE 上默认不做空闲回收（ADR-015）
+- [x] **降级模式的停止与探测**（2026-09-22 修）：无 user systemd 时把「SRCOS 直接启动的子进程」
+      的 `pid` + `/proc/<pid>/stat` 的 `starttime` 记进实例记录，`StopUnit`/`UnitAlive` 用它停止/判断
+      存活（发信号前校验 starttime，防 pid 复用）。降级模式下 `svc stop` / `svc reap` / `Reconcile`
+      因此才真正成立
 - [x] `doneWhen` 探针轮询（`file_exists` / `dir_nonempty`）
 - [x] **`sge` backend 架构**（ADR-015，未接真集群）：
       `qsub` 参数翻译（`cpu`→`-pe smp`、内存→**按 slot 均分** `h_vmem`、`walltime`→`h_rt`）、
@@ -761,3 +765,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **bwrap 修复已执行并验证通过**（AppArmor 按二进制授权，非全局关 sysctl）；确认「不用 root」是架构偏好（ADR-014 补前提）；**发现 userns 把 group 权限位变成人人可读** → `MountSpec` 粒度 = 数据可见范围，写入 `AGENTS.md` 安全不变式，并修正 ADR-021 的“Jail vs MountSpec 两个边界”表述；探测脚本修正误导（按二进制授权列表 + T4 权限折叠探测） |
 | 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
 | 2026-09-22 | **agent token 认证面完成（Phase 3.5 前置）** —— `internal/agenttoken`（只存 SHA-256、每次校验重读文件、失败关闭、使用时间落 `data/`）+ `srcos token create\|list\|revoke`（默认 90 天、`never`）+ `/api/*` 的 `Authorization: Bearer`（第一期只读，写接口需预留的 `submit`）+ 审计日志行 + `srcos del` 连带撤销；ADR-019 补「实现契约」小节 |
+| 2026-09-22 | **修降级模式的「停不掉」**：`StartService` 成功后丢掉活跃 Handle（`StopService` 只能按名停），无 user systemd 时服务停不了、却被标 stopped —— 表现是 `go test ./internal/runtime/` 每轮泄漏 5 个 python3（连跑 4 次耗尽测试端口池）。改为在实例记录里持久化子进程 `pid` + `starttime`，`Local.StopUnit/UnitAlive` 在降级模式用它（信号前校验 starttime 防 pid 复用）；顺带让 `Reconcile` 在降级模式也能区分活着/已死 |

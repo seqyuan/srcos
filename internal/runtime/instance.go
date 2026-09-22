@@ -71,6 +71,14 @@ type Instance struct {
 	// BackendRef identifies the unit inside the backend: a systemd unit name
 	// for local, an SGE job id for sge.
 	BackendRef string `yaml:"backend_ref,omitempty"`
+	// PID / PIDStart record the child process when SRCOS started one directly,
+	// which is the degraded path (no user systemd, ADR-014). PIDStart is the
+	// Linux start time in clock ticks: a pid alone is a number the OS reuses,
+	// so stopping a recorded pid without checking it could kill an unrelated
+	// process. Both are zero when the backend owns the process (systemd unit,
+	// SGE job).
+	PID      int    `yaml:"pid,omitempty"`
+	PIDStart uint64 `yaml:"pid_start,omitempty"`
 
 	LogPath string `yaml:"log_path"`
 

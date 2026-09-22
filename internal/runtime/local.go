@@ -355,6 +355,17 @@ type systemdUnitHandle struct {
 
 func (h *systemdUnitHandle) Ref() string { return h.ref }
 
+// ChildPID reports the process SRCOS started directly. A systemd unit reports
+// (0, 0): systemd owns that child, and `systemctl stop` is its handle.
+func (h *systemdUnitHandle) ChildPID() (int, uint64) {
+	if h.useUnit || h.process == nil || h.process.Process == nil {
+		return 0, 0
+	}
+	pid := h.process.Process.Pid
+	start, _ := pidStartTime(pid)
+	return pid, start
+}
+
 // Limiter names the mechanism holding the service's resources. "none" means the
 // fallback ran it as a plain child process, i.e. no cgroup limits apply and the
 // caller must surface that.
@@ -467,39 +478,69 @@ func exitCode(err error) int {
 // a glob), so a "does it exist?" pre-check silently reports false and the stop
 // is then skipped — which is exactly how a service survives its own stop.
 // Interpreting the stop's own error is both simpler and correct.
-func (l *Local) StopUnit(ctx context.Context, ref string, t *tool.Tool) error {
-	if ref == "" {
+//
+// Without a user systemd there is no unit to stop by name, so the recorded pid
+// is used — that is the only handle a degraded instance has (ADR-014).
+func (l *Local) StopUnit(ctx context.Context, inst *Instance) error {
+	ref := inst.BackendRef
+	if ref == "" && inst.PID == 0 {
 		return nil
 	}
-	if !l.useSystemd() {
-		return fmt.Errorf("unit %s was started without a user systemd, so it cannot be stopped by name "+
-			"after a restart; reconcile will mark it orphaned (kill the pid manually if it still runs)", ref)
-	}
-	out, err := exec.CommandContext(ctx, "systemctl", "--user", "stop", ref).CombinedOutput()
-	if err != nil {
-		msg := strings.ToLower(string(out))
-		// Already gone is success: stopping races with natural exit.
-		for _, gone := range []string{"not loaded", "not found", "no such unit", "could not be found"} {
-			if strings.Contains(msg, gone) {
-				return nil
-			}
+
+	if l.useSystemd() && ref != "" {
+		out, err := exec.CommandContext(ctx, "systemctl", "--user", "stop", ref).CombinedOutput()
+		if err == nil {
+			// Reset so the unit name is free for the next start of the same
+			// (user, tool).
+			_ = exec.Command("systemctl", "--user", "reset-failed", ref).Run()
+			return nil
 		}
-		return fmt.Errorf("systemctl --user stop %s: %w: %s", ref, err, strings.TrimSpace(string(out)))
+		msg := strings.ToLower(string(out))
+		if !unitIsGone(msg) {
+			return fmt.Errorf("systemctl --user stop %s: %w: %s", ref, err, strings.TrimSpace(string(out)))
+		}
+		// "Not loaded": either the unit exited on its own (a successful stop) or
+		// it was started while the user manager was unavailable, in which case
+		// the process is still there and the recorded pid is the way to end it.
 	}
-	// Reset so the unit name is free for the next start of the same (user, tool).
-	_ = exec.Command("systemctl", "--user", "reset-failed", ref).Run()
-	return nil
+
+	if inst.PID == 0 {
+		return fmt.Errorf("unit %s has no user systemd and no recorded pid, so SRCOS cannot stop it "+
+			"(kill it manually if it is still running)", ref)
+	}
+	return stopRecordedProcess(ctx, inst.PID, inst.PIDStart)
+}
+
+// unitIsGone reports whether systemctl's complaint means the unit does not
+// exist. Stopping races with a unit that exited on its own, and that is success.
+func unitIsGone(message string) bool {
+	for _, gone := range []string{"not loaded", "not found", "no such unit", "could not be found"} {
+		if strings.Contains(message, gone) {
+			return true
+		}
+	}
+	return false
 }
 
 // UnitAlive implements runtime.UnitProber.
 //
-// "active" is the only state that counts: activating, deactivating and failed
-// all mean the service is not serving, which is what reconcile needs in order
-// to choose between adopting and orphaning it.
-func (l *Local) UnitAlive(ctx context.Context, ref string, t *tool.Tool) bool {
-	if ref == "" || !l.useSystemd() {
+// A systemd unit is alive when it is "active" — activating, deactivating and
+// failed all mean the service is not serving, which is what reconcile needs in
+// order to choose between adopting and orphaning it. When there is no unit by
+// that name, the recorded pid is the only signal, and it counts only if it
+// still refers to the same process (otherwise the number was reused).
+func (l *Local) UnitAlive(ctx context.Context, inst *Instance) bool {
+	if l.useSystemd() && inst.BackendRef != "" {
+		out, err := exec.CommandContext(ctx, "systemctl", "--user", "is-active", inst.BackendRef).Output()
+		if err == nil && strings.TrimSpace(string(out)) == "active" {
+			return true
+		}
+	}
+	// No user manager, or no unit by that name: this is a service SRCOS started
+	// as a plain child process.
+	if inst.PID <= 0 || inst.PIDStart == 0 {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, "systemctl", "--user", "is-active", ref).Output()
-	return err == nil && strings.TrimSpace(string(out)) == "active"
+	start, ok := pidStartTime(inst.PID)
+	return ok && start == inst.PIDStart
 }
