@@ -572,15 +572,29 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `git init` + 首次提交
 - [x] 建立本 roadmap 文档
 
-### Phase 1：规范与最小闭环（**当前**）
+### Phase 1：规范与最小闭环 ✅
 目标：把一个真实工具从提交到产物跑通，并把契约**冻结**（schema 一旦定下就不反复改）。
-- [ ] `docs/tool-spec.md` —— 工具开发者契约
-      （`tool.yaml` + `interface` **类型全集冻结**含 `path` + `job.json` + `work.sh` 六条规范
-      + 虚拟 home / workspace 与内建挂载 + `backend` 选择对照表 + 同步契约与 `doneWhen` + 完整示例）
-- [ ] `docs/flow-spec.md` —— 流程管理员契约（`Flow` 的 nodes/bindings/expose 语义与画布交互约定）
-- [ ] `docs/storage-spec.md` —— 管理端契约（`storages.yaml` + `/api/paths` + `srcos-path-picker` 的对外行为）
-- [ ] 最小示例模块 `srcos-tools/hello-fanout/`：`work.sh` 用 `ata -t 5`（退化可用 `xargs -P5`）跑 5 个样本 + `.sign`
-- [ ] `local` + `bwrap` 上跑通端到端：提交 → 任务列表 → 日志 → 产物
+- [x] `docs/tool-spec.md` —— 工具开发者契约（`interface` 类型全集已冻结）
+- [x] 最小示例模块 `srcos-tools/hello-fanout/`：`work.sh` 用 `ata -t 5`（降级 `xargs -P5`）跑 5 个样本 + `.sign`
+- [x] **端到端跑通**（`local` + `bwrap`，node01 实测）
+- [x] 最小运行时：`internal/tool`（加载+13 条校验）、`internal/job`（加载+校验+扫描）、
+      `internal/sandbox`（MountSpec + Jail + bwrap 物化）、`internal/runtime`（local backend）
+- [x] CLI：`srcos tool validate|list`、`srcos job submit|run|list|status|logs`
+- [x] `sandbox: none` 降级模式（含 `env -i` 内层清环境，见下）
+- [ ] `docs/flow-spec.md` —— 流程管理员契约（可推后到 Phase 4 之前）
+- [ ] `docs/storage-spec.md` —— 管理端契约（可推后到 Phase 2 存储实现时）
+
+**Phase 1 实现中暴露的四个真问题**（已修，并已写回 `tool-spec.md`）：
+
+| # | 问题 | 结论 |
+|---|---|---|
+| 1 | `.sign` 放在工具级 → 不同参数的任务互相误判为"已完成" | **幂等的单位是「一次任务」而非「一个工具」**，标记必须用 `$SRCOS_TASK_ID` 分派（§4.2.1） |
+| 2 | `xargs -I{} bash -c '{}'` 会二次处理反斜杠，把生成的命令破坏掉 | 改用 `xargs -n 1` + `$1` + 环境变量传递（§4.2 示例） |
+| 3 | 工具级 `interface.inputs[].default` 从未真正传给工具 | `EffectiveParams` 合并默认值后再生成 `SRCOS_PARAM_*`（§4.1） |
+| 4 | `sandbox: none` 下契约路径（`/workspace`）在真实文件系统上不存在 | 降级时 env/cwd 改携带**宿主路径**；环境用内层 `env -i` 清空，外层 limiter 仍继承宿主环境（否则 `systemd-run` 找不到 DBUS）（§4.1） |
+
+另一个实现期发现：`bwrap` **无法在已只读绑定的 `/usr` `/bin` `/lib*` 内创建挂载点**，
+所以工具自带二进制统一放 `/opt/srcos/bin`（沙箱 `PATH` 第一项），注册期直接拒绝违规配置。
 
 ### Phase 2：实例化运行时（`local`）
 - [ ] `Tool` / `RunUnit` / `TaskInstance` 的 Go 类型定义 + `tool.yaml` 校验器
@@ -697,4 +711,5 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
 | 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
 | 2026-09-22 | 新增 `scripts/probe-env.sh` 与 `docs/environments.md`；完成 node01 探测（bwrap 被 AppArmor 拦、systemd-run --user 可用、数据盘是 ext4、node01 非 SGE 登录节点、shiny/RStudio/dsh 已在跑）；待决策扩到 13 项 |
+| 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
 | 2026-09-22 | **bwrap 修复已执行并验证通过**（AppArmor 按二进制授权，非全局关 sysctl）；确认「不用 root」是架构偏好（ADR-014 补前提）；**发现 userns 把 group 权限位变成人人可读** → `MountSpec` 粒度 = 数据可见范围，写入 `AGENTS.md` 安全不变式，并修正 ADR-021 的“Jail vs MountSpec 两个边界”表述；探测脚本修正误导（按二进制授权列表 + T4 权限折叠探测） |

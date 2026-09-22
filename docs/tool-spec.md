@@ -45,13 +45,16 @@ SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构�
 srcos-tools/<tool-id>/
 ├── tool.yaml                 # 必需，唯一契约入口
 ├── work.sh                   # 必需，entry 指向的执行入口
-├── workspace-template/       # 可选，首次实例化时 copy 进 /workspace
-├── home-template/            # 可选，首次实例化时 copy 进 /home/<user>
+├── workspace-template/       # 可选，首次实例化时 copy 进 /workspace（只做一次）
+├── home-template/            # 可选，首次实例化时 copy 进 /home/<user>（只做一次）
 ├── ui/                       # 可选，工具自建 UI（SRCOS 不解析，只在文档里说明怎么起）
 │   └── app.py
 ├── README.md                 # 建议
 └── data/                     # 可选，工具自带的静态数据（会被挂进沙箱）
 ```
+
+`workspace-template/` 与 `home-template/` 只在**首次**初始化时展开：SRCOS 会在目标目录写下
+`.srcos-initialized` 标记，之后不再覆盖。这样用户有意删掉的种子文件不会被静默恢复。
 
 **检验标准**：把这个目录单独拷给别人，对方能否在不安装 SRCOS 的情况下理解它在干什么、需要什么环境？
 
@@ -178,6 +181,17 @@ grants:
 
 工具 UI 往 `$SRCOS_JOB_DIR/<job-name>/` 写 `job.json` + `work.sh`，SRCOS 扫描目录发现任务。
 
+`work.sh` 的来源有两条路，SRCOS 按以下顺序决定（**Phase 1 实现已冻结此规则**）：
+
+| 顺序 | 条件 | 执行什么 | cwd |
+|---|---|---|---|
+| 1 | `job.json` 显式给了 `command` | 该 `command` | `$SRCOS_JOB_ROOT` |
+| 2 | 任务目录里有 `work.sh` | `bash work.sh` | `$SRCOS_JOB_ROOT` |
+| 3 | 都没有 | `bash /tool/<tool.yaml 的 entry>` | `$SRCOS_JOB_ROOT` |
+
+规则 2 就是"工具 UI 为本次运行生成 `work.sh`"的通道；规则 3 是"直接用工具包里的入口"。
+两者都以任务目录为 cwd，所以脚本可以引用同目录的兄弟文件而不写绝对路径。
+
 ```json
 {
   "schemaVersion": 1,
@@ -205,6 +219,10 @@ grants:
 | `outputs` | — | 沙箱绝对路径列表，登记为产物供预览/连线 |
 | `tags` | — | 键值对，用于任务列表筛选（如按 sample） |
 | `doneWhen` | — | 覆盖 `tool.yaml` 的完成判定（§7.3） |
+
+`outputs` 目前是**字面沙箱路径**，不支持 `${SRCOS_TASK_ID}` 之类的模板。
+需要"每任务一个产物目录"时，把它做成子目录（如产物写到 `/workspace/out/${SRCOS_TASK_ID}/`，
+`outputs` 仍声明父目录 `/workspace/out`）—— 见 §4.3 关于幂等粒度的说明。
 
 **不提供的字段（有意为之）**：
 
@@ -259,8 +277,27 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 | `SRCOS_USER` | 如 `alice` | SRCOS 注册用户名 |
 | `SRCOS_TOOL` | 如 `cellranger` | 工具 id |
 | `SRCOS_TASK_ID` | 如 `t-01J8…` | 本次任务 id |
+| `SRCOS_TOOL_VERSION` | 如 `1.2.3` | 工具版本，便于脚本记录到产物里 |
 | `SRCOS_PARAM_<NAME>` | 参数值 | `name` 大写、`-`→`_`。如 `sample_id` → `SRCOS_PARAM_SAMPLE_ID` |
 | `TMPDIR` | `/tmp` | 沙箱内 tmpfs |
+| `PATH` | 见下 | 含 `/opt/srcos/bin`，供工具自带的二进制 |
+
+**两条容易踩的规则**：
+
+1. **宿主环境不会被继承。** SRCOS 用 `--clearenv` 清空后只注入上表的内容——SRCOS 自己的进程环境
+   可能含密钥，且工具不应该依赖它没有声明的环境。所以 `PATH`、`LANG`、`LD_LIBRARY_PATH`
+   之类**都要显式声明**（`PATH` 由平台给，其余用 `env:` 或 `ro_mounts`）。
+2. **工具自带的二进制放在 `/opt/srcos/bin`。** 它是沙箱 `PATH` 的第一项。
+   不要挂到 `/usr/local/bin`、`/usr/bin` 之类的位置——那些目录（`/usr` `/bin` `/sbin` `/lib*`）
+   是**只读绑定**的，bubblewrap 无法在其中创建挂载点，会报
+   `Can't create file at ...: Read-only file system`。SRCOS 会在注册/运行前直接拒绝这种配置。
+
+3. **`sandbox: none` 时上表的路径值是宿主路径**，不是 `/workspace` 这种契约路径
+   —— 没有 mount namespace，那些路径在真实文件系统上并不存在。`PATH` 也沿用宿主的。
+   **这正是不许硬编码路径的原因**：只用 `$SRCOS_*` 的 `work.sh` 在两种模式下都能跑。
+
+**参数默认值**：`interface.inputs[].default` 由 SRCOS 填充进 `$SRCOS_PARAM_*`。
+参数留空（空字符串）视为"用默认值"，不会把默认值覆盖成空。
 
 参数同时以 `params.json` 落在 `$SRCOS_JOB_ROOT/params.json`（供不便读环境变量的场景）。
 
@@ -303,6 +340,27 @@ rmdir "${SAMPLE_ID}"
 touch "${SIGN}"
 echo "[done] ${SAMPLE_ID}"
 ```
+
+### 4.2.1 幂等标记的粒度：按**任务**，不按**工具**
+
+这是实现时踩到的第一个真坑：如果 `.sign` 放在**工具级**位置（例如
+`/workspace/out/.sign`），那么第二次带**不同参数**的任务会被上一次的标记误判为"已完成"
+而直接跳过 —— 静默地什么都没做，却报告成功。
+
+**幂等的单位是「一次任务」**：
+
+```bash
+# ✅ 正确：按任务分派产物目录与标记
+OUT="${SRCOS_WORKSPACE}/out/${SRCOS_TASK_ID}"
+SIGN="${OUT}/.sign"
+
+# ❌ 错误：工具级标记 —— 不同参数的任务会互相误判
+# OUT="${SRCOS_WORKSPACE}/out"
+# SIGN="${OUT}/.sign"
+```
+
+同一个任务重跑会命中自己的标记（正确跳过）；新任务则得到全新的目录。
+注意 `SRCOS_TASK_ID` 在**同一次任务**下是稳定的（等于任务目录名），所以重跑语义正确。
 
 ### 4.3 样本级并行归工具自己
 
@@ -377,6 +435,22 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
    ```
    （已实测有效；比 `chmod o+rx` 安全，比改组简单。）
 3. `mode: ro` 的 storage 在沙箱内同时是 `ro` 挂载，工具无法写入。
+
+### 5.4.1 环境挂载（`ro_mounts`）与数据 storage 的区别
+
+`ro_mounts` 是**环境**，`requires_storages` 是**数据**，两者不要混用（AGENTS.md）：
+
+| | `ro_mounts` | `requires_storages` |
+|---|---|---|
+| 写在哪 | 工具包的 `tool.yaml` | 管理端的 `storages.yaml` |
+| 谁声明宿主路径 | 工具作者 | 管理员 |
+| 典型内容 | conda 环境、`module` 树、`.sif`、工具自带二进制 | 共享参考数据、项目目录 |
+| 用户可选吗 | 不可选 | `type: path` 参数从中选择 |
+| 粒度 | 允许较粗（不含用户数据） | **必须最小粒度**（§5.4 第 1 条） |
+
+`ro_mounts[].sandbox_path` **不能落在系统只读目录内**（`/usr` `/bin` `/sbin` `/lib*` 及
+`/etc` 下的白名单文件），否则 bubblewrap 无法创建挂载点。工具自带二进制请用
+`/opt/srcos/bin/<name>`（沙箱 `PATH` 第一项）。
 
 ### 5.5 工具 UI 怎么接
 
@@ -479,6 +553,10 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `outputs[].type` 只能是 `file` / `directory` | 拒绝注册 |
 | `job.json.params` 含未声明的键 | 拒绝提交 |
 | `job.json.resources` 超过 `Grant` 配额 | 拒绝提交 |
+| `interface.inputs[].default` 不满足自己的 `type` / `min` / `max` / `values` | 拒绝注册 |
+| `ro_mounts[].sandbox_path` 落在系统只读目录内（`/usr` `/bin` `/sbin` `/lib*`、`/etc` 白名单） | 拒绝运行（bubblewrap 无法在其中创建挂载点） |
+| `MountSpec` 中出现嵌套/重叠的沙箱路径 | 拒绝运行（bind 父目录 = 交出父目录下所有 group-readable 内容） |
+| `workspace.init_from` / `home.init_from` 指向不存在的目录 | 拒绝运行 |
 
 ---
 
@@ -614,3 +692,58 @@ srcos job submit -n "hello S001-S005" \
 - [ ] `backend` 与 `internal.executor` 的组合合法吗（§6）？
 - [ ] `type: path` 的 `from` 在 `requires_storages` 里吗？
 - [ ] 把目录单独拷给别人，对方能看懂它在干什么、需要什么吗？
+
+---
+
+## 12. CLI 速查（Phase 1 已实现）
+
+```bash
+# 校验工具包（不传目录则扫描整个 tools-dir）
+srcos tool validate --tools-dir srcos-tools
+srcos tool validate --tools-dir srcos-tools hello-fanout
+srcos tool list     --tools-dir srcos-tools
+
+# 提交任务（写 job.json 到 <workspace>/jobs/<job-id>/，目录即队列）
+srcos job submit --tools-dir srcos-tools \
+  -n "hello S001-S005" --tool hello-fanout \
+  --param samples=S001,S002,S003,S004,S005 --param prefix=hi \
+  --tag demo=1 --output /workspace/out \
+  --cpu 3 --mem 3Gi --time 0:05:00 \
+  [work.sh]          # 可选：把这份脚本作为本次任务的 work.sh 拷进任务目录
+
+# 执行（扫描投递目录）
+srcos job run --tools-dir srcos-tools --tool hello-fanout
+srcos job run --tools-dir srcos-tools --tool hello-fanout --job <job-id> --force
+srcos job run --tools-dir srcos-tools --tool hello-fanout --sandbox none   # 调试降级模式
+
+# 查看
+srcos job list
+srcos job status <instance-id|job-id>
+srcos job logs   <instance-id|job-id>
+```
+
+- `--config-dir` / `-d` 决定 `config/` 与 `data/` 的位置（默认在二进制旁边）。
+- `--tools-dir` 默认取 `$SRCOS_TOOLS_DIR`，再取二进制旁边的 `srcos-tools/`，最后 `tools/`。
+- `--user` 默认取 `$SRCOS_USER` → `$USER` → `$LOGNAME`。
+- `<job-id>` 支持松匹配：完整 id、slug 前缀、或末尾的 8 位十六进制后缀都可以。
+
+## 13. Phase 1 实现状态
+
+已实现（`internal/tool`、`internal/job`、`internal/sandbox`、`internal/runtime`、`cmd_job.go`）：
+
+| 能力 | 状态 |
+|---|---|
+| `tool.yaml` 加载 + 全部 §9 校验规则 | ✅ |
+| `job.json` 加载 + 参数/资源校验 + 目录扫描 | ✅ |
+| 工具级 `default` 填充进 `SRCOS_PARAM_*` | ✅ |
+| `MountSpec` + 路径解析（含 symlink 逃逸防护） | ✅ |
+| `sandbox: bwrap` 物化（含 `--clearenv` 与 `/opt/srcos/bin`） | ✅ |
+| `sandbox: none` 降级（并在实例记录里标注） | ✅ |
+| 资源限制：`systemd-run --user --scope` 优先，`prlimit` 兜底 | ✅ |
+| 实例记录、日志分离、`--force`、松匹配 | ✅ |
+| 按任务分派的产物与 `.sign`（幂等粒度） | ✅ |
+| 数据 storage（`requires_storages`） | ⛔ Phase 2 —— 声明了会明确报错 |
+| `sandbox: apptainer` | ⛔ Phase 6 —— 声明了会明确报错 |
+| `kind: service` 的 ingress/healthcheck/生命周期 | ⛔ Phase 2 |
+| `doneWhen` 探针的轮询 | ⛔ Phase 2（字段已解析并校验） |
+| `internal.executor: qsubsge` 的交叉校验 | ✅（注册期拒绝非法组合） |

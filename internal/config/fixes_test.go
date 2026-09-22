@@ -168,7 +168,6 @@ func TestSafeDialContext(t *testing.T) {
 	}
 }
 
-
 func TestLoadUserConfigDefaultServiceValid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alice.yaml")

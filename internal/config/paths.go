@@ -53,6 +53,51 @@ func UsersDir(configDir string) string {
 	return filepath.Join(configDir, UsersDirName)
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// 数据目录（data/）—— 与 config/ 相邻，见 AGENTS.md「仓库卫生」
+// ─────────────────────────────────────────────────────────────────────────
+
+// DataDir returns <program directory>/data. It sits beside config/ so the
+// whole deployment is one directory to copy.
+func DataDir(configDir string) string {
+	return filepath.Join(filepath.Dir(configDir), "data")
+}
+
+// ToolsDir returns the default tool package root, <program directory>/tools.
+func ToolsDir(configDir string) string {
+	return filepath.Join(filepath.Dir(configDir), "tools")
+}
+
+// WorkspaceDir is the registered user's /workspace for one tool. Per user and
+// per tool: two tools never share a writable directory implicitly.
+func WorkspaceDir(configDir, user, toolID string) string {
+	return filepath.Join(DataDir(configDir), "ws", user, toolID)
+}
+
+// HomeDir is the registered user's *virtual* home. A SRCOS user has no system
+// account, so this directory is the only home it ever sees (ADR-021).
+func HomeDir(configDir, user string) string {
+	return filepath.Join(DataDir(configDir), "homes", user)
+}
+
+// JobsDir is the submission drop-box for one tool: <workspace>/jobs.
+// The directory *is* the queue (ADR-004).
+func JobsDir(configDir, user, toolID string) string {
+	return filepath.Join(WorkspaceDir(configDir, user, toolID), "jobs")
+}
+
+// InstancesDir holds the runtime instance records (data/instances).
+func InstancesDir(configDir string) string {
+	return filepath.Join(DataDir(configDir), "instances")
+}
+
+// LogsDir holds job logs. Logs live outside the workspace on purpose: the
+// sandbox mounts the workspace read-write, so a log kept there could be
+// rewritten by the tool being observed.
+func LogsDir(configDir, user, toolID string) string {
+	return filepath.Join(DataDir(configDir), "logs", user, toolID)
+}
+
 func UserConfigPath(configDir, username string) string {
 	return filepath.Join(UsersDir(configDir), username+".yaml")
 }

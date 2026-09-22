@@ -1,0 +1,59 @@
+schemaVersion: 1
+id: hello-fanout
+version: 0.1.0
+name: "Hello Fanout"
+description: "最小示例：把 N 个样本各写一个文件，演示样本级并行、幂等与产物声明"
+
+kind: task
+backend: local                # 内部用 local 并行（ata / xargs），所以本机执行即可
+sandbox: bwrap                # 无 root 的 mount/pid/ipc/uts 命名空间隔离
+entry: work.sh
+
+# 环境挂载（不是数据）：沙箱里没有 PATH 上的 ata，在这里显式声明。
+# 注意粒度：只挂那**一个二进制**，不挂 /Volumes/data/GOPATH/bin 整个目录
+# —— MountSpec 的粒度就是隔离的粒度（AGENTS.md）。
+# 目标必须放在 /opt/srcos/bin（沙箱 PATH 的第一项）：/usr、/bin、/lib 是
+# 只读绑定的，bubblewrap 无法在其中创建挂载点。
+# 换成其他机器时要改这里；找不到时 work.sh 会自动降级到 xargs。
+ro_mounts:
+  - host: /Volumes/data/GOPATH/bin/ata
+    sandbox_path: /opt/srcos/bin/ata
+
+interface:
+  inputs:
+    - name: samples
+      type: string
+      label: "样本列表（逗号分隔）"
+      description: "会被 fanout 成 N 个并行任务，每个样本产出一个 txt"
+      required: true
+      default: "S001,S002,S003,S004,S005"
+    - name: parallel
+      type: int
+      label: "并行度"
+      description: "样本级并行度；资源声明应 >= 该值"
+      default: 5
+      min: 1
+      max: 20
+    - name: prefix
+      type: string
+      label: "输出前缀"
+      default: "hello"
+  outputs:
+    - name: outs
+      type: directory
+      label: "输出目录"
+      provides: [S001.txt, S002.txt, S003.txt, S004.txt, S005.txt]
+
+requires_storages: []         # 本示例不需要共享数据
+
+resources:
+  cpu: 5                      # 聚合需求：5 个样本 × 1 核（与 interface.parallel 默认值一致）
+  memory: "5Gi"
+  walltime: "0:10:00"
+
+internal:
+  executor: local
+  parallelism: 5
+
+workspace:
+  init_from: workspace-template/

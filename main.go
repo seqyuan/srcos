@@ -133,6 +133,18 @@ func main() {
 		return
 	}
 
+	// tool / job manage the tool contract and the task queue; they carry their
+	// own flag sets (including --tools-dir) so they are handled before the
+	// shared option parser below.
+	if cmd == "tool" {
+		runToolCmd(args)
+		return
+	}
+	if cmd == "job" {
+		runJobCmd(args)
+		return
+	}
+
 	// Parse options
 	opts, err := parseOptions(args)
 	if err != nil {
