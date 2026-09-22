@@ -56,6 +56,9 @@ Options:
   --tools-dir <dir>       Tool package root containing <tool-id>/tool.yaml
                           (default: $SRCOS_TOOLS_DIR, then <program dir>/
                           srcos-tools, then <program dir>/tools)
+  --flows-dir <dir>       Flow package root containing <flow-id>/flow.yaml
+                          (default: $SRCOS_FLOWS_DIR, then <program dir>/
+                          srcos-flows)
   -V, --version           Show version
   -h, --help              Show this help
 
@@ -217,6 +220,9 @@ type options struct {
 	// <program dir>/srcos-tools, then <program dir>/tools" — see
 	// config.ResolveToolsDir.
 	toolsDir string
+	// flowsDir is the flow package root (the admin console's canvas reads and
+	// writes it). Empty means $SRCOS_FLOWS_DIR, then <program dir>/srcos-flows.
+	flowsDir string
 }
 
 func parseOptions(args []string) (options, error) {
@@ -241,6 +247,12 @@ func parseOptions(args []string) (options, error) {
 			}
 			opts.toolsDir = args[i+1]
 			i++
+		case "--flows-dir":
+			v, ok := next()
+			if !ok {
+				return opts, fmt.Errorf("option %s requires a value", a)
+			}
+			opts.flowsDir = v
 		case "-d", "--config-dir":
 			v, ok := next()
 			if !ok {
@@ -568,6 +580,7 @@ func runServer(opts options) {
 
 	srv := server.NewWithOptions(state, configDir, server.Options{
 		ToolsDir:   opts.toolsDir,
+		FlowsDir:   opts.flowsDir,
 		Version:    version,
 		Supervisor: supervisor,
 		Routes:     routes,

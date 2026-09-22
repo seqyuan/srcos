@@ -714,6 +714,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 ### Phase 4：云流程（**起步**）
 - [x] **`docs/flow-spec.md`** 契约冻结（2026-09-22）
 - [x] **`Flow` 注册 + 校验**（2026-09-22）：`internal/flow` —— DAG 无环（报出环路径）、
+      **连线即依赖**（下游必须直接或间接 depends_on 上游，否则可能先读不存在的路径）、
       节点 id 可寻址、`id@version` 精确匹配、节点工具必须 `kind: task`、
       连线地址/存在性/类型兼容（只允许路径流动）、一次报出全部问题 +
       闭环校验「每个必填输入有且仅有一个来源（默认值 / binding / expose）」+
@@ -737,13 +738,18 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] 把 `annopi` 注册为普通工具模块（逃生口）
 
 ### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer
-- [ ] `webui/` 工程骨架 + `make webui` + `//go:embed dist`
+- [x] **`webui/` 工程骨架 + `make webui` + `//go:embed dist`**（2026-09-22）：Vite + React + TS，
+      产物嵌入 `internal/web/dist/`；整个 dist/ 都是产物（只有 `.gitkeep` 进版本库），
+      所以没有 Node 的环境也能 `make build`（画布页退化为解释页）
 - [ ] `srcos://` 地址协议 + `/api/resources` 统一解析
       —— 地址语法**刻意与 `dsh-resource://` 同构**（含 `patterns` 认领规则），即路 D 保险（ADR-016）
 - [ ] viewer 注册表 + 首批 viewer：文本/代码（分页 + 行号）、Markdown、表格、图片、PDF、HTML（sandbox + 独立 origin）
 - [ ] **从 `interface` 自动生成参数表单**（fallback UI，含 `type: path` 渲染成路径选择器）（ADR-017）
 - [ ] 任务列表页 + 日志流（SSE）
-- [ ] 流程编排画布（拖拽 + 类型校验连线 + `expose` 推导）
+- [x] **流程编排画布**（2026-09-22）：`/admin/flows/<id>/edit` —— 拓扑分层自动布局（不写布局进契约）、
+      两步点连线、**服务端校验**（画布不重复实现类型规则）、检查器编辑取值来源/依赖/when/retry、
+      校验通过才写回 `flow.yaml`；只有这一页加载 React（ADR-012）。
+      **未做**：拖拽摆放（布局是推导的）、`expose` 的自动推导（现在是显式选择来源）
 - [ ] 用户自助生成 agent token 的页面
 
 ### Phase 5.5：dsh 集成（先 B 后 A）
@@ -827,3 +833,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **Phase 4 起步：流程契约 + 注册期校验** —— `docs/flow-spec.md`（schema / 类型兼容表 / 14 条校验 / 执行语义（规划）/ 与 annopi 对照 / 明确不做）+ `internal/flow`（DAG 拓扑序与环检测、连线类型兼容、必填输入闭环校验、`id@version` 精确匹配、节点必须 kind: task）+ `srcos flow list|validate` |
 | 2026-09-22 | **Phase 4 主体：流程跑起来了** —— `internal/flow` 补 planner（样本表解析、`expose`×表×连线 → 每个 (节点×样本) 的 job、类型强制转换、`--param` 与 `output.<名>` 两种来源）+ 运行记录/布局（`/flow` 内建挂载、run id、样本段）+ `internal/flowrun`（拓扑序、AND、`when: always`、失败即停、`.sign` 续跑、样本表留档）+ `srcos flow run\|resume\|status --dry-run` |
 | 2026-09-22 | **Phase 4 收尾**：流程级并发（`--concurrency`，默认 4，job 粒度）、`retry.max` 自动重试+退避（任务粒度）、`flow cancel`（跨进程标志文件 + 停掉在跑 job）、流程级配额；并发首次把运行时放到「两个 unit 同时开工」，因此修掉两个真 bug：**`BwrapProbe` 的缓存没有同步**（第二个调用者看到空的失败，报成无消息的 failed）与**任务不记录 pid**（`systemd-run --scope` 的名字由 systemd 生成，按引用停不掉） |
+| 2026-09-22 | **管理端流程画布**：`webui/`（Vite+React+TS，独立工程，产物 embed 进二进制，dist 全部 gitignore 只留 .gitkeep 所以无 Node 也能构建）+ `/admin/flows/<id>/edit` + `/api/admin/flows`（list/get/put/validate，仅管理员，路径由 id 推导）+ 拓扑分层自动布局 + 两步点连线（**服务端校验**，画布不重复实现类型规则）；顺带补一条契约规则：**连线即依赖**（画布自动补 depends_on，服务端拒绝手工删掉的情况） |

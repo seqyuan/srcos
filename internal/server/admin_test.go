@@ -15,6 +15,7 @@ import (
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/web"
 )
 
 // adminGateway builds a gateway with one admin (root), one ordinary user
@@ -211,5 +212,63 @@ func TestHandEditedPolicyIsPickedUpWithoutARestart(t *testing.T) {
 	srv.reloadPolicyIfChanged()
 	if !policy.Allowed("nobody", "web") {
 		t.Fatal("a broken file must not change the in-memory policy")
+	}
+}
+
+// The canvas page is the one page served from the built frontend (ADR-012); the
+// rest of the console stays a Go template. Both must exist and be admin-only.
+func TestFlowEditorPageAndAssets(t *testing.T) {
+	srv := adminGateway(t)
+
+	// The page is served to an admin. With the frontend built, the flow id is
+	// injected as bootstrap state (the bundle cannot know which flow it is
+	// looking at); without a build, the page explains how to make one — both are
+	// valid deployments, and `make build` must work without Node.
+	rec := adminGet(t, srv, "/admin/flows/scrna/edit", "root")
+	if rec.Code != 200 {
+		t.Fatalf("editor page = %d %s", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if web.UIBuilt() {
+		for _, want := range []string{"__SRCOS__", `"flowId":"scrna"`, `"user":"root"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the editor shell is missing %s", want)
+			}
+		}
+	} else if !strings.Contains(body, "流程画布未构建") || !strings.Contains(body, "make webui") {
+		t.Errorf("without a build the page must say how to make one:\n%s", body)
+	}
+	// A flow id that is not a slug is a 404, not a path into the filesystem.
+	if rec := adminGet(t, srv, "/admin/flows/..%2f..%2fetc/edit", "root"); rec.Code != 404 {
+		t.Fatalf("a path-shaped flow id = %d", rec.Code)
+	}
+	// Non-admins are redirected, like every other console page.
+	if rec := adminGet(t, srv, "/admin/flows/scrna/edit", "alice"); rec.Code != http.StatusFound {
+		t.Fatalf("non-admin editor page = %d", rec.Code)
+	}
+
+	// The assets endpoint serves whatever was built; with no build in the
+	// repository it fails closed (404) rather than serving a directory listing.
+	uiGet := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		out := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(out, req)
+		return out
+	}
+	if web.UIBuilt() {
+		shell := uiGet("/ui/")
+		if shell.Code != 200 || !strings.Contains(shell.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("the shell = %d %q", shell.Code, shell.Header().Get("Content-Type"))
+		}
+		if got := uiGet("/ui/assets/nonexistent.js"); got.Body.String() != shell.Body.String() {
+			t.Fatal("an unknown path under /ui/ must fall back to the app shell (it is a single-page app)")
+		}
+		// Built assets are content-hashed, so they may be cached hard; the shell
+		// must not be, or a rebuilt bundle would not be picked up.
+		if cc := shell.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Fatalf("shell cache-control = %q", cc)
+		}
+	} else if got := uiGet("/ui/"); got.Code != 404 {
+		t.Fatalf("without a build the asset endpoint must 404, got %d", got.Code)
 	}
 }

@@ -815,7 +815,7 @@ curl -b cj -X POST http://gw:30152/api/admin/instances/<id>/stop # 等价于 src
 curl -b cj http://gw:30152/api/admin/instances/<id>/logs?tail=200
 ```
 
-### 流程（`flow.yaml`，Phase 4 起步）
+### 流程（`flow.yaml`，Phase 4）
 
 流程 = **把已注册工具按 `output → input` 连成一张 DAG**：管理员不写命令、不写代码，
 用户只填 `expose` 出来的参数 + 一张样本表。契约见 [`docs/flow-spec.md`](docs/flow-spec.md)。
@@ -865,6 +865,19 @@ srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑�
 - **取消**：`flow cancel <run-id>` 写一个标志文件让调度器停止投递，并停掉该运行中还在跑的任务
   （跨进程可用）。
 - **配额照旧**：流程不是绕过 `grant` 聚合配额的路子，并发启动也一样被拦。
+
+**画布**（`/admin/flows/<流程>/edit`，仅管理员）：把流程画出来看、并且**连线**。
+
+- 节点按**拓扑分层**自动排布（列 = 层，行 = 层内顺序）：图的形状就是它的执行顺序，不需要手工摆坐标，
+  也不需要把布局写进 `flow.yaml`（契约里不为 UI 加字段）。
+- **连线两步点**：先点上游输出端口（右侧圆点），再点下游输入端口。合法性由**服务端**校验
+  （`POST /api/admin/flows/validate` 跑的就是 CLI 那套 `internal/flow` 校验）—— 画布不自己实现类型规则，
+  所以两边永远一致；画线时会自动补上 `depends_on`（连线即依赖）。
+- 右侧检查器编辑每个输入的**取值来源**（工具默认值 / 用户运行时填 / 样本表列 / 上游产物 / 本节点产物路径）、
+  依赖、`when`、`retry`。
+- 保存写回 `flow.yaml`（校验通过才落盘），CLI 读到的就是画布画的同一份文件。
+- 前端是独立的 Vite 工程（`webui/`，ADR-012：**只有这一页**加载 React）：`make webui` 构建并嵌入二进制；
+  没有 Node 的环境照样 `make build`，画布页会提示去构建，CLI 不受影响。
 
 ### 工具开发者
 

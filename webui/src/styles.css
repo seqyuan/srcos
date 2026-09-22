@@ -1,0 +1,65 @@
+:root {
+  --bg: #f5f5f7; --card: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
+  --border: #e5e5ea; --accent: #3b6ef5; --accent-hover: #2f5fe0;
+  --danger: #d34545; --ok: #1a7f37; --warn: #9a6700;
+  --r: 12px; --shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+       padding: 16px 20px; background: var(--card); border-bottom: 1px solid var(--border); }
+.top h1 { font-size: 17px; margin: 0 0 4px; }
+.top .muted { margin: 0; color: var(--muted); font-size: 12.5px; }
+.actions { display: flex; gap: 8px; align-items: center; }
+.actions select, .actions button { height: 34px; border-radius: 999px; border: 1px solid var(--border);
+       background: var(--card); color: var(--text); padding: 0 14px; font-size: 13px; cursor: pointer; }
+.actions button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+.actions button.primary:disabled { opacity: 0.5; cursor: default; }
+.actions button.danger { color: var(--danger); }
+.link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; text-decoration: none; }
+.status { padding: 10px 20px; font-size: 12.5px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.status.bad { color: var(--danger); background: #fdf3f3; white-space: pre-wrap; }
+.status.warn { color: var(--warn); }
+.body { display: flex; flex: 1; min-height: 0; }
+.canvas-wrap { flex: 1; overflow: auto; position: relative; }
+.canvas { display: block; }
+.banner { position: sticky; top: 0; z-index: 5; padding: 8px 14px; font-size: 12.5px;
+          background: #eef3ff; border-bottom: 1px solid var(--border); }
+.banner.bad { background: #fdf3f3; color: var(--danger); white-space: pre-wrap; }
+.banner.info { color: var(--accent); }
+.node rect { fill: var(--card); stroke: var(--border); stroke-width: 1.5; }
+.node.selected rect { stroke: var(--accent); stroke-width: 2; }
+.node text { fill: var(--text); }
+.node .title { font-size: 13px; font-weight: 650; }
+.node .sub { font-size: 12px; fill: var(--muted); }
+.node .meta { font-size: 11px; fill: var(--muted); }
+.node { cursor: pointer; }
+.port { cursor: crosshair; }
+.port circle.in { fill: #fff; stroke: #8a8a8e; stroke-width: 1.5; }
+.port circle.in.ready { fill: #eef3ff; stroke: var(--accent); }
+.port circle.out { fill: var(--accent); stroke: none; }
+.port-label { font-size: 10.5px; fill: var(--muted); }
+.port-label.end { text-anchor: end; }
+.wire path { fill: none; stroke: #8a8a8e; stroke-width: 1.6; }
+.wire .wire-hit { stroke: transparent; stroke-width: 14; }
+.wire.selected path { stroke: var(--accent); stroke-width: 2.4; }
+.legend { display: flex; gap: 14px; align-items: center; padding: 10px 16px; color: var(--muted); font-size: 12px; }
+.inspector { width: 340px; border-left: 1px solid var(--border); background: var(--card);
+             padding: 16px; overflow: auto; }
+.inspector h2 { font-size: 15px; margin: 0 0 2px; }
+.inspector h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+                color: var(--muted); margin: 18px 0 8px; }
+.inspector label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.inspector input, .inspector select { width: 100%; height: 32px; margin-top: 4px; padding: 0 8px;
+       border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px; }
+.inspector .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+table.io { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.io td { padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.req { color: var(--danger); margin-left: 2px; }
+.muted { color: var(--muted); font-size: 12px; }
+.outputs { list-style: none; padding: 0; margin: 0; font-size: 12.5px; }
+.outputs li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.outputs .path { color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; }

@@ -28,11 +28,17 @@ Thumbs.db
 /config/
 /data/
 
-# Build output of the embedded frontend bundle (webui/ → internal/web/dist/)
-internal/web/dist/
+# The frontend bundle is a build product: only the .gitkeep that keeps the
+# //go:embed directory present is committed, so a checkout builds without Node
+# (the canvas page then explains how to build it).
+internal/web/dist/*
+!internal/web/dist/.gitkeep
 
 # WeChat draft articles (公众号软文)
 docs/公众号软文*
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# 前端工程依赖（webui/，见 Makefile 的 webui 目标）
+webui/node_modules/

@@ -134,6 +134,9 @@ func NewRunID(flowID string, now time.Time) string {
 	return fmt.Sprintf("%s-%s-%s", slug(flowID), stamp, hex.EncodeToString(b[:]))
 }
 
+// ValidFlowID reports whether an id may be used as a directory name for a flow.
+func ValidFlowID(id string) bool { return idRe.MatchString(strings.TrimSpace(id)) }
+
 // ValidRunID reports whether an id may be used as a path segment.
 func ValidRunID(id string) bool {
 	if id == "" || len(id) > 80 {

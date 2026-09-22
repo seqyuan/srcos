@@ -380,6 +380,15 @@ func (f *Flow) ValidateAgainst(resolve func(id, version string) (*tool.Tool, err
 		if err := compatible(out.Type, in); err != nil {
 			bad("%s: %s.%s (%s) → %s.%s: %v", where, fromNode, fromName, out.Type, toNode, toName, err)
 		}
+		// A wire carries the upstream's *output path*, which only exists once the
+		// upstream has run. So a binding is also an ordering statement: without a
+		// dependency the downstream could start first and read a path that is not
+		// there yet. (The dependency may be transitive — an intermediate step in
+		// between does not remove the file.)
+		if !dependsTransitively(f, toNode, fromNode) {
+			bad("%s: %s reads %s's output but does not depend on it — add %q to %s's depends_on",
+				where, toNode, fromNode, fromNode, toNode)
+		}
 	}
 
 	// ── 暴露 ──────────────────────────────────────────────────────────
@@ -550,6 +559,37 @@ func (f *Flow) SampleFields() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// dependsTransitively reports whether `node` depends on `target`, directly or
+// through other nodes.
+//
+// A cycle cannot appear in a validated flow, but this walks with a visited set
+// anyway: it also runs while the graph is still being validated, where a cycle
+// is exactly the kind of thing being looked for.
+func dependsTransitively(f *Flow, node, target string) bool {
+	if node == target {
+		return false
+	}
+	deps := map[string][]string{}
+	for _, n := range f.Nodes {
+		deps[n.ID] = n.DependsOn
+	}
+	seen := map[string]bool{node: true}
+	queue := append([]string{}, deps[node]...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if next == target {
+			return true
+		}
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		queue = append(queue, deps[next]...)
+	}
+	return false
 }
 
 // findCycle returns a cycle as a node path, or nil.

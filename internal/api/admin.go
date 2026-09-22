@@ -43,6 +43,13 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
+	// Flows have their own file (the management surface's write half is the
+	// canvas): /api/admin/flows...
+	if strings.HasPrefix(path, "/flows") {
+		h.adminFlows(w, r)
+		return true
+	}
+
 	switch {
 	case path == "/instances" && r.Method == http.MethodGet:
 		instances, err := h.adminInstances(r)

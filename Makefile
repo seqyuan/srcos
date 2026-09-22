@@ -18,12 +18,17 @@ vet:
 fmt:
 	gofmt -w .
 
-# 前端包（文件预览 + 流程 DAG 编辑器），按 ADR-012 的折中方案单独构建，
-# 产物输送到 internal/web/dist/ 由 //go:embed 打进同一个二进制。
-# webui/ 于 Phase 5 建立；在此之前此目标只给出提示，不阻断构建。
+# 前端包（管理端流程画布），按 ADR-012 的折中方案单独构建：产物输送到
+# internal/web/dist/，由 //go:embed 打进同一个二进制。只有画布页加载它，
+# 其余页面仍是 Go 模板。
+#
+# `make build` 不依赖这个目标：internal/web/dist/ 里有一个占位 index.html 进版本库，
+# 没有 Node 的环境照样能构建（画布页会提示去跑 make webui）。
 webui:
 	@if [ -f webui/package.json ]; then \
-	  cd webui && pnpm install --frozen-lockfile && pnpm build; \
+	  cd webui && (pnpm install --frozen-lockfile || pnpm install) && pnpm build && cd ..; \
+	  mkdir -p internal/web/dist; \
+	  touch internal/web/dist/.gitkeep; \
 	else \
-	  echo "webui/ 尚未建立（Phase 5），跳过前端构建"; \
+	  echo "webui/ 尚未建立，跳过前端构建"; \
 	fi

@@ -105,6 +105,23 @@ func ToolsDir(configDir string) string {
 	return filepath.Join(filepath.Dir(configDir), "tools")
 }
 
+// ResolveFlowsDir picks the flow package root for a deployment.
+//
+// It mirrors ResolveToolsDir: $SRCOS_FLOWS_DIR, then the repository layout, then
+// the install layout. Flows live beside tools so a checkout works unconfigured.
+func ResolveFlowsDir(configDir string) string {
+	if env := strings.TrimSpace(os.Getenv("SRCOS_FLOWS_DIR")); env != "" {
+		return env
+	}
+	for _, candidate := range []string{"srcos-flows", "flows"} {
+		path := filepath.Join(filepath.Dir(configDir), candidate)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return filepath.Join(filepath.Dir(configDir), "srcos-flows")
+}
+
 // ResolveToolsDir picks the tool package root for a deployment.
 //
 // Order: $SRCOS_TOOLS_DIR, then <program dir>/srcos-tools (the repository

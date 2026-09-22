@@ -204,3 +204,30 @@ func (r *Run) Summary() string {
 	}
 	return out
 }
+
+// SaveFlow writes a flow.yaml, atomically and with the same header the CLI and
+// the editor use.
+//
+// It is the write half of the contract: the canvas in the admin console edits a
+// flow through this function, so a flow an administrator drew and a flow someone
+// typed by hand are the same file, validated by the same code.
+func SaveFlow(path string, f *Flow) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(f)
+	if err != nil {
+		return err
+	}
+	header := "# SRCOS 流程定义（flow.yaml，契约见 docs/flow-spec.md）\n" +
+		"#\n" +
+		"# 流程只引用已注册的工具：节点是工具的一次运行，边是 output → input 的连线。\n" +
+		"# 流程里没有 shell、没有模板、不声明 backend —— 那些属于工具。\n" +
+		"#\n" +
+		"# 由 `srcos flow` 或管理端画布维护；保存前会跑同一套注册期校验。\n\n"
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append([]byte(header), data...), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

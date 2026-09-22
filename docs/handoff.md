@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 基本完成，**Phase 4 完成**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/并发调度/重试/取消/续跑）完成）
+> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 起步 = 流程画布**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/并发调度/重试/取消/续跑/画布）完成）
 
 ---
 
@@ -43,7 +43,11 @@
 流程还学会了**自己收敛**：并发上限（`--concurrency`，默认 4）、失败自动重试（`retry.max`，任务粒度、30s→20m 退避）、
 `flow cancel`（跨进程）、按 grant 配额拦（并发也拦得住）。
 
-下一步：**MCP 第二期**（`submit` / `run_flow` / `cancel`，需先定 `submit` scope 粒度）或 **管理端画布**。
+管理员还能**画流程**：`/admin/flows/<id>/edit`（webui/ Vite+React，只有这一页加载它 —— ADR-012），
+拓扑分层自动布局、两步点连线、**服务端校验**（画布不重复实现类型规则）、校验通过才写回 `flow.yaml`。
+
+下一步：**MCP 第二期**（`submit` / `run_flow` / `cancel`，需先定 `submit` scope 粒度）或 Phase 5 的其它前端件
+（viewer / 任务列表 / token 自助页）。
 
 ---
 
@@ -101,7 +105,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 代理层接入动态路由表：/proxy/<user>/<tool>/ 可达 · 实例优先于卡片   │
 │ ✅ 网关自查：启动 reconcile · 按 tick 回收 · 启动中/失败给页面而非 404 │
 │ ✅ 管理端：/admin 控制台 + /api/admin/*（实例总览/强制停止/授权，仅管理员）│
-│ ✅ 流程：契约/校验/展开/并发调度/重试/取消/续跑（flow run|resume|status|cancel）│
+│ ✅ 流程：契约/校验/展开/并发调度/重试/取消/续跑 + 画布（/admin/flows/<id>/edit）│
 └─────────────────────────────────────────────────────────────────────┘
 ┌─ 运行层 ────────────────────────────────────────────────────────────┐
 │ ✅ local（bwrap 沙箱 + systemd-run --user 限额，prlimit 兜底）       │
@@ -134,6 +138,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
+| **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **流程的并发/重试/取消/配额** | `--concurrency 2` + 6 样本 × `sleep 3` → **9.4s**（顺序 18s），时间线显示恰好 2 个重叠；`retry: {max: 2}` + 故意失败一次的任务 → 日志 `retry … in 30s (attempt 1/2)` → 最终 succeeded，记录里 `units: {s01-x: 2}`；`flow cancel`（另一进程）→ 运行 `cancelled`、实例 `stopped`、`sleep 120` 被杀、调度器自行收敛、节点标 `skipped`；`--max-instances 1` + 并发 2 → 第二个任务被拒：`instance quota reached: you have 1 of 1 allowed for this tool; stop one first` |
 | **流程跑起来** | `srcos flow run --samples samples.csv scrna` → 2 节点 × 2 样本 = **4 个普通任务**（`job list` 里带 flow/run/node/sample 标签），按依赖顺序执行；下游 `qc` **真的读到了**上游 `count` 的产物（`clean.txt` = `counts.txt` 的内容，路径 `/flow/runs/<run>/nodes/count/s01-s001/outs`）；`nodes/*/.sign` 自动写好；`flow status` 列出运行；`flow resume` 两节点全 `skip (already done, signed)`；`flow run --dry-run` 打印每个 job 的参数与产物路径。失败路径：下游工具 `exit 3` → 该节点 `failed`（只提交了 1 个样本就停）、`when: always` 的 report 节点仍跑、普通下游 `strict` 标 `skipped`、退出码 1 |
 | **流程契约与校验** | `srcos flow list` 显示 3 节点 / 3 层 / 样本列 `fastq_dir,sample_id`；`flow validate` 对合法流程给出拓扑序（`count → qc → report(when=always)`）；对坏流程**一次报出 8 个问题**（含环 `a → c → b → a`、未知输出、非法 `from`、4 个未满足的必填输入）；`count@9.9.9` 版本不匹配与 `kind: service` 当节点各自被点名；退出码 1 |
@@ -147,7 +152,10 @@ UI 造起来便宜了 → UI 不再是护城河
 
 - ⛔ **流程级审计** —— 现在只有实例记录 + `flowrun.yaml`（谁在何时跑了哪个流程、用了哪个版本、
   什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
-- ⛔ **管理端画布** —— Phase 5；DAG 校验（`internal/flow`）与运行记录已就绪，剩下纯前端
+- ⛔ **画布的拖拽摆放与 `expose` 自动推导** —— 布局现在是拓扑推导（不写进契约），
+  `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
+- ⛔ **Phase 5 其它前端件** —— viewer（文本/Markdown/表格/图片/PDF/HTML）、`srcos://` 资源协议、
+  任务列表 + 日志流、agent token 自助页
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **网关侧起停服务**（`svc start` 仍只在 CLI；管理端能停、不能起）—— admin API 的下一步
 - ⛔ **storage 声明的管理端编辑**（`storages.yaml` 目前只有 CLI/手写）
@@ -174,7 +182,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~6~~ | ~~**Flow 调度器**~~：✅ **主体已完成**（样本展开 + 顺序调度 + `.sign` 续跑 + `flow run\|resume\|status`） | 契约、校验、展开、调度、续跑都通了；剩余收尾见下 |
 | ~~7~~ | ~~**Phase 4 收尾**~~：✅ **已完成**（并发、重试、取消、配额） | Phase 4 收工 |
 | **8** | **MCP 第二期**（`submit` / `cancel` / `run_flow`，需先定 `submit` scope 的粒度：roadmap §8 #9） | 让 agent 真的能"执行用 SRCOS"，而不只是看 |
-| **9** | 管理端画布（`/admin/flows/:id`，只在该页加载 React —— ADR-012） | 有了 DAG 校验与运行记录，画布是纯前端工作 |
+| ~~9~~ | ~~**管理端画布**~~：✅ **已完成**（`webui/` Vite+React，只在该页加载；服务端校验；校验通过才写回） | 顺带补了一条契约规则：连线即依赖 |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -222,6 +230,8 @@ UI 造起来便宜了 → UI 不再是护城河
 | **MCP 端点上 session cookie 不是凭据**（别把浏览器那套搬过来） | `/mcp` 只认 `Authorization: Bearer <agent token>`：程序没有浏览器，混用会让「谁在调用」变得不可审计；工具自建的 UI 想用只读数据，就签发自己的 token（`srcos_read_file` 那套范围是现成的只读后端） |
 
 | **并发第一次上线就暴露了两个真 bug**（2026-09-22，流程并发） | ① `sandbox.BwrapProbe` 的缓存是裸 `done bool`：第二个并发调用者看到 `done=true` 但结果还没写，于是拿到 **空 path + 空 why** → `BuildInner` 造出 `errors.New("")` → 实例记录成 `failed`、error 为空（"state failed"），完全查不出原因。修法：`sync.Once` + 失败时绝不允许空消息（`why` 为空也要给一句）。**教训：空消息的错误是最坏的失败模式** ② 任务用 `systemd-run --user --scope` 启动，**scope 的名字是 systemd 生成的**，`systemctl --user stop <我们记的 ref>` 永远 "not loaded"（还被当成成功！），而降级模式下 `processHandle` 又不报 pid → 任务根本停不掉（`flow cancel` 会假装停成功）。修法：`processHandle` 也实现 `PidReporter`，任务记录 pid + starttime，停止统一走「按引用 → 回退到记录里的 pid（校验 starttime）」 |
+
+| **画布暴露的语义漏洞：连线不等于依赖**（2026-09-22） | 在画布上给一个没有 `depends_on` 的节点连线时，它仍然留在第 1 层 —— 调度器可以先跑它去读一个**还不存在**的上游产物路径。修法：契约加一条规则（`flow-spec` §2.4 规则 5）**连线即依赖**：下游必须直接或间接 `depends_on` 上游，注册期校验；画布在画线时**自动补上** `depends_on`。教训：**UI 是检验契约的探针** —— 手写 YAML 的人不会忘，鼠标连线的人会 |
 
 ### 4.3 契约与幂等
 
@@ -432,7 +442,8 @@ internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全
 internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
   └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 未就绪状态页
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
-  └ admin.go                /api/admin/*（仅管理员）：实例总览/强制停止/日志/授权/组/管理员
+  ├ admin.go                /api/admin/*（仅管理员）：实例总览/强制停止/日志/授权/组/管理员
+  └ flows.go                /api/admin/flows*：画布的读/写/校验（校验复用 internal/flow）
 internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（生成式表单）
   ├ admin.go                /admin 控制台（服务端渲染 + 少量 JS 动作）
   └ service_status.go       「启动中」进度页 / 失败说明页
@@ -454,7 +465,8 @@ internal/runtime/           编排层
   │                         （Reaper.LastActive：由调用方提供「最近一次流量」）
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/route/             动态路由表（编排层与代理层唯一的耦合点；ParseTarget 只收环回端点）
-internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检测）+ 14 类注册期校验
+webui/                      管理端画布（Vite + React + TS，产物嵌入 internal/web/dist/）
+internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检测）+ 15 类注册期校验
   ├ plan.go                 样本表解析 + 展开成 (节点×样本) 的 job（参数四种来源）
   ├ layout.go               run 目录布局（/flow 内建挂载；路径由 run id 推导，无模板）
   └ record.go               运行记录（flowrun.yaml）+ .sign 逃生口
@@ -505,12 +517,12 @@ scripts/probe-env.sh        无 root 环境探测
 
 ```
 读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 8 项
-（MCP 第二期：submit / run_flow / cancel，需先定 submit scope 粒度）或第 9 项（管理端画布）开始。
+（MCP 第二期：submit / run_flow / cancel，需先定 submit scope 粒度）或 Phase 5 的其它前端件开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。
 如果要**换方向**，先说清要改哪一条不变式（`AGENTS.md`）或哪一条 ADR，
 因为按仓库约定，架构回退必须先改文档再改代码。
 
-> 上一轮（Phase 4 收尾：并发/重试/取消/配额）的收尾：`make vet && go test ./... -race` 全绿；
-> 端到端验证见 §2.2 的「流程的并发/重试/取消/配额」行。
+> 上一轮（管理端流程画布）的收尾：`make vet && go test ./... -race` 全绿（前端另跑 `make webui`）；
+> 端到端验证见 §2.2 的「流程画布」行（Playwright 驱动真实浏览器）。

@@ -64,6 +64,9 @@ type Options struct {
 	// Runner is the supervisor, used by the management surface to stop any
 	// user's instance and to sample what it is using.
 	Runner *runtime.Runner
+	// FlowsDir is the flow package root, for the admin console's canvas. Empty
+	// disables the flow endpoints.
+	FlowsDir string
 }
 
 // Handler handles REST API requests for service management.

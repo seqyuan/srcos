@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -459,22 +458,13 @@ func printFlowSummary(f *flow.Flow) {
 	}
 }
 
-// resolveFlowsDir mirrors config.ResolveToolsDir for flows: an explicit flag,
-// then $SRCOS_FLOWS_DIR, then the repository layout, then the install layout.
+// resolveFlowsDir is the flag override on top of config.ResolveFlowsDir, so the
+// CLI, the gateway and the editor all look in the same place.
 func resolveFlowsDir(override, configDir string) string {
 	if override != "" {
 		return override
 	}
-	if env := strings.TrimSpace(os.Getenv("SRCOS_FLOWS_DIR")); env != "" {
-		return env
-	}
-	for _, candidate := range []string{"srcos-flows", "flows"} {
-		path := filepath.Join(filepath.Dir(configDir), candidate)
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-	return filepath.Join(filepath.Dir(configDir), "srcos-flows")
+	return config.ResolveFlowsDir(configDir)
 }
 
 // toolResolver builds the lookup a flow validation needs: a tool by id, and —

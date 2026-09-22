@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/flow"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/mcp"
@@ -68,6 +70,8 @@ type Server struct {
 	// reclaims the ones whose lifetime is over. Nil means this process only
 	// serves (a read-only or single-purpose deployment).
 	runner *runtime.Runner
+	// flowsDir is the flow package root (the canvas reads and writes it).
+	flowsDir string
 	// grantsPath is where the authorization policy lives, watched for hand
 	// edits; policyMtime is the last version read (guarded by policyMu).
 	grantsPath  string
@@ -92,6 +96,9 @@ type Options struct {
 	Grants api.GrantChecker
 	// Runner executes tool instances (used by the admin surface in Phase 3).
 	Runner *runtime.Runner
+	// FlowsDir is the flow package root (for the admin console's canvas).
+	// Empty means "look beside the binary".
+	FlowsDir string
 	// Version is the build version reported to MCP clients in `initialize`.
 	// Empty means "dev".
 	Version string
@@ -136,6 +143,10 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	toolsDir := opts.ToolsDir
 	if toolsDir == "" {
 		toolsDir = config.ResolveToolsDir(configDir)
+	}
+	flowsDir := opts.FlowsDir
+	if flowsDir == "" {
+		flowsDir = config.ResolveFlowsDir(configDir)
 	}
 	mcpVersion := opts.Version
 	if mcpVersion == "" {
@@ -228,6 +239,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		Policy:      policy,
 		PolicyPath:  config.GrantsPath(configDir),
 		Runner:      opts.Supervisor,
+		FlowsDir:    flowsDir,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},
@@ -239,6 +251,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		sessionSecret: state.Auth.SessionSecret,
 		siteTitle:     siteTitle,
 		toolsDir:      toolsDir,
+		flowsDir:      flowsDir,
 		storages:      storages,
 		grants:        grants,
 		agentTokens:   agentTokens,
@@ -476,6 +489,11 @@ func (s *Server) Handler() http.Handler {
 	// The management console (admins only; non-admins are redirected, not shown
 	// a bare 403, because the page is not a secret).
 	mux.HandleFunc("/admin", s.handleAdminPage)
+	mux.HandleFunc("/admin/", s.handleAdminSubPage)
+
+	// The built frontend (webui/, Vite): only the canvas page loads it, and it
+	// is embedded in this binary (ADR-012).
+	mux.HandleFunc("/ui/", s.handleUI)
 
 	// Root route (dashboard/login page)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1358,6 +1376,80 @@ func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Groups:       snapshot.Groups,
 		DefaultAllow: snapshot.DefaultAllow,
 	}))
+}
+
+// handleAdminSubPage serves the console's sub-pages (/admin/...).
+func (s *Server) handleAdminSubPage(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	policy, _ := s.grants.(*grant.Policy)
+	if policy == nil || !policy.IsAdmin(username) {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	// /admin/flows/<id>/edit is the canvas: the one page served from the built
+	// frontend. Everything else under /admin/ is the console itself.
+	rest := strings.TrimPrefix(r.URL.Path, "/admin/")
+	if id, ok := strings.CutPrefix(rest, "flows/"); ok {
+		if id, ok := strings.CutSuffix(id, "/edit"); ok && flow.ValidFlowID(id) {
+			sendHTML(w, 200, web.FlowEditorPage(s.siteTitle, username, id))
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
+// handleUI serves the built frontend (ADR-012: embedded, same binary).
+func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	assets := web.UIAssets()
+	if assets == nil {
+		http.NotFound(w, r)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/ui/")
+	if name == "" || strings.Contains(name, "..") {
+		name = "index.html"
+	}
+	if info, err := fs.Stat(assets, name); err != nil || info.IsDir() {
+		// A single-page app: unknown paths fall back to its shell.
+		name = "index.html"
+	}
+	data, err := fs.ReadFile(assets, name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Vite emits content-hashed asset names, so they can be cached hard; the
+	// shell must not be, or a rebuilt bundle would not be picked up.
+	if strings.HasPrefix(name, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	w.Header().Set("Content-Type", contentTypeFor(name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(data)
+}
+
+// contentTypeFor maps an extension to a content type. The set is deliberately
+// small: the gateway serves only what a built bundle contains.
+func contentTypeFor(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".js"), strings.HasSuffix(name, ".mjs"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(name, ".css"):
+		return "text/css; charset=utf-8"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(name, ".json"):
+		return "application/json"
+	case strings.HasSuffix(name, ".woff2"):
+		return "font/woff2"
+	default:
+		return "text/html; charset=utf-8"
+	}
 }
 
 // mcpHandler is the gateway's MCP endpoint: the read-only platform surface an

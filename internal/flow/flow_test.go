@@ -349,3 +349,41 @@ func TestSplitToolRef(t *testing.T) {
 		}
 	}
 }
+
+// A wire carries a path that only exists once the producer has run, so a binding
+// is also an ordering statement. This is not a style preference: without it the
+// scheduler is free to start the consumer first, and it would read a path that is
+// not there yet.
+func TestBindingRequiresADependency(t *testing.T) {
+	f := &Flow{
+		SchemaVersion: 1, ID: "wired", Version: "0.1.0", Name: "wired",
+		Nodes: []Node{
+			{ID: "count", Tool: "count"},
+			{ID: "qc", Tool: "qc"}, // no depends_on, but reads count's output
+		},
+		Bindings: []Binding{{From: "count.outputs.outs", To: "qc.inputs.input_dir"}},
+		Expose: []Expose{
+			{Node: "count", Input: "fastq_dir", From: "sample.x"},
+			{Node: "count", Input: "sample_id", From: "sample.y"},
+		},
+	}
+	err := f.ValidateAgainst(toolset(stdTools()))
+	if err == nil || !strings.Contains(err.Error(), "does not depend on it") {
+		t.Fatalf("error = %v, want the missing dependency named", err)
+	}
+
+	// Direct dependency: fine.
+	f.Nodes[1].DependsOn = []string{"count"}
+	if err := f.ValidateAgainst(toolset(stdTools())); err != nil {
+		t.Fatalf("a direct dependency must be enough: %v", err)
+	}
+
+	// Transitive dependency: also fine — an intermediate step does not remove the
+	// file the producer wrote.
+	f.Nodes = append(f.Nodes, Node{ID: "mid", Tool: "qc", DependsOn: []string{"count"}})
+	f.Nodes[1].DependsOn = []string{"mid"}
+	f.Bindings = append(f.Bindings, Binding{From: "count.outputs.outs", To: "mid.inputs.input_dir"})
+	if err := f.ValidateAgainst(toolset(stdTools())); err != nil {
+		t.Fatalf("a transitive dependency must be enough: %v", err)
+	}
+}
