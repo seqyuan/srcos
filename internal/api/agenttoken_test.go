@@ -21,6 +21,9 @@ func newTokenHarness(t *testing.T) (*toolsHarness, *agenttoken.Store) {
 	t.Helper()
 	h := newToolsHarness(t, nil)
 	store := agenttoken.New(config.AgentTokensPath(h.configDir))
+	// The gateway attaches the user registry, so a token whose account is gone
+	// is refused by the store itself.
+	store.AttachUserCheck(h.Registry)
 	h.opts.AgentTokens = store
 	return h, store
 }

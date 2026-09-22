@@ -80,18 +80,19 @@
 - HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`、`/tools`、`/tools/<id>`、`/assets/*`
 - 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
 - CLI：`tool` / `job` / `svc` / `grant` / `token` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
+- **MCP Server**（`/mcp`，read-only，agent token 认证）：9 个只读工具 + `interface → JSON Schema` 派生
 
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 18 个包 / 约 2.3 万行 / 约 350 个测试用例 / 30 个测试文件，`go vet` + `go test` 全绿
+- 20 个包 / 约 2.7 万行 / 约 400 个测试用例 / 36 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
 - 流程编排（`Flow` / `FlowRun`）—— Phase 4
-- **MCP Server**（`/mcp`，read-only）—— Phase 3.5（认证面 agent token 已完成）
+- ~~MCP Server（`/mcp`，read-only）~~ —— ✅ 完成（Phase 3.5）
 - 管理端页面（上架 / 授权 / 实例总览 / 强制停止）
 - **代理层接入动态路由表** —— 路由表已就绪且已测，但 `handleProxy` 仍只读静态卡片，
   所以 service 实例目前只能直连 endpoint，还不能通过网关访问
@@ -102,11 +103,8 @@
 
 ### 2.3 下一步
 
-见 §6 的 Phase 3.5 —— **MCP Server（read-only）**。
-认证面（agent token，`internal/agenttoken` + `srcos token` + `Authorization: Bearer`）已完成，
-剩下 `interface → MCP tool schema 自动派生` 与 `/mcp` 端点本身；
-其余前置件（机器可读 `interface`、`/api/paths`、`/api/jobs`）也已就绪。
-详细排序与理由见 [`handoff.md`](handoff.md) §3。
+Phase 3.5（MCP）已完成。下一步见 §6 与 [`handoff.md`](handoff.md) §3：
+**代理层接入动态路由表**（service 实例目前还不能通过网关访问）。
 
 ---
 
@@ -545,6 +543,21 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - **使用时间**写在 `data/agent-token-usage.yaml`（运行态、网关写、按 token 降频、
     首次使用即时落盘），与 CLI 写的 `config/agent-tokens.yaml` 分开两个文件、两个写入者。
     它是提示而不是审计日志（审计流仍是独立的待办项）。
+- **MCP 实现契约（2026-09-22 已完成第一期，`internal/mcp` + `internal/inspect`）**：
+  - **端点**：`POST /mcp`，Streamable HTTP，**无状态**（不发 `Mcp-Session-Id`）；响应一律
+    `application/json`（不用 SSE）；GET/DELETE 返回 405 + `Allow: POST`；通知（无 id）返回 202 空体；
+    批量数组明确拒绝（2025-06-18 已移除批量）。
+  - **协议版本**：`2025-06-18`，`initialize` 里客户端报的版本在支持集合内就回显（另含 2025-03-26 / 2024-11-05），
+    否则回自己的版本（规范要求）。capabilities 只声明 `tools`（`listChanged: false`）。
+  - **认证**：只认 `Authorization: Bearer`（agent token），session cookie 在 `/mcp` 无效；
+    无凭据 401 + `WWW-Authenticate: Bearer`；有 `Origin` 时必须同源（规范要求校验 Origin）。
+  - **错误分层**：协议错误用 JSON-RPC 错误码（未知方法 -32601、未知工具/坏参数 -32602、解析 -32700）；
+    工具**执行**失败（未授权、路径越界、找不到实例）返回 `result.isError = true` 的文本
+    —— 让 agent 看见原因并自己改正，而不是把它当成协议坏掉。
+  - **读范围**：全部走 `internal/inspect`（Jail 唯一入口、只暴露沙箱路径、宿主路径永不外泄）；
+    read_file 只覆盖 home / 指定工具的工作区 / 已声明 storage，二进制与逃逸一律拒绝。
+  - **一份实现三个前端**：`internal/inspect` 同时供 REST API、HTML 工具页、MCP 使用；
+    `internal/tool/schema.go` 的 JSON Schema 派生同时是 `inputSchema` 与后续画布/表单的共同来源。
 
 ### ADR-020：存储与路径 provider 化，并用闭环消除「选了却看不到」
 - **背景**：工具需要访问集群/云路径并把路径作为参数，用户在工具 UI 里预览后选择。
@@ -665,14 +678,17 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] 审计日志（含 agent token 调用）
 - [ ] `storages.yaml` 的 rw 配额
 
-### Phase 3.5：MCP Server（read-only，**招牌功能**）
-- [ ] 网关内置 `/mcp` 端点（Streamable HTTP），复用单二进制与认证
-- [ ] MCP tool schema 从 `Tool.interface` **自动派生**（ADR-018）
-- [ ] read-only tools：`list_tools` / `describe_tool` / `list_storages` / `list_paths` /
-      `list_instances` / `task_status` / `task_logs` / `list_artifacts` / `read_file`
-- [ ] agent token scope 校验（`read`）+ 调用审计
-- [ ] 预留 `submit` scope 与第二期接口（**不实现**）
-- [ ] 端到端验证：在 annovibe（或任意 MCP client）里让 agent 列工具、查任务状态、读产物
+### Phase 3.5：MCP Server（read-only，**招牌功能**）——✅ 完成（2026-09-22）
+- [x] 网关内置 `/mcp` 端点（Streamable HTTP），复用单二进制与认证：`internal/mcp`，无会话状态
+- [x] MCP tool schema 从 `Tool.interface` **自动派生**（ADR-018）：`Interface.JSONSchema()`，
+      在 `srcos_describe_tool` 的 `inputSchema` 里对外
+- [x] read-only tools（名字统一带 `srcos_` 前缀）：`srcos_list_tools` / `srcos_describe_tool` /
+      `srcos_list_storages` / `srcos_list_paths` / `srcos_list_instances` / `srcos_task_status` /
+      `srcos_task_logs` / `srcos_list_artifacts` / `srcos_read_file`
+- [x] agent token scope 校验（`read`）+ 每次调用一行审计日志
+- [x] 预留 `submit` scope 与第二期接口（**不实现**：不可签发，调用返回 -32602）
+- [x] 端到端验证：官方 Python MCP SDK 客户端连上 → initialize / list_tools / call_tool 全通
+- [x] 一份实现两个前端：`internal/inspect` 是只读答案的唯一实现，REST API、HTML 页面、MCP 共用
 
 ### Phase 4：云流程
 - [ ] `Flow` 注册 + 校验（类型兼容、DAG 无环、`executor`×`backend` 交叉校验）
@@ -766,3 +782,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
 | 2026-09-22 | **agent token 认证面完成（Phase 3.5 前置）** —— `internal/agenttoken`（只存 SHA-256、每次校验重读文件、失败关闭、使用时间落 `data/`）+ `srcos token create\|list\|revoke`（默认 90 天、`never`）+ `/api/*` 的 `Authorization: Bearer`（第一期只读，写接口需预留的 `submit`）+ 审计日志行 + `srcos del` 连带撤销；ADR-019 补「实现契约」小节 |
 | 2026-09-22 | **修降级模式的「停不掉」**：`StartService` 成功后丢掉活跃 Handle（`StopService` 只能按名停），无 user systemd 时服务停不了、却被标 stopped —— 表现是 `go test ./internal/runtime/` 每轮泄漏 5 个 python3（连跑 4 次耗尽测试端口池）。改为在实例记录里持久化子进程 `pid` + `starttime`，`Local.StopUnit/UnitAlive` 在降级模式用它（信号前校验 starttime 防 pid 复用）；顺带让 `Reconcile` 在降级模式也能区分活着/已死 |
+| 2026-09-22 | **Phase 3.5 完成：MCP Server（read-only）** —— `internal/mcp`（Streamable HTTP 无状态端点 /mcp、协议版本协商、JSON-RPC 错误分层、审计日志）+ `internal/inspect`（只读答案的唯一实现，REST API / HTML 页面 / MCP 三前端共用）+ `tool.Interface.JSONSchema()`（ADR-018 的第一处派生）+ 9 个只读工具（`srcos_` 前缀）；用官方 Python MCP SDK 客户端端到端验证；README 增补 MCP 章节与保留路径 |

@@ -103,13 +103,22 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 	}, nil
 }
 
-// mountSpec builds the sandbox view. Intent order:
-//
-//	builtin (workspace, virtual home, tool package) -> environment -> data storages
+// mountSpec builds the sandbox view for one unit.
+func (r *Runner) mountSpec(t *tool.Tool, p Paths) (*sandbox.Spec, error) {
+	return BuildSpec(t, p, r.opts.Storages)
+}
+
+// BuildSpec is the mount table for one unit: builtin (workspace, virtual home,
+// tool package) → environment → data storages.
 //
 // Every entry is an exact path. Binding a parent would hand the sandbox
 // everything under it that is group-readable (see package sandbox docs).
-func (r *Runner) mountSpec(t *tool.Tool, p Paths) (*sandbox.Spec, error) {
+//
+// It is exported because the read-only side needs the same mapping to turn a
+// sandbox path back into a host path (an instance's artifacts, a file read):
+// the mount table is the single definition of "what a tool can see", and a
+// second implementation would be a second answer to a security question.
+func BuildSpec(t *tool.Tool, p Paths, storages storage.Provider) (*sandbox.Spec, error) {
 	spec := &sandbox.Spec{}
 	for _, m := range []sandbox.Mount{
 		{HostPath: p.Workspace, SandboxPath: sandbox.PathWorkspace, Mode: sandbox.ReadWrite, Origin: "builtin"},
@@ -147,11 +156,11 @@ func (r *Runner) mountSpec(t *tool.Tool, p Paths) (*sandbox.Spec, error) {
 	// exactly what a `type: path` parameter may select from, so the three sets
 	// stay identical by construction.
 	if len(t.RequiresStorages) > 0 {
-		if r.opts.Storages == nil {
+		if storages == nil {
 			return nil, fmt.Errorf("tool %s requires storages %v but no StorageProvider is configured",
 				t.ID, t.RequiresStorages)
 		}
-		sts, err := r.opts.Storages.ForTool(t.RequiresStorages)
+		sts, err := storages.ForTool(t.RequiresStorages)
 		if err != nil {
 			return nil, err
 		}

@@ -48,7 +48,7 @@ func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, userna
 		writeJSON(w, 400, map[string]string{"error": "tool is required"})
 		return
 	}
-	t, err := h.findVisibleTool(username, body.Tool)
+	t, err := h.reader().VisibleManifest(username, body.Tool)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": err.Error()})
 		return
@@ -91,77 +91,24 @@ func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, userna
 	writeJSON(w, 201, submitJobResponse{JobID: id, Dir: dir, Tool: t.ID})
 }
 
-type jobView struct {
-	ID        string            `json:"id"`
-	Tool      string            `json:"tool"`
-	Kind      string            `json:"kind"`
-	Name      string            `json:"name"`
-	State     string            `json:"state"`
-	ExitCode  int               `json:"exitCode"`
-	Error     string            `json:"error,omitempty"`
-	Endpoint  string            `json:"endpoint,omitempty"`
-	RoutePath string            `json:"routePath,omitempty"`
-	Backend   string            `json:"backend"`
-	Sandbox   string            `json:"sandbox"`
-	Limiter   string            `json:"limiter,omitempty"`
-	Duration  string            `json:"duration,omitempty"`
-	StartedAt string            `json:"startedAt,omitempty"`
-	Outputs   []string          `json:"outputs,omitempty"`
-	Tags      map[string]string `json:"tags,omitempty"`
-}
-
 // handleListJobs returns this user's instances.
 //
-// Scoped to the session user on purpose: the instance list is a per-user view,
-// and a leak here would expose another user's activity and endpoints. The
+// Scoped to the user on purpose: the instance list is a per-user view, and a
+// leak here would expose another user's activity and endpoints. The
 // management-side view (all users) belongs behind the admin role in Phase 3.
 func (h *Handler) handleListJobs(w http.ResponseWriter, r *http.Request, username string) {
 	if h.opts.ConfigDir == "" {
-		writeJSON(w, 503, map[string]string{"error": "no instance store is configured on this host"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no instance store is configured on this host"})
 		return
 	}
-	all, err := runtime.ListInstances(h.opts.ConfigDir)
+	views, err := h.reader().Instances(username,
+		strings.TrimSpace(r.URL.Query().Get("tool")),
+		strings.TrimSpace(r.URL.Query().Get("kind")))
 	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
-	toolFilter := strings.TrimSpace(r.URL.Query().Get("tool"))
-	kindFilter := strings.TrimSpace(r.URL.Query().Get("kind"))
-
-	out := make([]jobView, 0, len(all))
-	for _, i := range all {
-		if i.User != username {
-			continue
-		}
-		if toolFilter != "" && i.Tool != toolFilter {
-			continue
-		}
-		if kindFilter != "" && i.Kind != kindFilter {
-			continue
-		}
-		v := jobView{
-			ID:        i.ID,
-			Tool:      i.Tool,
-			Kind:      i.Kind,
-			Name:      i.JobName,
-			State:     string(i.State),
-			ExitCode:  i.ExitCode,
-			Error:     i.Error,
-			Endpoint:  i.Endpoint,
-			RoutePath: i.RoutePath,
-			Backend:   i.Backend,
-			Sandbox:   i.Sandbox,
-			Limiter:   i.Limiter,
-			Duration:  i.Duration,
-			Outputs:   i.Outputs,
-			Tags:      i.Tags,
-		}
-		if !i.StartedAt.IsZero() {
-			v.StartedAt = i.StartedAt.Format("2006-01-02T15:04:05Z07:00")
-		}
-		out = append(out, v)
-	}
-	writeJSON(w, 200, map[string]any{"jobs": out})
+	writeJSON(w, 200, map[string]any{"jobs": views})
 }
 
 // checkQuota enforces the user's aggregate ceiling for a tool.

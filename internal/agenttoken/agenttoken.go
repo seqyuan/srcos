@@ -218,6 +218,7 @@ var (
 type Store struct {
 	path  string
 	usage *Usage
+	users UserLookup
 
 	mu     sync.RWMutex
 	tokens []Token
@@ -227,6 +228,14 @@ type Store struct {
 	// is re-read on every authenticated request, and a broken file must be
 	// reported once rather than once per request.
 	lastReloadErr string
+}
+
+// UserLookup answers "does this account still exist".
+//
+// It is a seam rather than an import so this package stays about tokens: the
+// caller passes whatever holds the user registry.
+type UserLookup interface {
+	GetUser(username string) *config.UserRecord
 }
 
 // New returns an empty store for a registry path. Call Reload to populate the
@@ -241,6 +250,15 @@ func (s *Store) Path() string { return s.path }
 // AttachUsage makes the gateway record "last used" times. The CLI does not
 // attach one: only the process answering requests knows when a token is used.
 func (s *Store) AttachUsage(u *Usage) { s.usage = u }
+
+// AttachUserCheck makes the store refuse a token whose user no longer exists.
+//
+// This is the fail-closed backstop for account deletion: `srcos del` revokes a
+// user's tokens, but a token file restored from a backup, or an account
+// recreated under the same name, must not resurrect access. Every front-end
+// (the REST API, the MCP server) gets the check by attaching once, so the
+// invariant lives in one place instead of once per endpoint.
+func (s *Store) AttachUserCheck(users UserLookup) { s.users = users }
 
 // Reload re-reads the registry, replacing the in-memory snapshot.
 //
@@ -338,6 +356,12 @@ func (s *Store) verifyAt(raw string, now time.Time) (Identity, error) {
 	if rec.Expired(now) {
 		return Identity{}, fmt.Errorf("agent token expired at %s",
 			rec.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+
+	// A credential must never outlive its account. The lookup is cheap: the
+	// registry scans on an interval, so this is a map read in steady state.
+	if s.users != nil && s.users.GetUser(rec.User) == nil {
+		return Identity{}, errors.New("agent token's user no longer exists")
 	}
 
 	if s.usage != nil {

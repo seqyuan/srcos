@@ -2,13 +2,14 @@ package agenttoken
 
 import (
 	"log"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"net/http/httptest"
+	"github.com/seqyuan/srcos/internal/config"
 )
 
 func newTestStore(t *testing.T) (*Store, string) {
@@ -24,6 +25,34 @@ func mustCreate(t *testing.T, s *Store, p CreateParams) (Token, string) {
 		t.Fatalf("Create: %v", err)
 	}
 	return rec, raw
+}
+
+// lookup is a UserLookup over a fixed set of names.
+type lookup map[string]bool
+
+func (l lookup) GetUser(username string) *config.UserRecord {
+	if l[username] {
+		return &config.UserRecord{Username: username}
+	}
+	return nil
+}
+
+// A credential must not outlive its account: `srcos del` revokes a user's
+// tokens, but a restored backup or a recreated name must not resurrect access.
+func TestTokenOfADeletedUserIsRefused(t *testing.T) {
+	s, _ := newTestStore(t)
+	_, raw := mustCreate(t, s, CreateParams{User: "alice"})
+	s.AttachUserCheck(lookup{"alice": true})
+
+	if _, err := s.verifyAt(raw, time.Now()); err != nil {
+		t.Fatalf("the account exists, so the token must work: %v", err)
+	}
+
+	s.AttachUserCheck(lookup{}) // alice is gone
+	_, err := s.verifyAt(raw, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "no longer exists") {
+		t.Fatalf("error = %v, want a deleted-user rejection", err)
+	}
 }
 
 // The whole point of the surface: a program presents a bearer token and gets

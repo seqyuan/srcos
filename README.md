@@ -414,6 +414,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
 | `/api/jobs` | 任务提交与状态列表 |
+| `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
 | `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
 | `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单 |
 | `/proxy/*` | 服务代理前缀 |
@@ -670,6 +671,10 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
 ./srcos token revoke -d /opt/srcos/config <id>
 curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 
+# MCP（agent 的接口）：网关内置 /mcp，任何 MCP 客户端指向它即可
+#   endpoint : http://<gateway>/mcp     （Streamable HTTP）
+#   header   : Authorization: Bearer srcos_...
+
 # 网关（新增 --tools-dir）
 ./srcos serve -d /opt/srcos/config --tools-dir srcos-tools --port 30152
 ```
@@ -691,6 +696,53 @@ curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 | `/tools` | 工具目录（只列出对你授权的工具） |
 | `/tools/<工具>` | **从 `interface` 自动生成的参数表单**；路径参数用 `srcos-path-picker` 原语控件 |
 | `/assets/srcos-path-picker.js` | 原语控件本体；工具自建 UI 一行标签即可复用 |
+
+### MCP（给 agent 的只读接口）
+
+网关内置 `/mcp`（Streamable HTTP，单二进制、无额外进程），任何 MCP 客户端把 endpoint 指过去、
+带上 agent token 即可。**第一期只读**：agent 能看、不能改。
+
+```bash
+# 用官方 Python SDK 试一下（任何 MCP 客户端等价）
+SRCOS_TOKEN=srcos_... python3 - <<'PY'
+import asyncio, os
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async def main():
+    headers = {"Authorization": "Bearer " + os.environ["SRCOS_TOKEN"]}
+    async with streamablehttp_client("http://127.0.0.1:30152/mcp", headers=headers) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            print((await s.initialize()).serverInfo)
+            for t in (await s.list_tools()).tools:
+                print(" -", t.name)
+asyncio.run(main())
+PY
+```
+
+工具清单（全部只读，名字带 `srcos_` 前缀以免与其他 MCP server 撞名）：
+
+| 工具 | 作用 |
+|---|---|
+| `srcos_list_tools` | 该用户可用的工具目录（id / kind / backend / 参数名） |
+| `srcos_describe_tool` | 一个工具的完整 `interface`，**外加由它派生的 JSON Schema**（`inputSchema` 字段） |
+| `srcos_list_storages` | 该用户的工具声明的数据根（沙箱路径），并标明哪些工具用得到 |
+| `srcos_list_paths` | 浏览某个 storage（范围由「工具 + 输入」决定，与 `/api/paths`、生成式表单完全一致） |
+| `srcos_list_instances` | 该用户的实例（任务/服务）列表 |
+| `srcos_task_status` | 单个实例状态 + 产物概览（接受实例 id / job id / 唯一后缀） |
+| `srcos_task_logs` | 实例日志尾部（SRCOS 自己写的那份，工具改不到） |
+| `srcos_list_artifacts` | 实例声明的产物（是否存在、大小、mtime） |
+| `srcos_read_file` | 读文本文件（限该用户的 home / 工作区 / 已声明 storage） |
+
+边界（写在实现里，不是约定）：
+
+- **认证只用 agent token**：session cookie 在 `/mcp` 上无效 —— 程序走程序的路。
+- **权限不放大**：token 以所属用户身份行事，Grant 授权照常生效，scope 只能收窄；
+  读不到别人的实例、日志、产物与路径。
+- **`read_file` 的范围**：`/home/<user>/...`、指定工具的工作区 `/workspace/...`、
+  已声明 storage 的沙箱路径。路径穿越、symlink 逃逸、宿主路径、`/tool/...` 一律拒绝。
+- **每次调用写一行审计日志**（用户 / token / 方法 / 工具名），撤销 token 后立即失效。
+- 第二期（`submit` / `cancel` / `run_flow`）需要独立签发的 `submit` scope —— 现在明确不可签发。
 
 ### 工具开发者
 

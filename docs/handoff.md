@@ -10,7 +10,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成；**agent token 认证面完成**）
+> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成；**agent token + MCP Server（只读）完成**）
 
 ---
 
@@ -18,14 +18,16 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，18 个包，约 2.3 万行，约 350 个测试用例），
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，20 个包，约 2.7 万行，约 400 个测试用例；36 个测试文件），
 在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了**工具平台**四层：
 工具契约、实例化运行时、存储 provider、授权模型。认证面现在有两扇门：
 浏览器的 session cookie，与程序（agent / MCP 客户端）的 agent token（`Authorization: Bearer`）。
 全部在 node01 上端到端实测过。
 
-下一步：**MCP Server（read-only）** —— 认证面已就绪（agent token），剩下 `interface → MCP schema 派生`
-与 `/mcp` 端点本身。它是"走向现代化"的招牌。
+**agent 面已经能用**：网关内置 `/mcp`（Streamable HTTP，只读，9 个 `srcos_*` 工具），
+官方 Python MCP SDK 客户端实测连得上、列得出、查得到、读得回。
+
+下一步：**代理层接入动态路由表**（service 实例目前还不能通过网关访问，见 §3.1 第 3 项）。
 
 ---
 
@@ -94,7 +96,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ HTTP 面：/api/tools · /api/tools/<id> · /api/paths · /api/jobs   │
 │ ✅ 生成式表单 + srcos-path-picker 原语控件                          │
 │ ✅ agent token：Bearer 认证 · 只存哈希 · 只读 scope · 立即撤销       │
-│ ⛔ MCP Server：Phase 3.5（下一步）                                 │
+│ ✅ MCP Server：/mcp（Streamable HTTP）· 9 个只读工具 · 无状态        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -113,12 +115,12 @@ UI 造起来便宜了 → UI 不再是护城河
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
+| **MCP（agent 面）** | 官方 Python MCP SDK 客户端连 `/mcp` → `initialize`（`srcos dev`、协议 2025-06-18）/ `list_tools`（9 个）/ `call_tool`：列工具、列 storage（范围=工具声明）、浏览 `/data/ref`、读 `/data/ref/genes.tsv`、查实例状态与日志、列产物全部正确；`read_file /etc/passwd` → `isError`「not under any mount」；无 token → 401 + `WWW-Authenticate`；GET → 405；通知 → 202 空体；每次调用一行审计日志；撤销 token 后立即 401 |
 | **降级模式的停止/回收** | 把 `systemd-run` 从 PATH 里拿掉（等价于无 user systemd 的登录节点）启动 service → 记录里有 `pid` + `pid_start`；**另起一个进程** `svc stop` → 进程消失、端口释放、记录 `stopped` 且无 error；`svc reap` 同样停掉；`svc reconcile` 对活着的降级实例 `adopted 1`、杀掉进程后 `orphaned 1`；systemd 可用时行为不变（`limiter=systemd-run` → `is-active` 变 inactive、unit 无残留） |
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
 - ⛔ **流程编排（Flow / FlowRun）** —— Phase 4，`docs/flow-spec.md` 也未写
-- ⛔ **MCP Server** —— Phase 3.5（认证面已完成；缺 `interface → MCP schema` 派生与 `/mcp` 端点）
 - ⛔ **管理端页面** —— 工具上架/下架/实例总览/强制停止都只有 CLI 与 HTTP API
 - ⛔ **代理层接入动态路由表** —— `internal/route` 已就绪且已测，但 `handleProxy` 仍只读静态卡片，
   所以 service 实例目前**还不能通过网关访问**（只能直连 endpoint）
@@ -138,12 +140,13 @@ UI 造起来便宜了 → UI 不再是护城河
 
 | # | 做什么 | 为什么现在做 |
 |---|---|---|
-| ~~1~~ | ~~**agent token 认证面**~~：✅ **已完成**（`internal/agenttoken` + `srcos token` + `/api/*` 的 Bearer） | 见 §2.2 与 roadmap ADR-019「实现契约」 |
-| **2** | **MCP Server（read-only）**：网关内置 `/mcp`（Streamable HTTP），工具 schema 从 `interface` **自动派生** | 前置已全部就绪：机器可读 interface、`/api/paths`、`/api/jobs`、**agent token 认证面**。这是"走向现代化"的招牌，让「探索用 AI，执行用 SRCOS」可演示 |
+| ~~1~~ | ~~**agent token 认证面**~~：✅ **已完成** | 见 §2.2 与 roadmap ADR-019「实现契约」 |
+| ~~2~~ | ~~**MCP Server（read-only）**~~：✅ **已完成**（`internal/mcp` + `internal/inspect`，9 个只读工具，`interface → JSON Schema` 派生） | 招牌功能已可演示；只读面 + `submit` 预留 |
 | **3** | **代理层接入动态路由表** | 目前 service 实例还不能通过网关访问，`/proxy/<user>/<tool>` 只对静态卡片生效。这是"平台"缺的最后一块 |
 | **4** | 启动中进度页 + `svc reap` 定时调度 | 冷启动体验与自动回收 |
 | **5** | 管理端页面（上架/授权/实例总览） | 让非 CLI 用户能运维 |
 | **6** | Flow 编排（Phase 4） | 需要先定 `docs/flow-spec.md` |
+| 7 | MCP 第二期（`submit` / `cancel` / `run_flow`，需先定 `submit` scope 的粒度：roadmap §8 #9） | 让 agent 真的能"执行用 SRCOS"，而不只是看 |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -186,6 +189,9 @@ UI 造起来便宜了 → UI 不再是护城河
 | **`pkill -f '<pattern>'` 会匹配到执行它的 shell 自身** | 如果 pattern 出现在 shell 的命令行里（通常都会），pkill 会杀掉自己。用不自匹配的模式（如 `srcos[-]dev`）或改用 `lsof -ti:<port> \| xargs kill` |
 | **`pkill -f 'srcos[-]dev serve'` 也自救不了** 如果同一条命令行里另有 `srcos-dev serve` 字面量（如 `nohup /tmp/srcos-dev serve ...`） | 括号只能避开「pattern 自己」，避不开同行其他字面量。症状：整条命令静默无输出（shell 被杀）。安全做法：**kill 与 start 分两次命令**，kill 用 `lsof -ti:<port> \| xargs kill` |
 | **降级模式下 `svc stop` 停不掉自己启动的服务**（2026-09-22 已修） | 症状：`go test ./internal/runtime/` 每次泄漏 5 个 `python3 -m http.server`，连跑 4 次占满测试端口池（24100–24120）→ 服务测试全红（`no free port: port pool exhausted`）；生产上等于无 user systemd 的登录节点里**服务停不掉**（`_ = h.Stop()` 从不发生，实例却被标 stopped）。根因：`StartService` 成功后丢掉了活跃 Handle，`StopService` 只能按名停（`systemctl --user stop <ref>`），降级模式没有 unit 可停。修法：把 SRCOS 直接启动的子进程 `pid` + `/proc/<pid>/stat` 的 `starttime`（内核时钟节拍，标识「这个 pid 的这一次实例」）写进实例记录，`Local.StopUnit/UnitAlive` 在没有 user systemd 时用它停止/判断存活 —— **且发信号前必须校验 starttime 一致**（pid 会被 OS 复用，裸 pid 不能杀）。副作用收益：`Reconcile` 在降级模式下也能区分活着/已死（修前一律判成 orphaned，于是把正在服务的实例标成 stopped） |
+
+| **`sandbox: none`（降级）+ `type: path` 参数不相容** | 参数值是**沙箱路径**（如 `/data/ref`），而降级模式没有 mount namespace，宿主上没有这个路径 —— 工具直接报 `ls: cannot access '/data/ref'`。工作区/home 在降级时会换成宿主路径（`PathView`），但 storage 路径没有这条映射。**要么用 `sandbox: bwrap` 跑带 storage 的工具，要么先修 `PathView.Env` 把 storage 参数也翻成宿主路径**（2026-09-22 用 MCP 端到端验证时发现，未修） |
+| **MCP 端点上 session cookie 不是凭据**（别把浏览器那套搬过来） | `/mcp` 只认 `Authorization: Bearer <agent token>`：程序没有浏览器，混用会让「谁在调用」变得不可审计；工具自建的 UI 想用只读数据，就签发自己的 token（`srcos_read_file` 那套范围是现成的只读后端） |
 
 ### 4.3 契约与幂等
 
@@ -232,7 +238,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 014 | 不用需要 root 的工具（架构偏好）；`bwrap` 优先，`systemd-run --user` 限资源，`prlimit` 兜底 |
 | 015 | HPC 上**实例是 Job 不是 Pod**；资源交给 SGE；闲置回收默认关闭；共享 FS 当控制通道 + `ssh -L` 当数据通道 |
 | 017 | 定位：AI 平台的确定性执行后端；**必须**从 `interface` 自动生成 fallback 表单，否则"不管 UI"自相矛盾 |
-| 019 | MCP Server 内置网关，第一期 read-only；新增 agent token（✅ 认证面已完成，见 roadmap「实现契约」）；**不做** MCP Client |
+| 019 | MCP Server 内置网关，第一期 read-only（✅ **已完成**，见 roadmap「MCP 实现契约」）；agent token（✅）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
@@ -313,6 +319,36 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
   http://127.0.0.1:31111/api/tools        # 401：撤销立即生效，网关未重启
 ```
 
+### 验证 MCP（agent 面，一步到位）
+
+```bash
+# 造一个带 storage 的工具（sandbox 用 bwrap：降级模式与 type: path 不相容，见 §4.2），
+# 签发 token，起网关（--tools-dir 指向含该工具的目录），然后任选一种客户端：
+TOKEN=$(./srcos token create -d /tmp/e2e/config --user alice --label mcp \
+        | grep -o 'srcos_[a-z2-7]*\.[A-Za-z0-9_-]*' | head -1)
+
+# ① curl（最小）
+curl -s -H "Authorization: Bearer $TOKEN" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  http://127.0.0.1:31111/mcp | python3 -m json.tool | head -20
+
+# ② 官方 Python SDK（真实客户端，验证 initialize 握手与会话）
+SRCOS_TOKEN=$TOKEN python3 - <<'PY'
+import asyncio, os
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+async def main():
+    h = {"Authorization": "Bearer " + os.environ["SRCOS_TOKEN"]}
+    async with streamablehttp_client("http://127.0.0.1:31111/mcp", headers=h) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            print((await s.initialize()).serverInfo)
+            print([t.name for t in (await s.list_tools()).tools])
+asyncio.run(main())
+PY
+
+# 无 token → 401 + WWW-Authenticate；GET /mcp → 405；通知 → 202 空体；
+# 审计行形如：[srcos] mcp alice via token <id> (label) [read] tools/call srcos_list_paths
+```
+
 ### 在 node01（有 systemd）上验证降级路径
 
 降级模式的代码只在 `useSystemd()` 为假时才会走到。这台机器有 `systemd-run`，所以想验证
@@ -349,6 +385,13 @@ cmd_token.go                token 子命令（create / list / revoke；`--expire
 
 internal/config/            用户/状态/路径/存储与授权文件位置；registry 扫描 users/*.yaml
 internal/auth/              密码（bcrypt）、TOTP、会话 cookie、SSO、ClientIP/SameOrigin
+internal/inspect/           只读答案的唯一实现（REST API / HTML 页面 / MCP 三前端共用）
+  ├ inspect.go              工具可见性、storage 闭包、路径浏览（Jail）
+  ├ instances.go            实例 / 日志 / 产物（按用户收敛）
+  └ read.go                 srcos_read_file 的读范围与文本、大小约束
+internal/mcp/               MCP Server（Streamable HTTP，无状态 /mcp）
+  ├ mcp.go                  JSON-RPC 2.0 + 协议版本协商 + 认证 + 错误分层
+  └ tools.go                9 个只读工具（srcos_ 前缀）+ 参数校验
 internal/agenttoken/        agent token（程序凭据）：只存 SHA-256、每次校验重读文件、失败关闭
   ├ agenttoken.go           Token/Store/Identity/Scope + 格式解析 + 注册期校验
   └ usage.go                使用时间（data/agent-token-usage.yaml，网关写、按 token 降频）
@@ -359,6 +402,7 @@ internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（
   └ templates/srcos-path-picker.js   原语控件（Web Component）
 
 internal/tool/              tool.yaml 类型 + 13 类注册期校验 + input 值校验
+  └ schema.go               Interface → JSON Schema（ADR-018 的第一处派生）
 internal/job/               job.json 类型 + 对工具的校验 + 目录扫描 + Slug/NewID/Submit
 internal/grant/             授权策略（默认拒绝 · 组/用户/public/通配 · 配额）+ yaml 往返
 internal/storage/           StorageProvider（列表/浏览/Jail 复用/可达性检查）
@@ -415,13 +459,13 @@ scripts/probe-env.sh        无 root 环境探测
 ## 10. 重开会话时的第一句话建议
 
 ```
-读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 2 项
-（MCP Server，read-only）开始。
+读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 3 项
+（代理层接入动态路由表）开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。
 如果要**换方向**，先说清要改哪一条不变式（`AGENTS.md`）或哪一条 ADR，
 因为按仓库约定，架构回退必须先改文档再改代码。
 
-> 上一轮（agent token 认证面）的收尾：`make vet && make test` 全绿；
-> 端到端验证过的命令与输出见 §2.2 最后一行。
+> 上一轮（MCP Server 只读面）的收尾：`make vet && make test` 全绿；
+> MCP 的端到端验证见 §2.2 的「MCP（agent 面）」行与 §6 的验证片段。

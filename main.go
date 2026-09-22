@@ -549,7 +549,10 @@ func runServer(opts options) {
 		}
 	}
 
-	srv := server.NewWithOptions(state, configDir, server.Options{ToolsDir: opts.toolsDir})
+	srv := server.NewWithOptions(state, configDir, server.Options{
+		ToolsDir: opts.toolsDir,
+		Version:  version,
+	})
 
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort(state.Server.Host, strconv.Itoa(state.Server.Port)),

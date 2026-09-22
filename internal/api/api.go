@@ -171,13 +171,9 @@ func (h *Handler) identity(w http.ResponseWriter, r *http.Request) (agenttoken.I
 		ident, err := h.opts.AgentTokens.Authenticate(r)
 		switch {
 		case err == nil:
-			// A token is only as good as its user. `srcos del` also revokes the
-			// user's tokens, but this is the fail-closed backstop: a credential
-			// must never outlive its account.
-			if h.Registry.GetUser(ident.User) == nil {
-				writeJSON(w, 401, map[string]string{"error": "agent token's user no longer exists"})
-				return agenttoken.Identity{}, false
-			}
+			// The store has already checked that the token's user still exists
+			// (AttachUserCheck); what is left here is the audit line.
+			//
 			// The audit line for every accepted agent call (ADR-019). It records
 			// the authentication event — who acted, as which user, with which
 			// scopes — because that is the fact an auditor asks for. Whether the

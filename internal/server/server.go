@@ -16,6 +16,8 @@ import (
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
+	"github.com/seqyuan/srcos/internal/inspect"
+	"github.com/seqyuan/srcos/internal/mcp"
 	"github.com/seqyuan/srcos/internal/proxy"
 	"github.com/seqyuan/srcos/internal/rate"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -42,6 +44,11 @@ type Server struct {
 	totpLimiter   *rate.Limiter
 	apiHandler    *api.Handler
 	transport     *http.Transport
+	// agentTokens is the program-credential store: the API and the MCP
+	// endpoint both authenticate through it (ADR-019).
+	agentTokens *agenttoken.Store
+	// mcpVersion is the build version reported in MCP's initialize.
+	mcpVersion string
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -59,6 +66,9 @@ type Options struct {
 	Grants api.GrantChecker
 	// Runner executes tool instances (used by the admin surface in Phase 3).
 	Runner *runtime.Runner
+	// Version is the build version reported to MCP clients in `initialize`.
+	// Empty means "dev".
+	Version string
 }
 
 // New creates a new Server from state config. configDir is where the shared
@@ -91,6 +101,10 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	toolsDir := opts.ToolsDir
 	if toolsDir == "" {
 		toolsDir = config.ResolveToolsDir(configDir)
+	}
+	mcpVersion := opts.Version
+	if mcpVersion == "" {
+		mcpVersion = "dev"
 	}
 	storages := opts.Storages
 	if storages == nil {
@@ -149,6 +163,10 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// Usage is gateway-written runtime state in data/, deliberately separate
 	// from the CLI-written registry.
 	agentTokens.AttachUsage(agenttoken.LoadUsage(config.AgentTokenUsagePath(configDir)))
+	// A credential must not outlive its account: the store refuses a token
+	// whose user is gone, and every front-end that authenticates through it
+	// (the REST API, MCP) gets that for free.
+	agentTokens.AttachUserCheck(registry)
 	if n := len(agentTokens.Tokens()); n > 0 {
 		log.Printf("[srcos] %d agent token(s) loaded (Authorization: Bearer)", n)
 	}
@@ -172,6 +190,8 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		toolsDir:      toolsDir,
 		storages:      storages,
 		grants:        grants,
+		agentTokens:   agentTokens,
+		mcpVersion:    mcpVersion,
 		loginLimiter:  rate.NewLimiter(10, 15*time.Minute),
 		totpLimiter:   rate.NewLimiter(10, 15*time.Minute),
 		apiHandler:    api.NewHandlerWithOptions(registry, state.Auth.SessionSecret, apiOpts),
@@ -228,6 +248,16 @@ func (s *Server) sessionFromCookies(cookieHeader string) auth.SessionResult {
 // Handler returns the HTTP handler for the server.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// The MCP endpoint (ADR-019). It is a gateway route, like /api/*: a backend
+	// service that happened to use /mcp keeps working under its own prefix
+	// (/proxy/<user>/<service>/mcp), so the reserved path costs nothing.
+	//
+	// Both spellings are registered because a client configured with a trailing
+	// slash should reach the endpoint, not a proxied backend (or a 404).
+	mcpHandler := s.mcpHandler()
+	mux.Handle(mcp.Endpoint, mcpHandler)
+	mux.Handle(mcp.Endpoint+"/", mcpHandler)
 
 	// API routes (handled by api.Handler)
 	// Use specific exact matches to avoid conflicts with backend service APIs
@@ -1191,6 +1221,12 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// mcpHandler is the gateway's MCP endpoint: the read-only platform surface an
+// agent reaches with an agent token (ADR-019).
+func (s *Server) mcpHandler() http.Handler {
+	return mcp.NewServer(s.mcpVersion, s.reader(), s.agentTokens)
+}
+
 // requireUserPage enforces a session for a page and redirects to login
 // otherwise, preserving where the user was going.
 func (s *Server) requireUserPage(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -1256,41 +1292,23 @@ func (s *Server) handleToolFormPage(w http.ResponseWriter, r *http.Request) {
 	sendHTML(w, 404, web.NotFoundPage(s.siteTitle))
 }
 
-// visibleTools applies the grant filter. Phase 3 replaces the filter's body via
-// Options.Grants; the call sites stay as they are.
+// reader is the read-only view of the platform, shared with the API and MCP
+// front-ends (ADR-018). The pages ask it the same questions they used to answer
+// from their own copy of the grant filter.
+func (s *Server) reader() *inspect.Reader {
+	return &inspect.Reader{
+		ConfigDir: config.DirOf(s.registry),
+		ToolsDir:  s.toolsDir,
+		Storages:  s.storages,
+		Grants:    s.grants,
+	}
+}
+
+// visibleTools applies the grant filter through the shared read side.
 func (s *Server) visibleTools(username string) ([]*tool.Tool, error) {
-	if s.toolsDir == "" {
-		return nil, nil
-	}
-	all, err := tool.Discover(s.toolsDir)
-	if err != nil {
-		return nil, err
-	}
-	if s.grants == nil {
-		return all, nil
-	}
-	allowed := make([]*tool.Tool, 0, len(all))
-	for _, t := range all {
-		if s.grants.Allowed(username, t.ID) {
-			allowed = append(allowed, t)
-		}
-	}
-	return allowed, nil
+	return s.reader().VisibleManifests(username)
 }
 
 func (s *Server) storagesForTool(t *tool.Tool) []storage.Storage {
-	if s.storages == nil || len(t.RequiresStorages) == 0 {
-		return nil
-	}
-	want := map[string]bool{}
-	for _, id := range t.RequiresStorages {
-		want[id] = true
-	}
-	var out []storage.Storage
-	for _, item := range s.storages.List() {
-		if want[item.ID] {
-			out = append(out, item)
-		}
-	}
-	return out
+	return s.reader().StorageDefs(t)
 }
