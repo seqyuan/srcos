@@ -17,6 +17,15 @@ type UserRegistry struct {
 	scanEvery time.Duration
 }
 
+// DirOf exposes the registry's config directory, so callers that hold a
+// registry do not need a second copy of the path (and cannot disagree with it).
+func DirOf(r *UserRegistry) string {
+	if r == nil {
+		return ""
+	}
+	return r.configDir
+}
+
 // NewUserRegistry creates a new registry scanning configDir/users/*.yaml.
 func NewUserRegistry(configDir string) *UserRegistry {
 	return &UserRegistry{

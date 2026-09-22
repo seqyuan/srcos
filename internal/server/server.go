@@ -16,6 +16,9 @@ import (
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/proxy"
 	"github.com/seqyuan/srcos/internal/rate"
+	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/storage"
+	"github.com/seqyuan/srcos/internal/tool"
 	"github.com/seqyuan/srcos/internal/web"
 )
 
@@ -30,15 +33,40 @@ type Server struct {
 	registry      *config.UserRegistry
 	sessionSecret string
 	siteTitle     string
+	toolsDir      string
+	storages      storage.Provider
+	grants        api.GrantChecker
 	loginLimiter  *rate.Limiter
 	totpLimiter   *rate.Limiter
 	apiHandler    *api.Handler
 	transport     *http.Transport
 }
 
+// Options carries the seams the gateway needs beyond the user registry:
+// where tool packages live, and which shared data is declared.
+//
+// A deployment with neither still works — the tool pages and /api/paths simply
+// report that they are not configured, rather than pretending.
+type Options struct {
+	// ToolsDir is the tool package root. Empty means "look beside the binary".
+	ToolsDir string
+	// Storages is the StorageProvider. Nil means "load config/storages.yaml".
+	Storages storage.Provider
+	// Grants gates tool visibility and execution. Nil means "allow all", which
+	// is the pre-authorization default and is replaced in Phase 3.
+	Grants api.GrantChecker
+	// Runner executes tool instances (used by the admin surface in Phase 3).
+	Runner *runtime.Runner
+}
+
 // New creates a new Server from state config. configDir is where the shared
 // user configs live (configDir/users/*.yaml).
 func New(state *config.StateConfig, configDir string) *Server {
+	return NewWithOptions(state, configDir, Options{})
+}
+
+// NewWithOptions creates a Server with the tool and storage seams wired.
+func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *Server {
 	// Forwarded headers are only trusted from the configured proxy; with no
 	// trusted proxy configured, client IPs and HTTPS detection use the TCP
 	// peer directly (X-Forwarded-* is spoofable by any direct client).
@@ -58,14 +86,46 @@ func New(state *config.StateConfig, configDir string) *Server {
 		siteTitle = "SRCOS"
 	}
 
+	toolsDir := opts.ToolsDir
+	if toolsDir == "" {
+		toolsDir = config.ResolveToolsDir(configDir)
+	}
+	storages := opts.Storages
+	if storages == nil {
+		provider, err := storage.Load(config.StoragesPath(configDir))
+		if err != nil {
+			log.Printf("[srcos] storages.yaml: %v (continuing with no shared data)", err)
+		} else {
+			storages = provider
+		}
+	}
+	if checker, ok := storages.(storage.ReachabilityChecker); ok {
+		for _, problem := range checker.CheckReachable() {
+			log.Printf("[srcos] warning: %s", problem)
+		}
+	}
+
+	apiOpts := api.Options{
+		ConfigDir: configDir,
+		ToolsDir:  toolsDir,
+		Storages:  storages,
+		Grants:    opts.Grants,
+		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
+			return web.ToolFormPage(siteTitle, username, t, sts)
+		},
+	}
+
 	return &Server{
 		state:         state,
 		registry:      registry,
 		sessionSecret: state.Auth.SessionSecret,
 		siteTitle:     siteTitle,
+		toolsDir:      toolsDir,
+		storages:      storages,
+		grants:        opts.Grants,
 		loginLimiter:  rate.NewLimiter(10, 15*time.Minute),
 		totpLimiter:   rate.NewLimiter(10, 15*time.Minute),
-		apiHandler:    api.NewHandler(registry, state.Auth.SessionSecret),
+		apiHandler:    api.NewHandlerWithOptions(registry, state.Auth.SessionSecret, apiOpts),
 		// A shared transport lets connection pools be reused across requests
 		// instead of creating a fresh one per proxy request. SafeDialContext
 		// re-validates backend addresses (and pins the validated IP) at dial
@@ -242,6 +302,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/proxy/", func(w http.ResponseWriter, r *http.Request) {
 		s.handleProxy(w, r)
 	})
+
+	// Tool/storage API. Registered as exact paths, like /api/services, so a
+	// proxied backend's own /api/... tree is not shadowed by a catch-all.
+	// These four are now reserved gateway paths (README「保留路径」).
+	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs"} {
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			if s.apiHandler.ServeHTTP(w, r) {
+				return
+			}
+			http.NotFound(w, r)
+		})
+	}
+
+	// Primitive controls are served as assets so a tool's own UI can load the
+	// same element SRCOS's generated form uses.
+	mux.HandleFunc("/assets/", s.handleAsset)
+
+	// Tool catalogue and the generated fallback form (ADR-017).
+	mux.HandleFunc("/tools", s.handleToolsPage)
+	mux.HandleFunc("/tools/", s.handleToolFormPage)
 
 	// Root route (dashboard/login page)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1041,4 +1121,127 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	connection := strings.ToLower(r.Header.Get("Connection"))
 	upgrade := strings.ToLower(r.Header.Get("Upgrade"))
 	return strings.Contains(connection, "upgrade") && upgrade == "websocket"
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 原语控件与工具页面
+// ─────────────────────────────────────────────────────────────────────────
+
+// handleAsset serves the embedded front-end assets.
+//
+// Only a fixed allowlist is served: an asset route that took a path would be a
+// file-read primitive sitting in front of the whole filesystem.
+func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/assets/srcos-path-picker.js":
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = io.WriteString(w, web.PathPickerJS)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// requireUserPage enforces a session for a page and redirects to login
+// otherwise, preserving where the user was going.
+func (s *Server) requireUserPage(w http.ResponseWriter, r *http.Request) (string, bool) {
+	session := s.sessionFromCookies(r.Header.Get("Cookie"))
+	if session.Valid && session.UserID != "" {
+		return session.UserID, true
+	}
+	next := r.URL.RequestURI()
+	if !validLoginNext(next) {
+		next = "/"
+	}
+	http.Redirect(w, r, "/login?next="+url.QueryEscape(next), http.StatusFound)
+	return "", false
+}
+
+// handleToolsPage lists the tools a user may use.
+func (s *Server) handleToolsPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/tools" && r.URL.Path != "/tools/" {
+		s.handleToolFormPage(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	tools, err := s.visibleTools(username)
+	if err != nil {
+		log.Printf("[srcos] tools: %v", err)
+		sendHTML(w, 500, web.NotFoundPage(s.siteTitle))
+		return
+	}
+	sendHTML(w, 200, web.ToolsPage(s.siteTitle, username, tools))
+}
+
+// handleToolFormPage renders a tool's generated form.
+func (s *Server) handleToolFormPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tools/")
+	if id == "" || strings.ContainsAny(id, "/\\") {
+		http.NotFound(w, r)
+		return
+	}
+	tools, err := s.visibleTools(username)
+	if err != nil {
+		log.Printf("[srcos] tools: %v", err)
+		sendHTML(w, 500, web.NotFoundPage(s.siteTitle))
+		return
+	}
+	for _, t := range tools {
+		if t.ID != id {
+			continue
+		}
+		sendHTML(w, 200, web.ToolFormPage(s.siteTitle, username, t, s.storagesForTool(t)))
+		return
+	}
+	sendHTML(w, 404, web.NotFoundPage(s.siteTitle))
+}
+
+// visibleTools applies the grant filter. Phase 3 replaces the filter's body via
+// Options.Grants; the call sites stay as they are.
+func (s *Server) visibleTools(username string) ([]*tool.Tool, error) {
+	if s.toolsDir == "" {
+		return nil, nil
+	}
+	all, err := tool.Discover(s.toolsDir)
+	if err != nil {
+		return nil, err
+	}
+	if s.grants == nil {
+		return all, nil
+	}
+	allowed := make([]*tool.Tool, 0, len(all))
+	for _, t := range all {
+		if s.grants.Allowed(username, t.ID) {
+			allowed = append(allowed, t)
+		}
+	}
+	return allowed, nil
+}
+
+func (s *Server) storagesForTool(t *tool.Tool) []storage.Storage {
+	if s.storages == nil || len(t.RequiresStorages) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, id := range t.RequiresStorages {
+		want[id] = true
+	}
+	var out []storage.Storage
+	for _, item := range s.storages.List() {
+		if want[item.ID] {
+			out = append(out, item)
+		}
+	}
+	return out
 }

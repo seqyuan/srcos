@@ -32,6 +32,15 @@ var twofaSetupTpl string
 //go:embed templates/script.js
 var dashboardScript string
 
+// PathPickerJS is the srcos-path-picker primitive control.
+//
+// It is served as a standalone asset rather than inlined into a page because a
+// tool's own UI must be able to load it too: one script tag and one element,
+// no build step, no framework (AGENTS.md: 平台只提供原语控件).
+//
+//go:embed templates/srcos-path-picker.js
+var PathPickerJS string
+
 var faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <rect width="32" height="32" rx="6" fill="#3b6ef5"/>
   <path d="M8 10h6v12H8zm10 0h6v8h-6z" fill="#fff" opacity="0.9"/>

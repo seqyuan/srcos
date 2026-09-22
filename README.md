@@ -367,6 +367,11 @@ srcos 2fa-reset <用户名>
 | `/logout` | 退出登录 |
 | `/favicon.ico` | 网关自身图标 |
 | `/api/services`、`/api/services/*` | 卡片增删改、布局调整的 REST API |
+| `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
+| `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
+| `/api/jobs` | 任务提交与状态列表 |
+| `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
+| `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单 |
 | `/proxy/*` | 服务代理前缀 |
 
 如果某个后端应用也使用这些**绝对路径**（例如后端自己也有 `/login` 页面、或 `/api/services` 接口），浏览器会命中网关而非后端。此时应让后端改用不冲突的路径，或为其配置 base_url/basePath 使链接落在 `/proxy/<用户>/<服务路径>/` 之下。

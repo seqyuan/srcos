@@ -7,6 +7,8 @@
 package job
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,7 +16,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -282,4 +286,89 @@ func EffectiveResources(j *Job, t *tool.Tool) tool.Resources {
 		out.GPU = j.Resources.GPU
 	}
 	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 提交
+// ─────────────────────────────────────────────────────────────────────────
+
+// Slug converts a display name into a filesystem- and URL-safe fragment.
+//
+// Job ids end up in directory names, systemd unit names and URLs, so the
+// alphabet is deliberately narrow: lowercase alphanumerics and single hyphens.
+func Slug(name string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		case r == '-' || r == '_' || r == ' ' || r == '.' || r == '/':
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "job"
+	}
+	if len(out) > 40 {
+		out = out[:40]
+	}
+	return out
+}
+
+// NewID allocates a unique job id under jobsDir.
+//
+// The random suffix makes concurrent submissions from different browsers safe
+// without a lock, and keeps ids stable enough to type: "<slug>-<8 hex>".
+func NewID(jobsDir, name string) string {
+	slug := Slug(name)
+	for attempt := 0; attempt < 8; attempt++ {
+		id := slug + "-" + randomSuffix()
+		if _, err := os.Stat(filepath.Join(jobsDir, id)); os.IsNotExist(err) {
+			return id
+		}
+	}
+	// Extremely unlikely; fall back to something certainly unique.
+	return fmt.Sprintf("%s-%d", slug, time.Now().UnixNano())
+}
+
+func randomSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Submit writes a job into the drop-box and returns its id.
+//
+// The directory is the queue (ADR-004): writing the file *is* the submission,
+// which is what lets any language, anywhere — including a compute node — submit
+// without a daemon, a socket, or a credential.
+func Submit(configDir, user, toolID string, j *Job) (string, string, error) {
+	jobsDir := config.JobsDir(configDir, user, toolID)
+	if err := os.MkdirAll(jobsDir, 0o755); err != nil {
+		return "", "", err
+	}
+	id := NewID(jobsDir, j.Name)
+	dir := filepath.Join(jobsDir, id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", err
+	}
+	if j.SchemaVersion == 0 {
+		j.SchemaVersion = 1
+	}
+	data, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
+		return "", "", err
+	}
+	return id, dir, nil
 }

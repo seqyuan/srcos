@@ -452,12 +452,32 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 `/etc` 下的白名单文件），否则 bubblewrap 无法创建挂载点。工具自带二进制请用
 `/opt/srcos/bin/<name>`（沙箱 `PATH` 第一项）。
 
-### 5.5 工具 UI 怎么接
+### 5.4.2 HTTP 面（工具 UI 与 agent 共用）
+
+平台把工具契约和路径浏览暴露成三个只读 GET 与一个提交 POST。工具自建 UI 直接调它们即可，
+不需要懂 SRCOS 的内部结构：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `GET` | `/api/tools` | 当前用户可见的工具目录 |
+| `GET` | `/api/tools/<id>` | **机器可读的 `interface`** + 该工具可选的 storages |
+| `GET` | `/api/paths?tool=&input=&path=&select=&limit=&storage=` | 列目录（沙箱路径空间） |
+| `POST` | `/api/jobs` | 提交任务（写 `job.json` 到投递目录） |
+| `GET` | `/api/jobs?tool=&kind=` | 本用户的实例列表（含 service 的 endpoint/route） |
+
+**`/api/paths` 的安全约束（ADR-020 在 API 边缘的执行）**：可浏览的 storage 由
+`tool` + `input` **推导**，不接受调用方自由指定。`storage=` 只能在**该 input 声明的**
+`from` 列表内切换根，否则 403。所以「UI 能选到的」永远不可能超过「沙箱挂载的」。
+
+`select` 缺省取自 input 的 `select`/`type`，因此 `select: directory` 的参数在 UI 里
+根本看不到文件 —— 非法值不会被提供，而不是提交后被拒。
+
+## 5.5 工具 UI 怎么接
 
 | 工具 UI 是什么 | 怎么接 |
 |---|---|
-| 用 SRCOS 自动生成的表单 | 什么都不做 —— `type: path` 自动渲染成带「浏览」按钮的输入框 |
-| 自建 shiny / python / R 页面 | 放一行 `<srcos-path-picker storage="cluster-share" select="directory">`，或直接调 `GET /api/paths?storage=…&path=…` |
+| 用 SRCOS 自动生成的表单 | 什么都不做 —— 访问 `/tools/<id>` 或从 `/tools` 进入；`type: path` 自动渲染成路径选择器 |
+| 自建 shiny / python / R 页面 | 一行 `<script src="/assets/srcos-path-picker.js">` + 一个 `<srcos-path-picker tool="<工具>" input="<参数名>" name="<参数名>">`，或直接调 `GET /api/paths?tool=…&input=…&path=…` |
 
 **只读参考数据强制 `mode: ro`**；`rw` 的 storage 有配额，不要往共享盘写大中间文件（写 `/workspace`）。
 

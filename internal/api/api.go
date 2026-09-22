@@ -10,19 +10,59 @@ import (
 
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/storage"
+	"github.com/seqyuan/srcos/internal/tool"
 )
+
+// GrantChecker answers "may this user use this tool".
+//
+// It is an interface rather than a concrete type so the authorization model can
+// land without touching this package's shape, and so a deployment with no
+// grants configured keeps working.
+type GrantChecker interface {
+	Allowed(username, toolID string) bool
+}
+
+// RenderToolForm renders the generated fallback form for a tool. It is injected
+// from the server so this package does not depend on the web layer.
+type RenderToolForm func(username string, t *tool.Tool, storages []storage.Storage) string
+
+// Options carries the seams the API needs beyond the user registry.
+//
+// Every field is optional: an empty ToolsDir disables the tool endpoints, and a
+// nil Storages makes /api/paths answer 503 rather than pretend.
+type Options struct {
+	// ConfigDir holds the runtime state (data/instances, data/ws, ...).
+	ConfigDir string
+	// ToolsDir is the tool package root.
+	ToolsDir string
+	// Storages is the StorageProvider behind /api/paths.
+	Storages storage.Provider
+	// Grants filters the catalogue and gates execution. Nil means "allow all",
+	// which is the pre-authorization default and must be replaced in Phase 3.
+	Grants GrantChecker
+	// RenderToolForm renders a tool's generated form page.
+	RenderToolForm RenderToolForm
+}
 
 // Handler handles REST API requests for service management.
 type Handler struct {
 	Registry      *config.UserRegistry
 	SessionSecret string
+	opts          Options
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(registry *config.UserRegistry, sessionSecret string) *Handler {
+	return NewHandlerWithOptions(registry, sessionSecret, Options{})
+}
+
+// NewHandlerWithOptions creates an API handler with the tool/storage seams wired.
+func NewHandlerWithOptions(registry *config.UserRegistry, sessionSecret string, opts Options) *Handler {
 	return &Handler{
 		Registry:      registry,
 		SessionSecret: sessionSecret,
+		opts:          opts,
 	}
 }
 
@@ -33,7 +73,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	// Only handle known API routes
 	isAPI := path == "/api/services" ||
 		path == "/api/services/layout" ||
-		strings.HasPrefix(path, "/api/services/")
+		strings.HasPrefix(path, "/api/services/") ||
+		path == "/api/tools" ||
+		strings.HasPrefix(path, "/api/tools/") ||
+		path == "/api/paths" ||
+		path == "/api/jobs"
 
 	if !isAPI {
 		return false
@@ -65,6 +109,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	case strings.HasPrefix(path, "/api/services/") && r.Method == "PUT":
 		id := strings.TrimPrefix(path, "/api/services/")
 		h.handleUpdateService(w, r, username, id)
+
+	// Tool catalogue, machine-readable interface, and the path browser behind
+	// the srcos-path-picker primitive control.
+	case path == "/api/tools" && r.Method == "GET":
+		h.handleListTools(w, username)
+	case strings.HasPrefix(path, "/api/tools/") && r.Method == "GET":
+		h.handleDescribeTool(w, username, strings.TrimPrefix(path, "/api/tools/"))
+	case path == "/api/paths" && r.Method == "GET":
+		h.handlePaths(w, r, username)
+
+	// Submissions: the generated form, a tool's own UI, and the MCP submit tool
+	// all funnel through the same validation and the same drop-box.
+	case path == "/api/jobs" && r.Method == "POST":
+		h.handleSubmitJob(w, r, username)
+	case path == "/api/jobs" && r.Method == "GET":
+		h.handleListJobs(w, r, username)
 	default:
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 	}

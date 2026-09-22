@@ -73,6 +73,22 @@ func ToolsDir(configDir string) string {
 	return filepath.Join(filepath.Dir(configDir), "tools")
 }
 
+// ResolveToolsDir picks the tool package root for a deployment.
+//
+// Order: $SRCOS_TOOLS_DIR, then <program dir>/srcos-tools (the repository
+// layout, so a checkout works without configuration), then <program dir>/tools
+// (the install layout).
+func ResolveToolsDir(configDir string) string {
+	if env := strings.TrimSpace(os.Getenv("SRCOS_TOOLS_DIR")); env != "" {
+		return env
+	}
+	repoLocal := filepath.Join(filepath.Dir(configDir), "srcos-tools")
+	if _, err := os.Stat(repoLocal); err == nil {
+		return repoLocal
+	}
+	return ToolsDir(configDir)
+}
+
 // WorkspaceDir is the registered user's /workspace for one tool. Per user and
 // per tool: two tools never share a writable directory implicitly.
 func WorkspaceDir(configDir, user, toolID string) string {

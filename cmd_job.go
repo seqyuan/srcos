@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -233,35 +230,31 @@ func runJobSubmit(args []string) {
 		os.Exit(1)
 	}
 
-	// Materialize the submission. The directory is the queue (ADR-004).
-	jobID := uniqueJobID(config.JobsDir(*jf.configDir, user, t.ID), slugifyJobName(j.Name))
-	dir := filepath.Join(config.JobsDir(*jf.configDir, user, t.ID), jobID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fatalf("%v", err)
-	}
-
-	// An explicit script argument means the caller generated this run's
-	// work.sh; otherwise the tool package's entry is used at run time.
-	if len(positional) > 0 {
-		src := positional[0]
-		data, err := os.ReadFile(src)
-		if err != nil {
-			fatalf("read %s: %v", src, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "work.sh"), data, 0o755); err != nil {
-			fatalf("%v", err)
-		}
-		if j.Command == nil {
-			j.Command = []string{"bash", "work.sh"}
-		}
-	}
-
-	data, err := json.MarshalIndent(j, "", "  ")
+	// Materialize the submission. The directory is the queue (ADR-004), and
+	// the same helper backs POST /api/jobs so the two entry points cannot
+	// drift on validation or layout.
+	jobID, dir, err := job.Submit(*jf.configDir, user, t.ID, j)
 	if err != nil {
 		fatalf("%v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
-		fatalf("%v", err)
+	// An explicit script argument means the caller generated this run's
+	// work.sh; otherwise the tool package's entry is used at run time.
+	if len(positional) > 0 {
+		data, rerr := os.ReadFile(positional[0])
+		if rerr != nil {
+			fatalf("read %s: %v", positional[0], rerr)
+		}
+		if werr := os.WriteFile(filepath.Join(dir, "work.sh"), data, 0o755); werr != nil {
+			fatalf("%v", werr)
+		}
+		if j.Command == nil {
+			j.Command = []string{"bash", "work.sh"}
+			// Re-write job.json so the recorded command matches the script we
+			// just placed next to it.
+			if _, _, err := job.Submit(*jf.configDir, user, t.ID, j); err != nil {
+				fatalf("%v", err)
+			}
+		}
 	}
 
 	fmt.Printf("submitted %s\n", jobID)
@@ -786,20 +779,12 @@ func (l *strList) Set(s string) error {
 	return nil
 }
 
+// resolveToolsDir mirrors config.ResolveToolsDir, with the CLI override on top.
 func resolveToolsDir(override, configDir string) string {
 	if override != "" {
 		return override
 	}
-	if env := os.Getenv("SRCOS_TOOLS_DIR"); env != "" {
-		return env
-	}
-	// Prefer the repository-style directory when it sits next to the config,
-	// then fall back to the install-time location.
-	repoLocal := filepath.Join(filepath.Dir(configDir), "srcos-tools")
-	if _, err := os.Stat(repoLocal); err == nil {
-		return repoLocal
-	}
-	return config.ToolsDir(configDir)
+	return config.ResolveToolsDir(configDir)
 }
 
 func mustLoadTool(toolsDir, configDir, id string) (*tool.Tool, string) {
@@ -831,54 +816,6 @@ func resolveUser(flagValue string) string {
 	return u
 }
 
-func slugifyJobName(name string) string {
-	s := strings.ToLower(strings.TrimSpace(name))
-	var b strings.Builder
-	prevDash := false
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			prevDash = false
-		case r == '-' || r == '_' || r == ' ' || r == '.':
-			if !prevDash && b.Len() > 0 {
-				b.WriteByte('-')
-				prevDash = true
-			}
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		out = "job"
-	}
-	if len(out) > 40 {
-		out = out[:40]
-	}
-	return out
-}
-
-func uniqueJobID(jobsDir, slug string) string {
-	id := fmt.Sprintf("%s-%s", slug, randomSuffix())
-	for i := 0; i < 5; i++ {
-		if _, err := os.Stat(filepath.Join(jobsDir, id)); os.IsNotExist(err) {
-			return id
-		}
-		id = fmt.Sprintf("%s-%s", slug, randomSuffix())
-	}
-	return fmt.Sprintf("%s-%d", slug, time.Now().UnixNano())
-}
-
-func randomSuffix() string {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// jobIDMatches accepts the full job id or either of its human-typed halves:
-// generated ids look like "<slug>-<8 hex>", so "hello-demo" and the hex suffix
-// both identify the same job.
 func jobIDMatches(id, needle string) bool {
 	return id == needle ||
 		strings.HasPrefix(id, needle+"-") ||

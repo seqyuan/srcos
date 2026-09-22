@@ -110,42 +110,47 @@ type ROMount struct {
 	SandboxPath string `yaml:"sandbox_path"`
 }
 
+// Interface is the machine-readable signature. Its json tags mirror the yaml
+// ones because the same shape is served over HTTP and (in Phase 3.5) exposed as
+// an MCP schema — three consumers, one spelling (ADR-018).
 type Interface struct {
-	Inputs  []Input  `yaml:"inputs,omitempty"`
-	Outputs []Output `yaml:"outputs,omitempty"`
+	Inputs  []Input  `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	Outputs []Output `yaml:"outputs,omitempty" json:"outputs,omitempty"`
 }
 
 type Input struct {
-	Name        string    `yaml:"name"`
-	Type        InputType `yaml:"type"`
-	Label       string    `yaml:"label,omitempty"`
-	Description string    `yaml:"description,omitempty"`
-	Required    bool      `yaml:"required,omitempty"`
-	Default     any       `yaml:"default,omitempty"`
+	Name        string    `yaml:"name" json:"name"`
+	Type        InputType `yaml:"type" json:"type"`
+	Label       string    `yaml:"label,omitempty" json:"label,omitempty"`
+	Description string    `yaml:"description,omitempty" json:"description,omitempty"`
+	Required    bool      `yaml:"required,omitempty" json:"required,omitempty"`
+	Default     any       `yaml:"default,omitempty" json:"default,omitempty"`
 
 	// type: enum
-	Values []string `yaml:"values,omitempty"`
+	Values []string `yaml:"values,omitempty" json:"values,omitempty"`
 	// type: int|float
-	Min *float64 `yaml:"min,omitempty"`
-	Max *float64 `yaml:"max,omitempty"`
+	Min *float64 `yaml:"min,omitempty" json:"min,omitempty"`
+	Max *float64 `yaml:"max,omitempty" json:"max,omitempty"`
 	// type: path (required) — comma-separated storage ids
-	From string `yaml:"from,omitempty"`
+	From string `yaml:"from,omitempty" json:"from,omitempty"`
 	// type: path — file | directory
-	Select string `yaml:"select,omitempty"`
+	Select string `yaml:"select,omitempty" json:"select,omitempty"`
 	// type: file|directory|path — required file names to validate
-	Files []string `yaml:"files,omitempty"`
+	Files []string `yaml:"files,omitempty" json:"files,omitempty"`
 }
 
 type Output struct {
-	Name        string     `yaml:"name"`
-	Type        OutputType `yaml:"type"`
-	Label       string     `yaml:"label,omitempty"`
-	Description string     `yaml:"description,omitempty"`
-	Provides    []string   `yaml:"provides,omitempty"`
+	Name        string     `yaml:"name" json:"name"`
+	Type        OutputType `yaml:"type" json:"type"`
+	Label       string     `yaml:"label,omitempty" json:"label,omitempty"`
+	Description string     `yaml:"description,omitempty" json:"description,omitempty"`
+	Provides    []string   `yaml:"provides,omitempty" json:"provides,omitempty"`
 }
 
 type Resources struct {
-	CPU      int    `yaml:"cpu" json:"cpu"`
+	CPU int `yaml:"cpu" json:"cpu"`
+	// Memory is a human-readable size ("32Gi", "512M"); ParseMemory is the only
+	// reader, so the unit grammar is defined in one place.
 	Memory   string `yaml:"memory" json:"memory"`
 	Walltime string `yaml:"walltime,omitempty" json:"walltime,omitempty"`
 	Queue    string `yaml:"queue,omitempty" json:"queue,omitempty"`
