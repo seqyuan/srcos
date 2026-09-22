@@ -9,6 +9,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/storage"
 )
@@ -369,4 +370,60 @@ func TestGrantsFilterTheCatalogue(t *testing.T) {
 
 type denyAll struct{}
 
-func (denyAll) Allowed(_, _ string) bool { return false }
+func (denyAll) Allowed(_, _ string) bool         { return false }
+func (denyAll) IsAdmin(string) bool              { return false }
+func (denyAll) QuotaFor(_, _ string) grant.Quota { return grant.Quota{} }
+
+// quotaPolicy grants one tool with a ceiling, for the quota tests.
+type quotaPolicy struct {
+	tool  string
+	quota grant.Quota
+}
+
+func (p quotaPolicy) Allowed(_, toolID string) bool { return toolID == p.tool }
+func (p quotaPolicy) IsAdmin(string) bool           { return false }
+func (p quotaPolicy) QuotaFor(_, toolID string) grant.Quota {
+	if toolID == p.tool {
+		return p.quota
+	}
+	return grant.Quota{}
+}
+
+// TestSubmitJobEnforcesQuota pins the aggregate ceiling: a request inside the
+// tool's own declaration can still be refused because of who is asking.
+func TestSubmitJobEnforcesQuota(t *testing.T) {
+	h := newToolsHarness(t, quotaPolicy{tool: "demo", quota: grant.Quota{MaxCPU: 2}})
+
+	// demo declares cpu: 2, so this fits exactly.
+	ok := apiPost(t, h.Handler, "/api/jobs", `{"tool":"demo","params":{"ref":"/data/ref"}}`, "http://gw:30152")
+	if ok.Code != 201 {
+		t.Fatalf("a request within quota was refused: %d %s", ok.Code, ok.Body)
+	}
+
+	// Now one that would exceed it. The tool allows 2 cores, so the loop is
+	// closed by the quota, not the tool ceiling.
+	h2 := newToolsHarness(t, quotaPolicy{tool: "demo", quota: grant.Quota{MaxInstances: 1}})
+	first := apiPost(t, h2.Handler, "/api/jobs", `{"tool":"demo","params":{"ref":"/data/ref"}}`, "http://gw:30152")
+	if first.Code != 201 {
+		t.Fatalf("first submission: %d %s", first.Code, first.Body)
+	}
+
+	// A live instance now holds the only slot. It has to be recorded as
+	// non-terminal for the quota to see it.
+	inst := &runtime.Instance{
+		ID: "alice-demo-live", User: "alice", Tool: "demo", Kind: "task",
+		State: runtime.StateRunning, Backend: "local",
+		RequestedCPU: 2, RequestedMemory: "2Gi",
+	}
+	if err := runtime.SaveInstance(runtime.InstancePath(h2.configDir, inst.ID), inst); err != nil {
+		t.Fatal(err)
+	}
+
+	second := apiPost(t, h2.Handler, "/api/jobs", `{"tool":"demo","params":{"ref":"/data/ref"}}`, "http://gw:30152")
+	if second.Code != 403 {
+		t.Fatalf("status = %d, want 403 (quota): %s", second.Code, second.Body)
+	}
+	if !strings.Contains(second.Body.String(), "quota") {
+		t.Fatalf("the message should name the quota: %s", second.Body)
+	}
+}

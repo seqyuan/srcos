@@ -49,6 +49,9 @@ Options:
                           show a one-time warning you must accept)
   --title <text>          Site title shown in the top-left corner of the
                           dashboard and login page (default: SRCOS)
+  --tools-dir <dir>       Tool package root containing <tool-id>/tool.yaml
+                          (default: $SRCOS_TOOLS_DIR, then <program dir>/
+                          srcos-tools, then <program dir>/tools)
   -V, --version           Show version
   -h, --help              Show this help
 
@@ -148,6 +151,10 @@ func main() {
 		runSvcCmd(args)
 		return
 	}
+	if cmd == "grant" {
+		runGrantCmd(args)
+		return
+	}
 
 	// Parse options
 	opts, err := parseOptions(args)
@@ -188,6 +195,10 @@ type options struct {
 	tlsCert       string
 	tlsKey        string
 	tlsSelfSigned bool
+	// toolsDir is the tool package root. Empty means "$SRCOS_TOOLS_DIR, then
+	// <program dir>/srcos-tools, then <program dir>/tools" — see
+	// config.ResolveToolsDir.
+	toolsDir string
 }
 
 func parseOptions(args []string) (options, error) {
@@ -206,6 +217,12 @@ func parseOptions(args []string) (options, error) {
 			return "", false
 		}
 		switch a {
+		case "--tools-dir":
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("--tools-dir requires a value")
+			}
+			opts.toolsDir = args[i+1]
+			i++
 		case "-d", "--config-dir":
 			v, ok := next()
 			if !ok {
@@ -510,7 +527,7 @@ func runServer(opts options) {
 		}
 	}
 
-	srv := server.New(state, configDir)
+	srv := server.NewWithOptions(state, configDir, server.Options{ToolsDir: opts.toolsDir})
 
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort(state.Server.Host, strconv.Itoa(state.Server.Port)),

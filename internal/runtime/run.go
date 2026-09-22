@@ -235,6 +235,7 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 	inst.Command = h.Command()
 	inst.Limiter = h.Limiter()
 	inst.Mounts = renderMounts(prep.spec)
+	inst.RequestedCPU, inst.RequestedMemory = requestedResources(t, loaded.Job)
 	inst.State = StateRunning
 	inst.LastActiveAt = inst.StartedAt
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
@@ -430,6 +431,7 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	inst.Command = h.Command()
 	inst.Limiter = h.Limiter()
 	inst.Mounts = renderMounts(prep.spec)
+	inst.RequestedCPU, inst.RequestedMemory = requestedResources(t, j)
 	inst.State = StateStarting
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		_ = h.Stop(context.Background())
@@ -812,6 +814,15 @@ func parseDurationOr(s string, fallback time.Duration) time.Duration {
 
 func findTool(toolsDir, id string) (*tool.Tool, error) {
 	return tool.Find(toolsDir, id)
+}
+
+// requestedResources is what the unit actually asked for, after job overrides.
+func requestedResources(t *tool.Tool, j *job.Job) (int, string) {
+	res := t.Resources
+	if j != nil {
+		res = job.EffectiveResources(j, t)
+	}
+	return res.CPU, res.Memory
 }
 
 func renderMounts(spec *sandbox.Spec) []string {

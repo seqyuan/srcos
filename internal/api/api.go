@@ -10,17 +10,20 @@ import (
 
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
-// GrantChecker answers "may this user use this tool".
+// GrantChecker answers "may this user use this tool, and with how much".
 //
-// It is an interface rather than a concrete type so the authorization model can
-// land without touching this package's shape, and so a deployment with no
-// grants configured keeps working.
+// It is an interface rather than a concrete type so this package does not
+// depend on how the policy is stored, and so a deployment can substitute a
+// different model without touching the API surface.
 type GrantChecker interface {
 	Allowed(username, toolID string) bool
+	QuotaFor(username, toolID string) grant.Quota
+	IsAdmin(username string) bool
 }
 
 // RenderToolForm renders the generated fallback form for a tool. It is injected
@@ -38,8 +41,9 @@ type Options struct {
 	ToolsDir string
 	// Storages is the StorageProvider behind /api/paths.
 	Storages storage.Provider
-	// Grants filters the catalogue and gates execution. Nil means "allow all",
-	// which is the pre-authorization default and must be replaced in Phase 3.
+	// Grants filters the catalogue and gates execution. Nil means "authorization
+	// is not wired" (a single-user deployment); the server substitutes a
+	// deny-by-default policy when a grants file is expected but absent.
 	Grants GrantChecker
 	// RenderToolForm renders a tool's generated form page.
 	RenderToolForm RenderToolForm

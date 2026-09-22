@@ -49,6 +49,11 @@ func LogPath(configDir string) string {
 	return filepath.Join(configDir, LogFile)
 }
 
+// GrantsPath is the administrator-authored authorization policy.
+func GrantsPath(configDir string) string {
+	return filepath.Join(configDir, "grants.yaml")
+}
+
 // StoragesPath is the administrator-authored shared-data declaration.
 func StoragesPath(configDir string) string {
 	return filepath.Join(configDir, "storages.yaml")

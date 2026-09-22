@@ -14,6 +14,7 @@ import (
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/proxy"
 	"github.com/seqyuan/srcos/internal/rate"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -105,11 +106,43 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		}
 	}
 
+	// The authorization policy. A configured-or-defaulted policy is always
+	// present, because "no policy" and "policy allowing everything" must not be
+	// the same state: a deployment that forgot the file should deny, not open.
+	grants := opts.Grants
+	if grants == nil {
+		policy, err := grant.Load(config.GrantsPath(configDir))
+		if err != nil {
+			log.Printf("[srcos] grants.yaml: %v — denying every tool until it is fixed", err)
+			// A malformed policy must not become an open policy.
+			policy, _ = grant.New(nil, nil, nil)
+		}
+		grants = policy
+	}
+	if policy, ok := grants.(*grant.Policy); ok && len(policy.Grants) == 0 && !policy.DefaultAllow {
+		log.Printf("[srcos] no grants declared — every tool is invisible except to admins %v", policy.Admins)
+	}
+	// Report tools nobody can reach, because the symptom of a missing grant is
+	// a user seeing an empty catalogue rather than an error.
+	if policy, ok := grants.(*grant.Policy); ok {
+		if tools, err := tool.Discover(toolsDir); err == nil {
+			var ungranted []string
+			for _, t := range tools {
+				if !policy.ReachesAnyone(t.ID) {
+					ungranted = append(ungranted, t.ID)
+				}
+			}
+			if len(ungranted) > 0 {
+				log.Printf("[srcos] tools with no grant (invisible to non-admins): %v", ungranted)
+			}
+		}
+	}
+
 	apiOpts := api.Options{
 		ConfigDir: configDir,
 		ToolsDir:  toolsDir,
 		Storages:  storages,
-		Grants:    opts.Grants,
+		Grants:    grants,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},
@@ -122,7 +155,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		siteTitle:     siteTitle,
 		toolsDir:      toolsDir,
 		storages:      storages,
-		grants:        opts.Grants,
+		grants:        grants,
 		loginLimiter:  rate.NewLimiter(10, 15*time.Minute),
 		totpLimiter:   rate.NewLimiter(10, 15*time.Minute),
 		apiHandler:    api.NewHandlerWithOptions(registry, state.Auth.SessionSecret, apiOpts),

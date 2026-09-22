@@ -86,6 +86,31 @@ type Instance struct {
 
 	Outputs []string          `yaml:"outputs,omitempty"`
 	Tags    map[string]string `yaml:"tags,omitempty"`
+
+	// RequestedCPU / RequestedMemory record what this instance actually asked
+	// for, so an aggregate quota sums real usage instead of guessing from the
+	// tool's ceiling.
+	RequestedCPU    int    `yaml:"requested_cpu,omitempty"`
+	RequestedMemory string `yaml:"requested_memory,omitempty"`
+}
+
+// CPURequest is the instance's CPU request in cores.
+func (i *Instance) CPURequest() int { return i.RequestedCPU }
+
+// MemoryRequestBytes is the instance's memory request in bytes (0 if unknown).
+//
+// An unparsable value yields 0, which under-counts usage. That is the unsafe
+// direction for a quota, so the field is written only by requestedResources,
+// which copies a value ParseMemory already accepted.
+func (i *Instance) MemoryRequestBytes() uint64 {
+	if i.RequestedMemory == "" {
+		return 0
+	}
+	b, err := tool.ParseMemory(i.RequestedMemory)
+	if err != nil {
+		return 0
+	}
+	return b
 }
 
 // InstanceID is the deterministic id for (user, tool) plus a discriminator.

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -75,6 +76,10 @@ func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, userna
 	}
 	if err := job.Validate(j, t); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := h.checkQuota(username, t, j); err != nil {
+		writeJSON(w, 403, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -157,6 +162,60 @@ func (h *Handler) handleListJobs(w http.ResponseWriter, r *http.Request, usernam
 		out = append(out, v)
 	}
 	writeJSON(w, 200, map[string]any{"jobs": out})
+}
+
+// checkQuota enforces the user's aggregate ceiling for a tool.
+//
+// It runs *after* job.Validate, so a request is first checked against what the
+// tool is willing to run with and then against what this user is allowed to
+// consume. The two ceilings are independent: the tool's says "this is the most
+// this analysis can use", the grant's says "this is the most you may take".
+func (h *Handler) checkQuota(username string, t *tool.Tool, j *job.Job) error {
+	if h.opts.Grants == nil {
+		return nil
+	}
+	q := h.opts.Grants.QuotaFor(username, t.ID)
+	if q.IsZero() {
+		return nil
+	}
+
+	eff := job.EffectiveResources(j, t)
+	want := grant.Usage{Instances: 1, CPU: eff.CPU}
+	if eff.Memory != "" {
+		if b, err := tool.ParseMemory(eff.Memory); err == nil {
+			want.Memory = b
+		}
+	}
+
+	used, err := h.usageFor(username, t.ID)
+	if err != nil {
+		return err
+	}
+	return grant.CheckQuota(q, used, want)
+}
+
+// usageFor sums a user's live instances of one tool.
+//
+// Terminal instances do not count: a finished job is not holding a slot, and
+// charging for history would make the quota grow without bound.
+func (h *Handler) usageFor(username, toolID string) (grant.Usage, error) {
+	all, err := runtime.ListInstances(h.configDir())
+	if err != nil {
+		return grant.Usage{}, err
+	}
+	var u grant.Usage
+	for _, inst := range all {
+		if inst.User != username || inst.Tool != toolID || inst.State.Terminal() {
+			continue
+		}
+		u.Instances++
+		// The resources actually requested are not recorded on the instance, so
+		// the tool's declaration is the conservative stand-in: it can only
+		// over-count, which fails closed.
+		u.CPU += inst.CPURequest()
+		u.Memory += inst.MemoryRequestBytes()
+	}
+	return u, nil
 }
 
 // configDir returns the directory instances live under. It is derived from the

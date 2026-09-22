@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
@@ -203,6 +204,9 @@ func runJobSubmit(args []string) {
 
 	t, root := mustLoadTool(*jf.toolsDir, *jf.configDir, *jf.toolID)
 	user := resolveUser(*jf.user)
+	if err := checkGrant(*jf.configDir, user, t.ID); err != nil {
+		fatalf("%v", err)
+	}
 
 	j := &job.Job{
 		SchemaVersion: 1,
@@ -356,6 +360,35 @@ func runJobRun(args []string) {
 // Everything a unit needs to be reachable or to see shared data is wired here,
 // in one place, so no code path can build a runner that silently lacks one of
 // them.
+// checkGrant enforces the policy on the CLI paths that create instances on
+// behalf of a user.
+//
+// The CLI is the operator's interface, and admins bypass the policy — but
+// `srcos svc start --user alice` is still "alice uses this tool", so it is
+// checked rather than assumed. Consistency between the HTTP surface and the CLI
+// is what makes the audit trail trustworthy.
+func checkGrant(configDir, user, toolID string) error {
+	policy, err := grant.Load(config.GrantsPath(configDir))
+	if err != nil {
+		return err
+	}
+	if policy == nil {
+		return nil
+	}
+	if !policy.Allowed(user, toolID) {
+		return fmt.Errorf("user %s is not authorized for tool %s%s", user, toolID,
+			grantHint(policy, user))
+	}
+	return nil
+}
+
+func grantHint(policy *grant.Policy, user string) string {
+	if groups := policy.GroupsOf(user); len(groups) > 0 {
+		return fmt.Sprintf(" (their groups: %v)", groups)
+	}
+	return ""
+}
+
 func buildRunner(configDir, toolsDir, user string) (*runtime.Runner, *route.Table, error) {
 	storages, err := storage.Load(config.StoragesPath(configDir))
 	if err != nil {
@@ -429,6 +462,9 @@ func runSvcStart(args []string) {
 	}
 	if t.Kind != tool.KindService {
 		fatalf("tool %s is kind %s; use `srcos job run` for tasks", t.ID, t.Kind)
+	}
+	if err := checkGrant(*jf.configDir, user, t.ID); err != nil {
+		fatalf("%v", err)
 	}
 
 	j := serviceJob(t, *jf.name, *jf.params, *jf.tags)
@@ -735,13 +771,24 @@ func configDirFlag(fs *flag.FlagSet) *string {
 	return dir
 }
 
-// parseFlagsLoose allows flags and positionals to interleave, which Go's flag
-// package does not do by default.
+// parseFlagsLoose allows flags and positionals to interleave.
+//
+// Go's flag package stops at the first non-flag argument, so a command like
+// `srcos grant group bio --user alice` would silently ignore --user and then
+// complain that the group is empty. Re-parsing after each positional consumes
+// them in any order, which is what a person typing a command expects.
 func parseFlagsLoose(fs *flag.FlagSet, args []string, positional *[]string) {
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+	for {
+		if err := fs.Parse(args); err != nil {
+			os.Exit(1)
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return
+		}
+		*positional = append(*positional, rest[0])
+		args = rest[1:]
 	}
-	*positional = append(*positional, fs.Args()...)
 }
 
 // kvList collects repeated key=value flags.
