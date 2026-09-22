@@ -1,0 +1,380 @@
+<style>
+  /* ── Sticky glass nav (blur only where it overlaps scrolling content) ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--pad-x);
+    height: 54px;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(245,245,247,0.72);
+    -webkit-backdrop-filter: saturate(180%%) blur(20px);
+    backdrop-filter: saturate(180%%) blur(20px);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .dark .header { background: rgba(22,22,23,0.72); }
+  /* hairline appears only once content actually scrolls beneath (see script.js) */
+  .header.scrolled { border-bottom-color: var(--border); box-shadow: 0 1px 12px rgba(0,0,0,0.04); }
+  .header h1 {
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+  .logout-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    text-decoration: none;
+    height: 40px;
+    padding: 0 16px;
+    border-radius: var(--r-pill);
+    font-size: 13px;
+    font-weight: 550;
+    display: inline-flex;
+    align-items: center;
+    transition: background 0.15s var(--ease-out-quart);
+  }
+  .logout-btn:hover { background: var(--hover); text-decoration: none; }
+  .add-btn {
+    background: var(--accent);
+    color: #fff;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--r-pill);
+    font-size: 1.3rem;
+    font-weight: 600;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--sh-card);
+  }
+  .add-btn:hover { background: var(--accent-hover); }
+  .theme-btn { width: 40px; height: 40px; }
+
+  /* ── Main grid (dense column) ── */
+  .main {
+    max-width: var(--max-grid);
+    margin: 0 auto;
+    padding: clamp(24px, 4vw, 44px) var(--pad-x) 64px;
+  }
+  .hint { color: var(--text-muted); font-size: 13px; margin-bottom: 28px; }
+  .hint code { font-family: var(--mono); font-size: 12px; }
+
+  /* ── Category blocks ── */
+  .category-block { margin-bottom: clamp(28px, 4vw, 40px); }
+  .category-title {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    padding-left: 4px;
+  }
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+    min-height: 3rem;
+  }
+  .card-grid.drop-target { outline: 2px dashed var(--accent); outline-offset: 4px; }
+
+  /* ── Service cards (white surface, gentle hover lift) ── */
+  .service-card {
+    background: var(--bg-panel);
+    border-radius: var(--r-card);
+    box-shadow: var(--sh-card);
+    transition: transform 0.2s var(--ease-out-quart), box-shadow 0.2s var(--ease-out-quart);
+    position: relative;
+  }
+  .service-card:hover { transform: translateY(-3px); box-shadow: var(--sh-lift); }
+  .service-card.dragging { opacity: 0.45; }
+  .card-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px 0;
+  }
+  .drag-handle {
+    cursor: grab;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    user-select: none;
+    padding: 4px 6px;
+    border-radius: var(--r-pill);
+  }
+  .drag-handle:active { cursor: grabbing; }
+  .card-actions { display: flex; gap: 2px; }
+  .card-edit, .card-delete {
+    background: transparent;
+    border: none;
+    font-size: 15px;
+    line-height: 1;
+    padding: 6px 8px;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: background 0.15s, color 0.15s;
+  }
+  .card-edit:hover { color: var(--text); background: var(--hover); }
+  .card-delete:hover { color: var(--danger); background: var(--danger-bg); }
+  .card-link {
+    display: flex;
+    gap: 14px;
+    padding: 8px 18px 18px;
+    color: inherit;
+    text-decoration: none;
+  }
+  .card-link:hover { text-decoration: none; }
+  .card-icon {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: var(--r-thumb);
+    background: var(--hover);
+  }
+  .card-icon img { width: 100%%; height: 100%%; object-fit: contain; }
+  /* fallback monogram: one consistent accent gradient, not per-letter colors */
+  .card-letter {
+    display: none;
+    width: 100%%;
+    height: 100%%;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: #fff;
+    border-radius: var(--r-thumb);
+    background: var(--grad-cta);
+  }
+  .card-body { flex: 1; min-width: 0; }
+  .card-body h2 { font-size: 16.5px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 4px; }
+  .card-desc { color: var(--text-muted); font-size: 13px; line-height: 1.5; margin-bottom: 10px; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+  .endpoint {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 11.5px;
+  }
+  .badge {
+    padding: 2px 10px;
+    border-radius: var(--r-pill);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .badge.ws { color: var(--accent); background: var(--accent-bg); }
+  .badge.rate { color: var(--text-muted); background: rgba(0,0,0,0.05); }
+  .dark .badge.rate { background: rgba(255,255,255,0.1); }
+  .empty { text-align: center; color: var(--text-muted); padding: 3.5rem 1rem; }
+
+  /* ── Modal sheet (glass materializes over the dimmed page) ── */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.35);
+    display: flex;
+    overflow-y: auto; /* taller-than-viewport sheets stay reachable (top not clipped) */
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+    padding: 1rem;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.25s var(--ease-out-quart), visibility 0.25s;
+  }
+  .dark .modal-backdrop { background: rgba(0,0,0,0.55); }
+  .modal-backdrop.open { opacity: 1; visibility: visible; }
+  .modal {
+    width: 100%%;
+    max-width: 420px;
+    margin: auto; /* centers when it fits; keeps the top reachable when it overflows */
+    max-height: calc(100vh - 2rem);
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto; /* long forms scroll inside the sheet instead of clipping */
+    background: rgba(250,250,252,0.78);
+    -webkit-backdrop-filter: saturate(180%%) blur(20px);
+    backdrop-filter: saturate(180%%) blur(20px);
+    border: 1px solid var(--border);
+    border-radius: var(--r-panel);
+    box-shadow: var(--sh-overlay);
+    padding: 24px;
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+    transition: transform 0.32s var(--ease-spring), opacity 0.22s var(--ease-out-quart);
+  }
+  .dark .modal { background: rgba(28,28,30,0.78); }
+  .modal-backdrop.open .modal { transform: none; opacity: 1; }
+  .modal h2 { margin-bottom: 18px; font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+  .modal label {
+    display: block;
+    margin: 14px 0 6px;
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--text-muted);
+  }
+  .modal input[type="text"],
+  .modal input[type="number"] {
+    width: 100%%;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-thumb);
+    background: var(--bg-panel);
+    color: var(--text);
+    font-size: 15px;
+    font-family: var(--font);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .modal input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,113,227,0.15);
+  }
+  .dark .modal input:focus { box-shadow: 0 0 0 3px rgba(41,151,255,0.25); }
+  .modal .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .modal .checkbox-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 22px;
+  }
+  .btn-secondary {
+    background: rgba(0,0,0,0.05);
+    color: var(--text);
+    padding: 10px 18px;
+    border-radius: var(--r-pill);
+    font-size: 14px;
+    font-weight: 550;
+    transition: background 0.15s var(--ease-out-quart);
+  }
+  .dark .btn-secondary { background: rgba(255,255,255,0.1); }
+  .btn-secondary:hover { background: rgba(0,0,0,0.09); }
+  .dark .btn-secondary:hover { background: rgba(255,255,255,0.16); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: var(--r-pill);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+
+  /* ── Toast ── */
+  .toast {
+    position: fixed;
+    left: 50%%;
+    bottom: 2.5rem;
+    transform: translateX(-50%%);
+    background: var(--bg-panel);
+    box-shadow: var(--sh-panel);
+    padding: 10px 18px;
+    border-radius: var(--r-pill);
+    display: none;
+    z-index: 25;
+    font-size: 14px;
+  }
+  .toast.show { display: block; }
+
+  .read-only .drag-handle,
+  .read-only .card-edit,
+  .read-only .card-delete,
+  .read-only .add-btn { display: none; }
+</style>
+<header class="header">
+  <h1>%s</h1>
+  <div class="header-actions">
+    <button type="button" class="add-btn" id="fab-add" title="添加服务">+</button>
+    <button type="button" class="theme-btn" id="theme-toggle" onclick="toggleTheme()">🌙</button>
+    <a href="/logout" class="logout-btn">退出</a>
+  </div>
+</header>
+<main class="main%s">
+  <p class="hint" id="dashboard-hint">%s</p>
+  <div id="dashboard">%s</div>
+</main>
+<div class="modal-backdrop" id="add-modal">
+  <form class="modal" id="add-form">
+    <h2>添加端口转发</h2>
+    <label for="add-name">显示名称</label>
+    <input id="add-name" name="name" type="text" required>
+    <label for="add-description">说明</label>
+    <input id="add-description" name="description" type="text">
+    <label for="add-host">后端地址</label>
+    <input id="add-host" name="host" type="text" value="127.0.0.1" required>
+    <label for="add-port">端口</label>
+    <input id="add-port" name="port" type="number" min="1" max="65535" required>
+    <label for="add-path">前端路径</label>
+    <input id="add-path" name="path" type="text" placeholder="根据名称自动生成">
+    <label for="add-backend-path">后端路径 <small style="color:var(--text-muted)">(可选，例如 /app/index.html)</small></label>
+    <input id="add-backend-path" name="backend_path" type="text" placeholder="留空则直接转发到根路径">
+    <label for="add-bwlimit">带宽上限 <small style="color:var(--text-muted)">(可选，字节/秒，留空不限速)</small></label>
+    <input id="add-bwlimit" name="bwlimit" type="number" min="0" step="1" placeholder="例如 10485760 = 10 MB/s">
+    <label for="add-category">分类</label>
+    <input id="add-category" name="category" type="text">
+    <label class="checkbox-row">
+      <input id="add-ws" name="websocket" type="checkbox" checked>
+      <span>WebSocket 代理</span>
+      <small style="color:var(--text-muted);font-size:0.75rem;display:block;margin-top:2px">默认开启，关闭后将拒绝 WebSocket 连接。Jupyter、RStudio 等需保持开启</small>
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="add-cancel">取消</button>
+      <button type="submit" class="btn-primary">添加</button>
+    </div>
+  </form>
+</div>
+<div class="modal-backdrop" id="edit-modal">
+  <form class="modal" id="edit-form">
+    <h2>编辑端口转发</h2>
+    <input type="hidden" id="edit-id" value="">
+    <label for="edit-name">显示名称</label>
+    <input id="edit-name" name="name" type="text" required>
+    <label for="edit-description">说明</label>
+    <input id="edit-description" name="description" type="text">
+    <label for="edit-host">后端地址</label>
+    <input id="edit-host" name="host" type="text" required>
+    <label for="edit-port">端口</label>
+    <input id="edit-port" name="port" type="number" min="1" max="65535" required>
+    <label for="edit-path">前端路径</label>
+    <input id="edit-path" name="path" type="text">
+    <label for="edit-backend-path">后端路径 <small style="color:var(--text-muted)">(可选，例如 /app/index.html)</small></label>
+    <input id="edit-backend-path" name="backend_path" type="text" placeholder="留空则直接转发到根路径">
+    <label for="edit-bwlimit">带宽上限 <small style="color:var(--text-muted)">(可选，字节/秒，留空不限速)</small></label>
+    <input id="edit-bwlimit" name="bwlimit" type="number" min="0" step="1" placeholder="例如 10485760 = 10 MB/s">
+    <label for="edit-category">分类</label>
+    <input id="edit-category" name="category" type="text">
+    <label class="checkbox-row">
+      <input id="edit-ws" name="websocket" type="checkbox">
+      <span>WebSocket 代理</span>
+      <small style="color:var(--text-muted);font-size:0.75rem;display:block;margin-top:2px">默认开启，关闭后将拒绝 WebSocket 连接。Jupyter、RStudio 等需保持开启</small>
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="edit-cancel">取消</button>
+      <button type="submit" class="btn-primary">保存</button>
+    </div>
+  </form>
+</div>
+<div class="toast" id="toast"></div>
+<script>window.__GOPROX_BOOT__ = %s;</script>
+<script>%s</script>

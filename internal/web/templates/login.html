@@ -1,0 +1,18 @@
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="top-actions">
+      <button type="button" class="theme-btn" id="theme-toggle" onclick="toggleTheme()">🌙</button>
+    </div>
+    <h1>%s</h1>
+    <p class="subtitle">多服务认证反向代理入口</p>
+    %s
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="%s">
+      <label for="username">用户名</label>
+      <input type="text" id="username" name="username" required autofocus autocomplete="username">
+      <label for="password">密码</label>
+      <input type="password" id="password" name="password" required autocomplete="current-password">
+      <button type="submit" class="submit-btn">登录</button>
+    </form>
+  </div>
+</div>

@@ -1,0 +1,38 @@
+# Binaries
+srcos
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# State/config (user-specific) — anchored to the repo root so that
+# internal/config/ (source code) is not accidentally ignored.
+/state.yaml
+/config.yaml
+/config/
+/data/
+
+# Build output of the embedded frontend bundle (webui/ → internal/web/dist/)
+internal/web/dist/
+
+# WeChat draft articles (公众号软文)
+docs/公众号软文*
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
