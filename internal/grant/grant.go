@@ -25,12 +25,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Policy is the parsed grants.yaml.
+//
+// It is safe for concurrent use: every request asks it a question, and the
+// admin surface mutates it while those requests are in flight. Mutating it *in
+// place* (rather than swapping a new value in) is what makes an authorization
+// change take effect immediately — every holder of this pointer, in this process
+// and in the API handlers, sees the new answer on its next request.
 type Policy struct {
+	// mu guards every field below. Public methods take it; the *Locked helpers
+	// assume it is already held (Go's RWMutex is not reentrant, so a public
+	// method must never call another public one while holding it).
+	mu sync.RWMutex
+
 	// Groups name sets of users. Membership is a list, not a role: a user can
 	// be in any number of groups, and a grant may name several.
 	Groups map[string][]string `yaml:"groups,omitempty"`
@@ -48,6 +60,38 @@ type Policy struct {
 	// false, and being a named field it shows up in the file a reviewer reads —
 	// unlike a compile-time flag that no operator ever sees.
 	DefaultAllow bool `yaml:"default_allow,omitempty"`
+}
+
+// Snapshot returns a deep copy, for callers that need a consistent view without
+// holding the lock (the YAML writer, and the admin page's rendering).
+func (p *Policy) Snapshot() *Policy {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := &Policy{
+		Admins:       append([]string(nil), p.Admins...),
+		DefaultAllow: p.DefaultAllow,
+	}
+	if p.Groups != nil {
+		out.Groups = make(map[string][]string, len(p.Groups))
+		for name, members := range p.Groups {
+			out.Groups[name] = append([]string(nil), members...)
+		}
+	}
+	for _, g := range p.Grants {
+		out.Grants = append(out.Grants, g.clone())
+	}
+	return out
+}
+
+// clone copies a grant, so a snapshot never shares a slice with the live policy.
+func (g Grant) clone() Grant {
+	out := g
+	out.Users = append([]string(nil), g.Users...)
+	out.Groups = append([]string(nil), g.Groups...)
+	return out
 }
 
 // Grant is one positive access statement.
@@ -123,6 +167,15 @@ func New(groups map[string][]string, admins []string, grants []Grant) (*Policy, 
 
 // Validate checks the policy's internal consistency.
 func (p *Policy) Validate() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.validateLocked()
+}
+
+func (p *Policy) validateLocked() error {
 	var problems []string
 	bad := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 
@@ -194,16 +247,18 @@ func (p *Policy) Allowed(username, toolID string) bool {
 		// honest answer for a single-user deployment.
 		return true
 	}
-	if p.IsAdmin(username) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isAdminLocked(username) {
 		return true
 	}
 	if p.DefaultAllow {
 		return true
 	}
-	if g, ok := p.grantFor(toolID); ok && g.Allows(username, p.Groups) {
+	if g, ok := p.grantForLocked(toolID); ok && g.Allows(username, p.Groups) {
 		return true
 	}
-	if g, ok := p.grantFor("*"); ok && g.Allows(username, p.Groups) {
+	if g, ok := p.grantForLocked("*"); ok && g.Allows(username, p.Groups) {
 		return true
 	}
 	return false
@@ -214,6 +269,12 @@ func (p *Policy) IsAdmin(username string) bool {
 	if p == nil {
 		return false
 	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.isAdminLocked(username)
+}
+
+func (p *Policy) isAdminLocked(username string) bool {
 	for _, a := range p.Admins {
 		if a == username {
 			return true
@@ -231,10 +292,12 @@ func (p *Policy) QuotaFor(username, toolID string) Quota {
 	if p == nil {
 		return Quota{}
 	}
-	if g, ok := p.grantFor(toolID); ok && g.Allows(username, p.Groups) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if g, ok := p.grantForLocked(toolID); ok && g.Allows(username, p.Groups) {
 		return g.Quota
 	}
-	if g, ok := p.grantFor("*"); ok && g.Allows(username, p.Groups) {
+	if g, ok := p.grantForLocked("*"); ok && g.Allows(username, p.Groups) {
 		return g.Quota
 	}
 	return Quota{}
@@ -247,11 +310,16 @@ func (p *Policy) QuotaFor(username, toolID string) Quota {
 // first. It deliberately does not answer "who": that requires enumerating users,
 // which the policy does not know.
 func (p *Policy) ReachesAnyone(toolID string) bool {
-	if p == nil || p.DefaultAllow {
+	if p == nil {
+		return true
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.DefaultAllow {
 		return true
 	}
 	for _, g := range []string{toolID, "*"} {
-		entry, ok := p.grantFor(g)
+		entry, ok := p.grantForLocked(g)
 		if !ok {
 			continue
 		}
@@ -266,6 +334,8 @@ func (p *Policy) ReachesAnyone(toolID string) bool {
 // A tool with *no* grant is not listed, because that is the common case and the
 // caller already reports those separately.
 func (p *Policy) ToolsNobodyCanReach() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	var out []string
 	for _, g := range p.Grants {
 		if !g.Public && len(g.Users) == 0 && len(g.Groups) == 0 {
@@ -281,6 +351,8 @@ func (p *Policy) GroupsOf(username string) []string {
 	if p == nil {
 		return nil
 	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	var out []string
 	for name, members := range p.Groups {
 		for _, m := range members {
@@ -294,10 +366,11 @@ func (p *Policy) GroupsOf(username string) []string {
 	return out
 }
 
-func (p *Policy) grantFor(toolID string) (Grant, bool) {
+// grantForLocked returns a copy of a tool's grant. Callers hold the lock.
+func (p *Policy) grantForLocked(toolID string) (Grant, bool) {
 	for _, g := range p.Grants {
 		if g.Tool == toolID {
-			return g, true
+			return g.clone(), true
 		}
 	}
 	return Grant{}, false

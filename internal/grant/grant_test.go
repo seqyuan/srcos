@@ -333,3 +333,68 @@ func TestNilPolicyAllows(t *testing.T) {
 		t.Fatal("a nil policy has no quotas")
 	}
 }
+
+// Every request asks the policy a question, and the admin surface mutates it
+// while those requests are in flight. Mutating in place (rather than swapping a
+// new value in) is what makes an authorization change take effect immediately,
+// so the policy has to be safe to read and write concurrently.
+func TestPolicyIsSafeToMutateWhileReading(t *testing.T) {
+	p, err := New(map[string][]string{"bio": {"alice"}}, []string{"root"}, []Grant{
+		{Tool: "demo", Public: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			p.Allowed("bob", "demo")
+			p.IsAdmin("root")
+			p.QuotaFor("bob", "demo")
+			p.Describe()
+			p.GroupsOf("alice")
+			p.ReachesAnyone("demo")
+			p.ToolsNobodyCanReach()
+			p.GrantTools()
+			p.Grant("demo")
+			_ = p.Snapshot()
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		p.AddUserToGrant("demo", "bob")
+		p.RemoveUserFromGrant("demo", "bob")
+		p.AddGroupToGrant("demo", "bio")
+		p.RemoveGroupFromGrant("demo", "bio")
+		p.SetQuota("demo", Quota{MaxCPU: i + 1})
+		p.SetGroup("bio", []string{"alice"})
+	}
+	<-done
+
+	// And the mutations actually landed.
+	if !p.Allowed("alice", "demo") {
+		t.Fatal("a group grant must take effect on the live policy")
+	}
+	if q := p.QuotaFor("alice", "demo"); q.MaxCPU != 500 {
+		t.Fatalf("quota = %d, want the last write", q.MaxCPU)
+	}
+}
+
+// A snapshot must be a copy: the admin page renders one while requests keep
+// mutating the live policy.
+func TestSnapshotIsIndependent(t *testing.T) {
+	p, err := New(nil, nil, []Grant{{Tool: "demo", Users: []string{"alice"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := p.Snapshot()
+	snap.Grants[0].Users = append(snap.Grants[0].Users, "bob")
+	if p.Allowed("bob", "demo") {
+		t.Fatal("editing a snapshot must not touch the live policy")
+	}
+	if got := p.Grants[0].Users; len(got) != 1 || got[0] != "alice" {
+		t.Fatalf("live policy = %v", got)
+	}
+}

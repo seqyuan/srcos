@@ -15,13 +15,16 @@ import (
 // would either deny everything or expose everything for the moment it takes to
 // notice, and "which of the two" is not a coin worth flipping.
 func Save(path string, p *Policy) error {
-	if err := p.Validate(); err != nil {
+	// Write a snapshot: the file has to be one consistent policy, even while
+	// requests are being served against the live one.
+	snapshot := p.Snapshot()
+	if err := snapshot.Validate(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(p)
+	data, err := yaml.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
@@ -41,19 +44,31 @@ func Save(path string, p *Policy) error {
 
 // SetGrant inserts or replaces the grant for a tool.
 func (p *Policy) SetGrant(g Grant) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.setGrantLocked(g)
+}
+
+func (p *Policy) setGrantLocked(g Grant) {
 	for i := range p.Grants {
 		if p.Grants[i].Tool == g.Tool {
-			p.Grants[i] = g
+			p.Grants[i] = g.clone()
 			p.sortGrants()
 			return
 		}
 	}
-	p.Grants = append(p.Grants, g)
+	p.Grants = append(p.Grants, g.clone())
 	p.sortGrants()
 }
 
 // RemoveGrant deletes the grant for a tool and reports whether it existed.
 func (p *Policy) RemoveGrant(tool string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.removeGrantLocked(tool)
+}
+
+func (p *Policy) removeGrantLocked(tool string) bool {
 	for i := range p.Grants {
 		if p.Grants[i].Tool == tool {
 			p.Grants = append(p.Grants[:i], p.Grants[i+1:]...)
@@ -63,11 +78,17 @@ func (p *Policy) RemoveGrant(tool string) bool {
 	return false
 }
 
-// Grant returns the grant for a tool.
-func (p *Policy) Grant(tool string) (Grant, bool) { return p.grantFor(tool) }
+// Grant returns a copy of the grant for a tool.
+func (p *Policy) Grant(tool string) (Grant, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.grantForLocked(tool)
+}
 
 // GrantTools lists the tools with an explicit grant, sorted.
 func (p *Policy) GrantTools() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	out := make([]string, 0, len(p.Grants))
 	for _, g := range p.Grants {
 		out = append(out, g.Tool)
@@ -79,6 +100,8 @@ func (p *Policy) GrantTools() []string {
 // SetGroup inserts or replaces a group's membership. Empty membership deletes
 // the group, so `--user` with nothing to add is not left as a ghost entry.
 func (p *Policy) SetGroup(name string, members []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.Groups == nil {
 		p.Groups = map[string][]string{}
 	}
@@ -92,6 +115,12 @@ func (p *Policy) SetGroup(name string, members []string) {
 
 // GroupNames lists group names, sorted.
 func (p *Policy) GroupNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.groupNamesLocked()
+}
+
+func (p *Policy) groupNamesLocked() []string {
 	out := make([]string, 0, len(p.Groups))
 	for name := range p.Groups {
 		out = append(out, name)
@@ -102,8 +131,11 @@ func (p *Policy) GroupNames() []string {
 
 // SetAdmins replaces the admin list.
 func (p *Policy) SetAdmins(admins []string) {
-	sort.Strings(admins)
-	p.Admins = admins
+	sorted := append([]string(nil), admins...)
+	sort.Strings(sorted)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Admins = sorted
 }
 
 // AddUserToGrant adds a user to a tool's grant, creating the grant if needed.
@@ -112,7 +144,9 @@ func (p *Policy) SetAdmins(admins []string) {
 // is "give alice this tool", and requiring a separate "create grant" step would
 // mean a half-configured state that denies what the operator just asked for.
 func (p *Policy) AddUserToGrant(tool, user string) {
-	g, _ := p.grantFor(tool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, _ := p.grantForLocked(tool)
 	g.Tool = tool
 	for _, u := range g.Users {
 		if u == user {
@@ -121,12 +155,14 @@ func (p *Policy) AddUserToGrant(tool, user string) {
 	}
 	g.Users = append(g.Users, user)
 	sort.Strings(g.Users)
-	p.SetGrant(g)
+	p.setGrantLocked(g)
 }
 
 // AddGroupToGrant adds a group to a tool's grant.
 func (p *Policy) AddGroupToGrant(tool, group string) {
-	g, _ := p.grantFor(tool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, _ := p.grantForLocked(tool)
 	g.Tool = tool
 	for _, existing := range g.Groups {
 		if existing == group {
@@ -135,12 +171,14 @@ func (p *Policy) AddGroupToGrant(tool, group string) {
 	}
 	g.Groups = append(g.Groups, group)
 	sort.Strings(g.Groups)
-	p.SetGrant(g)
+	p.setGrantLocked(g)
 }
 
 // RemoveUserFromGrant removes a user, dropping the grant when it admits nobody.
 func (p *Policy) RemoveUserFromGrant(tool, user string) bool {
-	g, ok := p.grantFor(tool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, ok := p.grantForLocked(tool)
 	if !ok {
 		return false
 	}
@@ -155,16 +193,18 @@ func (p *Policy) RemoveUserFromGrant(tool, user string) bool {
 	}
 	g.Users = kept
 	if !g.Public && len(g.Users) == 0 && len(g.Groups) == 0 {
-		p.RemoveGrant(tool)
+		p.removeGrantLocked(tool)
 		return removed
 	}
-	p.SetGrant(g)
+	p.setGrantLocked(g)
 	return removed
 }
 
 // RemoveGroupFromGrant removes a group, dropping the grant when it admits nobody.
 func (p *Policy) RemoveGroupFromGrant(tool, group string) bool {
-	g, ok := p.grantFor(tool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, ok := p.grantForLocked(tool)
 	if !ok {
 		return false
 	}
@@ -179,26 +219,30 @@ func (p *Policy) RemoveGroupFromGrant(tool, group string) bool {
 	}
 	g.Groups = kept
 	if !g.Public && len(g.Users) == 0 && len(g.Groups) == 0 {
-		p.RemoveGrant(tool)
+		p.removeGrantLocked(tool)
 		return removed
 	}
-	p.SetGrant(g)
+	p.setGrantLocked(g)
 	return removed
 }
 
 // SetQuota sets a tool's quota without disturbing its membership.
 func (p *Policy) SetQuota(tool string, q Quota) error {
-	g, ok := p.grantFor(tool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	g, ok := p.grantForLocked(tool)
 	if !ok {
 		return fmt.Errorf("no grant for %s: grant the tool to someone first", tool)
 	}
 	g.Quota = q
-	p.SetGrant(g)
+	p.setGrantLocked(g)
 	return nil
 }
 
 // Describe renders a policy for `srcos grant list`.
 func (p *Policy) Describe() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	var b []byte
 	add := func(format string, a ...any) { b = append(b, []byte(fmt.Sprintf(format, a...))...) }
 
@@ -210,7 +254,10 @@ func (p *Policy) Describe() string {
 	}
 	if len(p.Groups) > 0 {
 		add("\ngroups:\n")
-		for _, name := range p.GroupNames() {
+		// groupNamesLocked, not GroupNames: this method already holds the read
+		// lock, and Go's RWMutex is not reentrant — a recursive RLock blocks as
+		// soon as a writer is waiting, which is a hang, not an error.
+		for _, name := range p.groupNamesLocked() {
 			add("  %-16s %v\n", name, p.Groups[name])
 		}
 	}
@@ -266,6 +313,7 @@ func orDash(s string) string {
 	return s
 }
 
+// sortGrants keeps the file and the rendering stable. Callers hold the lock.
 func (p *Policy) sortGrants() {
 	sort.Slice(p.Grants, func(i, j int) bool { return p.Grants[i].Tool < p.Grants[j].Tool })
 }
