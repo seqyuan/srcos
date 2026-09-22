@@ -53,6 +53,14 @@ const (
 	// FromSamplePrefix marks a value that comes from a sample-table column:
 	// "sample.<column>".
 	FromSamplePrefix = "sample."
+	// FromOutputPrefix marks a value that is the path of one of the node's own
+	// declared outputs: "output.<name>".
+	//
+	// It exists because a tool that writes somewhere must be *told* where, and
+	// the platform owns flow paths (see layout.go). A binding passes an upstream
+	// output downstream; this passes a node's own output into its parameter —
+	// which is how the same wire works at both ends without any path templating.
+	FromOutputPrefix = "output."
 )
 
 var (
@@ -133,6 +141,14 @@ type Expose struct {
 func (e Expose) SampleField() string {
 	if strings.HasPrefix(e.From, FromSamplePrefix) {
 		return strings.TrimPrefix(e.From, FromSamplePrefix)
+	}
+	return ""
+}
+
+// OutputName returns the node output this exposure points at, or "".
+func (e Expose) OutputName() string {
+	if strings.HasPrefix(e.From, FromOutputPrefix) {
+		return strings.TrimPrefix(e.From, FromOutputPrefix)
 	}
 	return ""
 }
@@ -388,8 +404,18 @@ func (f *Flow) ValidateAgainst(resolve func(id, version string) (*tool.Tool, err
 			bad("%s: input %s.%s is already fed by binding %s", where, e.Node, e.Input, from)
 			continue
 		}
-		if e.From != FromUser && e.SampleField() == "" {
-			bad("%s: from must be %q or %q, got %q", where, FromUser, FromSamplePrefix+"<field>", e.From)
+		switch {
+		case e.From == FromUser, e.SampleField() != "":
+		case e.OutputName() != "":
+			// A node may only be handed paths of outputs it actually declares:
+			// otherwise the value would name a directory nothing produces.
+			if _, ok := findOutput(manifest, e.OutputName()); !ok {
+				bad("%s: node %q has no output %q", where, e.Node, e.OutputName())
+				continue
+			}
+		default:
+			bad("%s: from must be %q, %q or %q, got %q",
+				where, FromUser, FromSamplePrefix+"<field>", FromOutputPrefix+"<name>", e.From)
 			continue
 		}
 		exposedInput[key] = e.From

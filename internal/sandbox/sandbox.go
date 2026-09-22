@@ -40,6 +40,7 @@ const (
 	PathHome      = "/home"      // parent of the virtual home
 	PathJobDir    = "/workspace/jobs"
 	PathTool      = "/tool" // the tool package                ro, builtin
+	PathFlow      = "/flow" // the user's flow runs (../flow.PathFlow)  rw, builtin
 	PathTmp       = "/tmp"  // tmpfs                           rw, builtin
 )
 

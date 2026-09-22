@@ -834,7 +834,29 @@ expose:
 
 `srcos flow validate` 在注册期检查 14 类问题（DAG 无环、连线类型兼容、必填输入有且仅有一个来源、
 节点必须是 `kind: task` 的工具、`id@version` 精确匹配……），一次报出全部问题。
-**调度器（`flow run` / `FlowRun`）尚未实现** —— 进度见 roadmap §6 Phase 4。
+
+**跑起来**：
+
+```bash
+# 先看会跑什么（每个「节点 × 样本」一个任务，及其参数与产物路径）——不提交任何东西
+srcos flow run --flows-dir srcos-flows --tools-dir srcos-tools \
+  --samples samples.csv scrna --dry-run
+
+# 真跑：按依赖顺序把每个 (节点 × 样本) 展开成一个普通任务
+srcos flow run --flows-dir srcos-flows --tools-dir srcos-tools \
+  --user alice --samples samples.csv scrna
+
+srcos flow status                  # 本用户的流程运行
+srcos flow resume <run-id>         # 续跑：跳过已完成/已签名的节点
+```
+
+- 样本表（CSV/TSV，带表头）的列由 `expose.from: sample.<列>` 指定；`--param k=v` 填 `from: user` 的参数。
+- 每个节点产物落在**平台推导**的 `/flow/runs/<run>/nodes/<节点>/<样本>/<输出名>` 下
+  （`/flow` 是继 `/workspace`、`/home/<用户>` 之后的第三个内建挂载），所以连线不需要任何模板语法；
+  `expose.from: output.<名>` 用同一机制告诉工具往哪写。
+- 展开出来的就是**普通任务**：同样的沙箱、配额、实例记录与审计，`job list` 里带 `flow/run/node/sample` 标签。
+- `nodes/<节点>/.sign` 是「这一步做完了」的权威：成功时自动写，也可以手工 `touch` 跳过（annopi 同款逃生口）。
+- 当前是**顺序执行**、失败即停（第一个坏样本就不再往下投）；并发上限与 `retry.max` 自动重试是下一步。
 
 ### 工具开发者
 

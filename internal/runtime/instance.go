@@ -223,6 +223,12 @@ type Paths struct {
 	Tool      string
 	Workspace string
 	Home      string
+	// FlowRuns is the user's flow-run directory (data/flows/<user>), mounted at
+	// /flow for every unit. It is builtin runtime state — like the workspace and
+	// the virtual home, and unlike a data storage (ADR-020) — because it is what
+	// makes a flow's edges resolvable: two tools can only share a path if the
+	// platform put it somewhere both can see.
+	FlowRuns string
 	// JobDir is empty for a service: services have no submission directory.
 	JobDir     string
 	JobID      string
@@ -237,6 +243,7 @@ func PathsFor(configDir, user, toolID, jobID string) Paths {
 		Tool:      toolID,
 		Workspace: config.WorkspaceDir(configDir, user, toolID),
 		Home:      config.HomeDir(configDir, user),
+		FlowRuns:  config.FlowRunsDir(configDir, user),
 		JobID:     jobID,
 	}
 	if jobID != "" {
@@ -253,7 +260,10 @@ func PathsFor(configDir, user, toolID, jobID string) Paths {
 // EnsureDirs creates the workspace, virtual home and log directory, applying
 // the tool's templates exactly once.
 func (p Paths) EnsureDirs(t *tool.Tool) error {
-	dirs := []string{p.Workspace, p.Home, filepath.Dir(p.LogPath)}
+	// FlowRuns is mounted into every sandbox, so it has to exist before bwrap
+	// is asked to bind it (an empty directory is the normal state: flows are
+	// opt-in, and most tools never look at /flow).
+	dirs := []string{p.Workspace, p.Home, p.FlowRuns, filepath.Dir(p.LogPath)}
 	if p.JobDir != "" {
 		dirs = append(dirs, p.JobDir)
 	}
@@ -321,6 +331,15 @@ func (v PathView) JobRoot() string {
 		return v.Paths.JobDir
 	}
 	return sandbox.JobRootPath(v.Paths.JobID)
+}
+
+// FlowRuns is the host path behind /flow (for the degraded mode, where the
+// sandbox path does not exist on the host).
+func (v PathView) FlowRuns() string {
+	if v.Degraded {
+		return v.Paths.FlowRuns
+	}
+	return sandbox.PathFlow
 }
 
 func (v PathView) ToolDir(t *tool.Tool) string {

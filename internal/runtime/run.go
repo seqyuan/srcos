@@ -129,6 +129,7 @@ func BuildSpec(t *tool.Tool, p Paths, storages storage.Provider) (*sandbox.Spec,
 	for _, m := range []sandbox.Mount{
 		{HostPath: p.Workspace, SandboxPath: sandbox.PathWorkspace, Mode: sandbox.ReadWrite, Origin: "builtin"},
 		{HostPath: p.Home, SandboxPath: sandbox.HomePath(p.User), Mode: sandbox.ReadWrite, Origin: "builtin"},
+		{HostPath: p.FlowRuns, SandboxPath: sandbox.PathFlow, Mode: sandbox.ReadWrite, Origin: "builtin"},
 		{HostPath: t.Dir, SandboxPath: sandbox.PathTool, Mode: sandbox.ReadOnly, Origin: "tool"},
 	} {
 		if err := spec.Add(m); err != nil {

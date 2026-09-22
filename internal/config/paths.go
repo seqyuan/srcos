@@ -139,6 +139,16 @@ func JobsDir(configDir, user, toolID string) string {
 	return filepath.Join(WorkspaceDir(configDir, user, toolID), "jobs")
 }
 
+// FlowRunsDir is the host root of a user's flow runs (data/flows/<user>),
+// mounted into every sandbox at /flow.
+//
+// It is *builtin* runtime state, not a data storage: it is created by SRCOS,
+// never declared by an administrator, and never selectable in a path picker.
+// Flow paths are computed by the platform (see internal/flow/layout.go).
+func FlowRunsDir(configDir, user string) string {
+	return filepath.Join(DataDir(configDir), "flows", user)
+}
+
 // InstancesDir holds the runtime instance records (data/instances).
 func InstancesDir(configDir string) string {
 	return filepath.Join(DataDir(configDir), "instances")
