@@ -8,9 +8,17 @@
 
 ## 1. 定位与设计思想
 
+> ### SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。
+
+这条是本项目**全部设计取舍的最终判据**，展开论述见 [`../AGENTS.md`](../AGENTS.md)「定位」章。
+
 **一句话**：SRCOS 把「一台服务器、一个 Web 入口、每人管理自己的转发」升级为
 「**一个入口，上架工具，授权使用，人人有隔离工作区，工具被实例化管理**」——
 一个面向实验室/HPC 的小型云工具平台。
+
+成本结构上，SRCOS 的赌注是：**一次性 token 投入（把探索出的方法固化成工具）+ 零边际 token 成本（反复执行）**
+—— 本质是**把 AI 的探索成果资本化**。因此 SRCOS 与 AI 平台是互补而非竞争关系，
+应该主动充当 AI 平台的执行层（MCP 就是对接口，见 ADR-019）。
 
 ### 1.1 沿用自原 goprox 的四条不变原则
 
@@ -21,13 +29,16 @@
 | **后端只监听回环** | 网关是唯一入口，这是全部安全模型的基石 |
 | **代理层与编排层解耦** | 编排层不碰 HTTP，代理层不碰容器，两者只通过「动态路由表」耦合 |
 
-### 1.2 新增的三条
+### 1.2 新增的原则
 
 | 原则 | 含义 |
 |---|---|
-| **不碰工具 UI** | 工具界面由开发者用 python/R/shiny/任意方式自建；SRCOS 只提供投递与状态契约 |
-| **不用需要 root 的工具** | 排除 docker daemon；优先 apptainer / bubblewrap 这类无 root 方案 |
-| **一个运行原语** | 常驻服务与一次性任务是同一个 `RunUnit`，差异只有三个字段（见 ADR-003） |
+| **不碰工具 UI** | 工具界面由开发者自建；SRCOS 只提供投递、状态契约与**原语控件**（路径选择器、文件预览） |
+| **一份 `interface`，三个前端** | 机器可读的类型签名同时派生 MCP schema / 画布连线 / 用户表单（ADR-018） |
+| **能力即 provider** | 凡是有多种来源或实现的能力都抽象成 provider，平台只依赖接口（ADR-020） |
+| **不用需要 root 的工具** | 排除 docker daemon / udocker / proot；优先 apptainer、bubblewrap（ADR-014） |
+| **一个运行原语** | 常驻服务与一次性任务是同一个 `RunUnit`，差异只有三个字段（ADR-003） |
+| **不做 OS 级 UID 隔离** | 所有实例以同一 OS 用户运行；隔离靠 mount namespace + `Jail`（ADR-021） |
 
 ### 1.3 参考过的项目
 
@@ -37,7 +48,7 @@
 | `../annopi` | `task.yml` 模块规范、`pipeline.yml` 的 `tasks`+`dependencies`、`deps` 三层优先级、`annopi install xxx@v1.2.3` 的模块复用 |
 | `../annotask`、`../ata` | 样本级并行执行器（工具内部用，SRCOS 不执行）、断点续跑 `.sign` 标记、OOM 自适应重试 |
 | `../goqsub` | SGE 提交参数（`-pe smp`、`-l h_vmem`、`-q`、`-p`）的取值参考 |
-| `deepseek-harness` | 文件预览的「资源地址协议 + viewer 注册表」设计（`dsh-resource://`），只借设计不借代码 |
+| `deepseek-harness` | 「资源地址协议 + viewer 注册表 + 认领优先级」的设计、provider 契约形态、bundle/patch 的组合模型；代码无法直接复用（ADR-011），集成策略见 ADR-016 |
 
 ---
 
@@ -58,6 +69,11 @@
 - [x] **删除 `site/` 静态文档站**；其中 `tunnel` 与 `dsh-demo` 两篇正文已转为 `docs/tunnel.md`、`docs/dsh-demo.md`
 - [x] **建立 git 仓库**，首次提交
 - [x] 基线校验：`go build` / `go vet` / `go test ./...` 全绿（8 个包）
+- [x] 建立 `AGENTS.md`（不变式与定位）
+- [x] 确定产品定位：AI 平台的确定性执行后端（ADR-017）
+- [x] 调研 deepseek-harness 的插件装配边界，定下 dsh 三层集成策略（ADR-016）
+- [x] 定下「一份 interface 三个前端」「能力即 provider」「OS 用户 ≠ SRCOS 用户」三条架构原则
+      （ADR-018 / ADR-020 / ADR-021）
 
 ### 2.2 进行中
 
@@ -65,7 +81,11 @@
 
 ### 2.3 下一步（Phase 1）
 
-见 §6。当前阻塞点：需确认 §8 的待决策项，然后开始 Phase 1。
+见 §6。已确认的三项方向决策：
+
+1. **先做 B（`srcos://` 协议 + REST/SSE + dsh 插件），再做 A（iframe 嵌入 dsh 实例）** —— B 是 A 的前置
+2. **MCP Server 排在 Phase 3.5** —— 早于云流程，因为它只依赖 `interface` 与 API，是「现代化」的招牌
+3. **OS 用户与 SRCOS 注册用户是两个概念** —— 注册用户需要构造虚拟 home 与虚拟 workspace（ADR-021）
 
 ---
 
@@ -142,14 +162,28 @@ interface:                  # ← 机器可读（不是 annopi 的"仅文档"）
     - { name: fastq_dir, type: directory, required: true,
         files: [R1.fastq.gz, R2.fastq.gz] }
     - { name: sample_id, type: string, required: true }
-    - { name: ref,       type: dirpath, default: /share/ref/GRCh38 }
+    - { name: ref, type: path, from: cluster-share, select: directory,
+        default: /data/share/ref/GRCh38 }
   outputs:
     - { name: outs, type: directory,
         provides: [filtered_feature_bc_matrix.h5, metrics_summary.csv] }
 
+requires_storages: [cluster-share]   # 声明需要哪些 storage，决定 type: path 参数的可选范围
 resources: { cpu: 8, memory: "32Gi", walltime: "4:00:00", queue: sci.q }
 internal: { executor: local, parallelism: 5 }   # 供校验，SRCOS 不执行
 ```
+
+`interface` 的 `type` 全集一次性定全（Phase 1 的 `docs/tool-spec.md` 冻结）：
+
+| `type` | 用户侧控件 | MCP schema | 说明 |
+|---|---|---|---|
+| `string` | 文本框 | `string` | |
+| `int` / `float` | 数字框 | `integer` / `number` | 可带 `min` / `max` |
+| `bool` | 开关 | `boolean` | |
+| `enum` | 下拉框 | `string` + `enum` | 需 `values: [...]` |
+| `file` | 文件输入 | `string` | 绑定的存储路径 |
+| `directory` / `dirpath` | 目录输入 | `string` | 绑定的存储路径 |
+| **`path`** | **路径选择器** | `string` | **新增**：必须带 `from: <storage-id>`，受 Jail 约束（ADR-020） |
 
 ### 4.2 RunUnit（运行原语）
 
@@ -225,6 +259,68 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 | 5 | **日志走 stdout/stderr** | 平台自动收集，支持断线重看 |
 | 6 | **必须同步阻塞**到所有实际工作完成（不要 `&` / `nohup`） | 否则平台误判"秒完"（见 ADR-006） |
 
+### 4.5 存储与路径（Storage / Path）
+
+`StorageProvider` 是 SRCOS 第一个正式 provider 面：管理端声明一次，工具声明需求，用户只能在交集里选路径。
+
+```yaml
+# config/storages.yaml —— 管理端声明
+storages:
+  - id: cluster-share
+    name: "集群共享盘"
+    type: posix                    # posix（第一期）| s3（留字段口子）
+    host_root: /share              # 宿主真实根 → Jail 边界 + bind mount 源
+    sandbox_path: /data/share      # 沙箱内可见路径 → path 参数的表述空间
+    mode: ro                       # ro | rw
+  - id: project-data
+    name: "项目数据"
+    type: posix
+    host_root: "/share/projects/{grant}"
+    sandbox_path: /data/project
+    mode: rw
+```
+
+闭环约束（ADR-020，避免「UI 里选了、沙箱里看不到」）：
+
+```
+管理端声明 storages
+  → 工具声明 requires_storages
+  → 实例化时按需挂进 MountSpec
+  → 用户 type: path 参数只能选已挂载的 storage（Jail 校验）
+```
+
+`/api/paths` 返回**沙箱路径**（可直接传给工具）；SRCOS 内部用 `Jail` 双向映射：
+`ResolveExisting(sandboxPath) → hostPath` 读文件，`DisplayPath(hostPath) → sandboxPath` 返回 UI。
+**这是移植 `Jail` 的第三个收益**（前两个：虚拟挂载、文件预览越权校验）。
+
+工具 UI 接入方式两种：用 SRCOS 自动生成的表单（`type: path` 自动渲染成带浏览按钮的输入框），
+或自建 UI 里放一行 `<srcos-path-picker storage="cluster-share">`（Web Component）/ 直接调 `GET /api/paths`。
+
+> **边界澄清（重要）**：路径选择器是**平台提供的原语控件**（像 `<input type="file">`），不是「SRCOS 管业务 UI」。
+> 这个边界不写清楚，「不碰工具 UI」会自相矛盾。
+
+### 4.6 用户模型：OS 用户 ≠ SRCOS 注册用户
+
+| | **OS 用户** | **SRCOS 注册用户** |
+|---|---|---|
+| 是什么 | 启动 `srcos serve` 的 Linux 账号 | `config/users/<name>.yaml` 里的一行 |
+| 存在于系统 | 是，真实 `/etc/passwd` 条目 | **否，纯虚拟** |
+| home | 真实（如 `/home/seqyuan`） | **虚拟，由 SRCOS 构造** |
+| 权限来源 | 文件系统权限 + `config/` 属主 | SRCOS 认证 + `Grant` 授权 |
+
+SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
+
+| 沙箱内路径 | 宿主路径 | 模式 | 来源 |
+|---|---|---|---|
+| `/workspace` | `data/ws/<user>/<tool>/` | rw | **内建**，每实例自动挂载 |
+| `/home/<user>` | `data/homes/<user>/` | rw | **内建**，每实例自动挂载 |
+| 工具声明的 storage | 见 `storages.yaml` | ro/rw | **声明式**，`requires_storages` 决定 |
+
+- 沙箱内 `$HOME` = **虚拟 home**，所以 `.cache` / `.condarc` / `.config` / `.jupyter` 天然隔离，
+  既不污染 OS 用户的真实 home，也不会在并发实例间互踩。
+- **环境 vs 数据要分开**：conda env / `module` / `.sif` 属于**环境**（宿主真实路径，ro 挂载，
+  管理员在 `tool.yaml` 里写）；共享参考数据与项目目录属于**数据 storage**（`storages.yaml` 声明）。
+
 ---
 
 ## 5. 关键决策记录（ADR）
@@ -286,9 +382,25 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 - **理由**：① 不发明第二套规范，否则已有的 cellranger/rnaseq 模块要重写；② SRCOS 是 Go，没必要为一个可选能力引入 Python 运行时；③ 「元工具降级为模块」是这套原语的免费收益，保持了单一抽象。
 
 ### ADR-011：文件预览只借 dsh 的设计，不借代码
-- **背景**：`deepseek-harness` 的「文件预览」实际是一套**资源地址协议 + viewer 注册表**（`dsh-resource://<protocol>/<path>`，viewer 用 glob 认领地址，`open()` 返回帧流）。
-- **决策**：借用地址协议与认领优先级规则，SRCOS 侧实现 `srcos://file/...` 与 `/api/resources` 统一解析（复用 `Jail` 做越权校验）+ 前端 viewer 注册表。**不引入 dsh 的代码**。
-- **理由**：① dsh 的 viewer 是 Cordis 插件，依赖 `ctx.resources.register` / `useResource` / dsh 的 slot+renderer，与 SRCOS 的 Go 内嵌模板栈不通；② dsh 实际只实现了 text preview 与 attachment，缺表格/PDF/HTML，覆盖度不足。
+- **背景**：`deepseek-harness` 的「文件预览」实际是一套**资源地址协议 + viewer 注册表**（`dsh-resource://<protocol>/<scope>/<path>`，viewer 用 glob 认领地址，`open()` 返回帧流）。最初的设想是直接引入 dsh 的预览插件。
+- **决定性证据（为什么不能直接 import）**：`packages/client/ui-sidebar-textpreview/package.json`：
+  ```json
+  "dsh": { "client": { "inject": [
+      "@deepseek-ai/dsh-api-workspace-files",
+      "@deepseek-ai/dsh-client-ui-sidebar-right",
+      "@deepseek-ai/dsh-client-ui-session",
+      "@deepseek-ai/dsh-api-remotes" ], "platform": "web" } },
+  "peerDependencies": { "@deepseek-ai/cordis": "workspace:^" },
+  "dependencies": { "react": "^18.2.0", "react-dom": "^18.2.0" }
+  ```
+  它**不是无状态组件**，而是 Cordis 插件，硬依赖：① Cordis 的 `ctx` + 依赖注入；② **session 模型**
+  （文件树的根是 `useSessions().byId[sessionId].cwd`）；③ sidebar 的 tab 容器；④ Remote 传输层。
+  且 `ui-renderer` 要求 React / ReactDOM / Cordis / ui-slots 保持**同一个浏览器实例**。
+  → 在 SRCOS 前端里跑它，等于在 SRCOS 里重建 dsh client shell 并伪造 session，即「SRCOS 变成 dsh」，
+  与 ADR-012 正面冲突。**一句话：dsh 的 viewer 不是库，是寄生在 dsh 运行时上的插件。**
+- **决策**：**SRCOS 自己实现 viewer**（Phase 5），但地址语法**刻意与 `dsh-resource://` 同构**
+  （含 `patterns` 认领规则照抄），使将来任何方向的适配器都退化成字符串重写。
+- **dsh 本身的集成另立 ADR-016**（三层策略），与本条不冲突。
 - **安全约束**：**HTML 预览必须 sandbox iframe + 独立 origin**。SRCOS 的 `README` 已说明代理后端与网关同源、同源脚本可调管理 API；同源渲染用户上传的 HTML 会直接放大这个风险。
 
 ### ADR-012：前端折中 —— Go 模板外壳 + 独立 Vite 包，`embed.FS` 打进同一二进制
@@ -313,6 +425,113 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 - **实现细节**：SGE 驱动用 `qsub`/`qstat`/`qdel` **命令行**而非 DRMAA（避免 CGO + `libdrmaa` 依赖），`qstat -xml` 解析比文本格式稳定。
 - **合规提醒**：HPC 登录节点通常禁止跑长驻重负载进程。`local` 驱动应只用于轻量工具或管理员明确的例外，重工具一律走 `sge`。
 
+### ADR-016：dsh 集成是「可选增强」而非「兼容问题」，分三层且 A/B 正交
+- **背景**：调研发现 dsh 有四个官方扩展点：① `package.json.dsh.bundle.patch` → `cordis.patch.yml`（第三方发布 bundle，按 id 插入/覆盖 composition 任意行）；② `dsh.profile.bundles`（有序堆叠 bundle + 用户 patch）；③ `package.json.dsh.client`（自动进浏览器 roster，host 经 `/plugins/<id>/client.js` 服务）；④ `dsh plugin --profile X add <pkg>`（官方 out-of-tree 安装）；且 `sdk-minimal` bundle 证明「不 apply `dsh-base` 的独立 bundle」被允许。
+- **决策**：分三层，**默认层不依赖 dsh**：
+
+  | 层 | 做法 | 何时启用 |
+  |---|---|---|
+  | **默认** | SRCOS 自带 viewer（Phase 5） | 永远可用，零依赖 |
+  | **增强（路 A）** | dsh 作为 `kind: service` 工具实例，SRCOS 前端 iframe 嵌入 | 装了 Node 且管理员上架 dsh 工具 |
+  | **互操作（路 B）** | SRCOS 发布 dsh 插件（`dsh.client` + `ctx.resources.register` 注册 `srcos` protocol provider） | 独立议题，与上面两条不冲突 |
+  | **保险（路 D）** | `srcos://` 与 `dsh-resource://` 地址语法同构 | 无条件，写 Phase 5 时顺手做 |
+
+- **关键洞察 —— A 与 B 正交且共享底层**：A 是 `srcos → dsh`（UI 集成，数据流是 SRCOS workspace → dsh session cwd），
+  B 是 `dsh → srcos`（API 集成，数据流是 dsh 经 REST/SSE 读 SRCOS 资源）。
+  两者共用**同一套 `srcos://` 地址协议 + REST/SSE API**，所以能同时选。
+  叠加后：路 A 跑起来的 dsh 实例装上路 B 的插件，就同时是**文件预览器 + SRCOS 控制台**；
+  而路 A 又给路 B 提供了天然的分发渠道。
+- **顺序**：**先 B 后 A** —— B 产出的 REST API + `srcos://` 协议是 A 的前置。
+- **路 A 零改造的关键**：让 dsh 的 session cwd 指向 SRCOS 的 workspace，
+  则 `ui-sidebar-files` 的树根与 `@deepseek-ai/dsh-api-workspace-files` 的 jail 边界正好落在 SRCOS workspace 上，
+  viewer 零适配。且 dsh 明确「binding all network interfaces is intentionally not supported」，**只绑回环**
+  —— 与 SRCOS「后端只监听回环」的安全模型天然一致（dsh 天生该待在 SRCOS 后面）。
+- **不做路 C**：定义 SRCOS 专用 dsh bundle/profile（用几十行 `disabled: true` 剥离 agent 栈）——
+  `dsh-base` 有 84 行、`web-app` 又插了几十行，剥离工作量与回归风险都大；
+  且 client shell（`ui-layout`/`ui-session`/`ui-renderer`/`ui-sidebar`）大概率假设 session 存在，纯预览是逆着设计走；
+  dsh 是 developer preview 且明示会有破坏性变更，不能进核心路径。
+- **禁止**：把 dsh 变成硬依赖。没有 dsh 时 SRCOS 必须照常工作（对齐 `ennote` 的 degraded 模式）。
+
+### ADR-017：战略定位 —— AI 平台的确定性执行后端
+- **背景**：生信云平台可能势微，通用 AI 平台上升，但**确定性场景**（企业内部项目管理、非工程师使用、受控输入输出）有独立且持久的价值。
+- **决策**：把定位固化为「**SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**」并写入 [`AGENTS.md`](../AGENTS.md) 作为全部设计取舍的最终判据。
+- **三个支柱**：
+  1. **执行路径 0 token** —— 一次性 token 投入（把方法固化成工具）+ 零边际 token 成本（反复执行），本质是**把 AI 的探索成果资本化**。
+  2. **确定性 / 可复现 / 可审计** —— `work.sh` + `.sign` + 版本化工具 + `interface` 签名；谁、何时、哪个版本、什么参数全部留痕。这是企业内场景的真正诉求。
+  3. **不碰工具 UI** —— AI 让造 UI 的边际成本趋近于零，UI 因此不再是护城河；平台价值转移到**注册、授权、隔离、资源、编排、审计**。
+- **推论链（推导出后面所有设计）**：
+  ```
+  UI 造起来便宜了 → UI 不再是护城河
+    → 工具的核心资产 = work.sh（函数体）+ interface（类型签名），UI 是可替换的壳
+    → 同一个工具可以有多个 UI：shiny / CLI / agent / 自动生成的表单
+    → "注册什么"的答案不是 UI，而是 interface + entry
+    → 一份 interface 派生三个前端（ADR-018）
+  ```
+- **必要补全（否则「不管 UI」自相矛盾）**：**SRCOS 从 `interface` 自动生成 fallback 表单**
+  （`type: string` → 文本框，`type: path` → 路径选择器……）。
+  工具想要更好看的 UI 就自己写 shiny 覆盖它，不想写就用自动生成的。**渐进增强。**
+- **与 AI 平台的关系**：互补，不是竞争。SRCOS 应主动做 AI 平台的执行层，MCP 就是对接口（ADR-019）。
+- **不把定位收窄到生信**：生信是第一个落地场景，但差异化三角（确定性 / 0 token / 可审计）适用于任何需要受控执行的场景。
+
+### ADR-018：一份 `interface` 派生三个前端
+- **决策**：`Tool.interface` 是唯一的机器可读契约，必须同时派生：
+  ① **MCP tool schema**（给 agent，对话即 UI）；② **流程画布连线类型**（给管理员，`output → input` 类型校验 + `expose` 推导）；③ **用户侧参数表单**（给非工程师，自动生成，可被自建 UI 覆盖）。
+- **理由**：这是 ADR-008 的收益兑现 —— 第一个收益是画布连线，第二个收益是「MCP 白送」。
+  且它让「不碰工具 UI」这个策略真正成立：工具开发者只交付 `work.sh` + `interface`，平台自动补齐 agent 面、编排面、表单面。
+- **推论**：**工具的 UI 可以替换，签名不可替换。** 所以工具注册的核心是 `interface` + `entry`。
+- **约束**：`interface` 的 `type` 全集必须在 Phase 1 就**冻结**（含 `path`），否则后续加类型要改 schema 并回归三处派生。
+
+### ADR-019：MCP Server 内置于网关，第一期只读
+- **背景**：「能否兼容 agent 的 MCP 等服务」是云平台走向现代化的关键节点。
+- **决策**：在网关内内置 `/mcp` 端点（Streamable HTTP），**复用单二进制，不引入新进程**。
+- **第一期（read-only）**：`list_tools` / `describe_tool` / `list_storages` / `list_paths` / `list_instances` / `task_status` / `task_logs` / `list_artifacts` / `read_file`。
+- **第二期（显式授权）**：`submit` / `run_flow` / `cancel`，scope = `submit`。
+- **新增认证面**：agent 是程序，不能用浏览器 session cookie。
+  新增 `agent token`（用户在 webui 自助生成，`Authorization: Bearer`，带 `scopes: [read]` / 过期时间 / 标签），
+  并由 `config/agent-tokens.yaml` 存储（只存 hash）。**每次调用带 agent 身份审计。**
+- **agent 作为 SRCOS 的 service 实例**：完全成立且**零新增概念** ——
+  agent 就是「一个需要 workspace、需要资源、需要生命周期的长驻服务」，正是 `RunUnit` 的定义，
+  SRCOS 现有实例化 + `/proxy/<user>/<agent>/` 代理全部复用。
+  但**权限模型必须收紧**：托管 agent 调 MCP 时用**实例身份**，权限必须是所属用户权限的**子集**，否则会权限放大。
+- **明确不做 —— SRCOS 作为 MCP Client**（去调工具自己的 MCP server）：
+  工具的执行契约是 `work.sh`（确定性、有退出码、有产物），MCP 是「谁可以调它、怎么发现签名」的接口协议，
+  两者不同层。混在一起会模糊「确定性执行」这个核心卖点。
+- **同样不做**：让 agent 直接改 workspace（第一期只读）。
+
+### ADR-020：存储与路径 provider 化，并用闭环消除「选了却看不到」
+- **背景**：工具需要访问集群/云路径并把路径作为参数，用户在工具 UI 里预览后选择。
+  若「UI 里可选的路径」与「沙箱里可见的路径」不一致，就会出现选了却跑不了。
+- **决策**：引入 **`StorageProvider`** 面（`config/storages.yaml`，管理端声明），
+  `interface` 新增 **`type: path`**（必须带 `from: <storage-id>`），提供 **`/api/paths`** 与**原语控件 `srcos-path-picker`**。
+- **闭环约束（核心）**：`path` 参数的可选范围 = 已挂载的 storage = 工具 `requires_storages` 声明的需求。
+  实例化时按声明挂进 `MountSpec`，UI 选择时由 `Jail` 校验。**三者始终一致。**
+- **路径表述空间**：`/api/paths` 与 `type: path` 的参数值一律用**沙箱路径**（工具在沙箱里直接可用）。
+  SRCOS 内部用 `Jail` 双向映射（`ResolveExisting` ↔ `DisplayPath`）—— **这是移植 `Jail` 的第三个收益**。
+- **边界澄清**：路径选择器是**平台提供的原语控件**（类比 `<input type="file">`），不是「SRCOS 管业务 UI」。
+  这条必须写清楚，否则与 ADR-004 自相矛盾。
+- **第一期只做 `type: posix`**；`type: s3` 留字段口子，物化方式（`work.sh` 内 s3 客户端 vs FUSE 挂载）待定。
+- **`rw` 策略**：用户 home 与项目目录允许 rw，集群公共参考数据**强制 ro**；rw 的 storage 必须有配额，
+  否则一个工具能写爆 `/share`。
+- **同一个 provider 也是 MCP tool**：`/api/paths` ⇄ `srcos_list_paths` —— 一份实现，两个前端（对齐 ADR-018）。
+
+### ADR-021：OS 用户 ≠ SRCOS 注册用户；隔离靠 mount namespace 而非 UID
+- **背景**：必须区分「启动 `srcos serve` 的 OS 用户」与「SRCOS 注册用户」。
+- **决策**：
+  - **OS 用户**：真实的 Linux 账号，有真实 home；SRCOS 以它的权限运行，读 `config/`、写 `data/`。数量通常 1 个（或按角色少数几个）。
+  - **SRCOS 注册用户**：只存在于 `config/users/<name>.yaml`，**没有系统账号、没有真实 home**。任意多个。
+  - 因此注册用户的运行时视图由 SRCOS 构造：**内建挂载** `/workspace` ← `data/ws/<user>/<tool>/`（rw）、
+    `/home/<user>` ← `data/homes/<user>/`（rw）；**声明式挂载**为工具 `requires_storages` 指定的 storage。
+  - 沙箱内 `$HOME` = 虚拟 home，因此 `.cache` / `.condarc` / `.config` / `.jupyter` 天然隔离，
+    既不污染 OS 用户的真实 home，也不会在并发实例间互踩。虚拟 home 首次使用时从模板初始化。
+- **关键推论（已知限制，必须记录）**：所有实例都以**同一个 OS 用户**身份运行，
+  所以**隔离不靠 Unix UID，靠 mount namespace + `Jail` 路径校验**。
+  若 `MountSpec` 配错、挂到了不该挂的父目录，实例之间可以互访文件。
+  防护：**每个实例只挂自己的 workspace + 自己声明的 storage，绝不挂父目录**，且 `Jail` 是唯一路径解析入口。
+- **明确不做**：为每个 SRCOS 注册用户建系统账号（真实 UID 隔离）—— 需要 root，与 ADR-014 冲突。
+- **环境 vs 数据分离**：conda env / `module` / `.sif` 属于**环境**（宿主真实路径，ro 挂载，管理员在 `tool.yaml` 写）；
+  共享参考数据与项目目录属于**数据 storage**（`storages.yaml` 声明）。两者不要混用同一套声明。
+  ADR-020 的 `type: path` 只用于**数据**，不用于环境。
+
 ---
 
 ## 6. 路线图
@@ -324,29 +543,44 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 - [x] 建立本 roadmap 文档
 
 ### Phase 1：规范与最小闭环（**当前**）
-目标：用一个真实工具把 `job.json` / `work.sh` 规范验证一遍，再扩接口。
-- [ ] `docs/tool-spec.md` —— 工具开发者视角的完整规范
-      （`tool.yaml` + `job.json` + `work.sh` 六条规范 + 同步契约 + `doneWhen` 逃生口 + `backend` 选择对照表）
-- [ ] `docs/flow-spec.md` —— 流程管理员视角（`Flow` 的 nodes/bindings/expose 语义与画布交互约定）
+目标：把一个真实工具从提交到产物跑通，并把契约**冻结**（schema 一旦定下就不反复改）。
+- [ ] `docs/tool-spec.md` —— 工具开发者契约
+      （`tool.yaml` + `interface` **类型全集冻结**含 `path` + `job.json` + `work.sh` 六条规范
+      + 虚拟 home / workspace 与内建挂载 + `backend` 选择对照表 + 同步契约与 `doneWhen` + 完整示例）
+- [ ] `docs/flow-spec.md` —— 流程管理员契约（`Flow` 的 nodes/bindings/expose 语义与画布交互约定）
+- [ ] `docs/storage-spec.md` —— 管理端契约（`storages.yaml` + `/api/paths` + `srcos-path-picker` 的对外行为）
 - [ ] 最小示例模块 `srcos-tools/hello-fanout/`：`work.sh` 用 `ata -t 5`（退化可用 `xargs -P5`）跑 5 个样本 + `.sign`
-- [ ] `local` + `bwrap` 驱动上跑通端到端：提交 → 任务列表 → 日志 → 产物
+- [ ] `local` + `bwrap` 上跑通端到端：提交 → 任务列表 → 日志 → 产物
 
-### Phase 2：实例化运行时
-- [ ] `Tool` / `Flow` / `RunUnit` / `TaskInstance` / `FlowRun` 的 Go 类型定义
-- [ ] `Runtime` 接口 + `local` backend（含 cgroup/prlimit 降级路径）
-- [ ] `MountSpec` + `Jail`（自 ennote 移植改造：去 skills 硬编码、加 ingress）
+### Phase 2：实例化运行时（`local`）
+- [ ] `Tool` / `RunUnit` / `TaskInstance` 的 Go 类型定义 + `tool.yaml` 校验器
+- [ ] `Runtime` 接口 + `local` backend（含 cgroup / prlimit 降级路径）
+- [ ] `MountSpec` + `Jail`（自 ennote 移植改造）—— 含**内建挂载**
+      （`/workspace` ← `data/ws/<user>/<tool>/`、`/home/<user>` ← `data/homes/<user>/`）
+      与虚拟 home 模板初始化（ADR-021）
 - [ ] `job.json` 落盘扫描器（目录即队列）+ `srcos job submit/list/status/logs/cancel` CLI
 - [ ] 动态路由表 + 实例 registry + **启动时 reconcile**（清孤儿实例与端口）
 - [ ] 端口池分配器（`127.0.0.1:20000-30000`）
 - [ ] 「启动中」进度页 + 探活（端口就绪 + HTTP 200）
 - [ ] 空闲回收 reaper（WebSocket 活跃期间视为不空闲）
+- [ ] `StorageProvider` 第一个实现：`storages.yaml` + `/api/paths` + `srcos-path-picker`（ADR-020）
 
 ### Phase 3：注册、授权与管理端
 - [ ] 工具注册：扫描 `srcos-tools/`（→ 后续支持 registry 拉取）
 - [ ] `Grant` 授权模型（用户/组 × 工具/流程 + 配额：max_cpu / max_memory / max_instances）
-- [ ] 用户级配额聚合（防单用户开满）
-- [ ] 管理端：工具上架/下架/授权、实例总览（CPU/内存实时采样、日志、强制停止）
-- [ ] 审计日志
+- [ ] 用户级配额聚合（防单用户开满）；`storages.yaml` 的 rw 配额
+- [ ] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）
+- [ ] 管理端：工具上架/下架/授权、storage 声明、实例总览（CPU/内存实时采样、日志、强制停止）
+- [ ] 审计日志（含 agent token 调用）
+
+### Phase 3.5：MCP Server（read-only，**招牌功能**）
+- [ ] 网关内置 `/mcp` 端点（Streamable HTTP），复用单二进制与认证
+- [ ] MCP tool schema 从 `Tool.interface` **自动派生**（ADR-018）
+- [ ] read-only tools：`list_tools` / `describe_tool` / `list_storages` / `list_paths` /
+      `list_instances` / `task_status` / `task_logs` / `list_artifacts` / `read_file`
+- [ ] agent token scope 校验（`read`）+ 调用审计
+- [ ] 预留 `submit` scope 与第二期接口（**不实现**）
+- [ ] 端到端验证：在 annovibe（或任意 MCP client）里让 agent 列工具、查任务状态、读产物
 
 ### Phase 4：云流程
 - [ ] `Flow` 注册 + 校验（类型兼容、DAG 无环、`executor`×`backend` 交叉校验）
@@ -356,15 +590,25 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 - [ ] 断点续跑（状态表 + `.sign`）
 - [ ] 把 `annopi` 注册为普通工具模块（逃生口）
 
-### Phase 5：前端（`webui/` Vite 包）
+### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer
 - [ ] `webui/` 工程骨架 + `make webui` + `//go:embed dist`
 - [ ] `srcos://` 地址协议 + `/api/resources` 统一解析
-- [ ] viewer 注册表 + 首批 viewer：文本/代码（分页 + 行号）、Markdown、表格、图片、PDF、HTML（sandbox）
+      —— 地址语法**刻意与 `dsh-resource://` 同构**（含 `patterns` 认领规则），即路 D 保险（ADR-016）
+- [ ] viewer 注册表 + 首批 viewer：文本/代码（分页 + 行号）、Markdown、表格、图片、PDF、HTML（sandbox + 独立 origin）
+- [ ] **从 `interface` 自动生成参数表单**（fallback UI，含 `type: path` 渲染成路径选择器）（ADR-017）
 - [ ] 任务列表页 + 日志流（SSE）
 - [ ] 流程编排画布（拖拽 + 类型校验连线 + `expose` 推导）
+- [ ] 用户自助生成 agent token 的页面
+
+### Phase 5.5：dsh 集成（先 B 后 A）
+- [ ] **路 B**：SRCOS REST/SSE API 定型 + 发布 `@seqyuan/srcos-dsh` 插件
+      （`dsh.client` 声明 + Host 侧 `ctx.resources.register({protocol:'srcos', open, reload})`）
+- [ ] **路 A**：把 dsh 注册成 `kind: service` 工具（`node: login`），
+      实例 workspace 指向 dsh session cwd；前端 iframe 嵌入 `/proxy/<user>/<dsh>/`
+- [ ] 验证 Origin 改写 / polyfill / WS 在真实 dsh 下工作（`docs/dsh-demo.md` 已提供前置经验）
 
 ### Phase 6：HPC / SGE
-- [ ] `sge` backend（`qsub`/`qstat -xml`/`qdel`）
+- [ ] `sge` backend（`qsub` / `qstat -xml` / `qdel`）
 - [ ] rendezvous 文件协议 + `ssh -L` 隧道管理（含重连与回收）
 - [ ] `qstat` 状态映射：区分 `S`（挂起/抢占）与真死
 - [ ] `h_rt` 到期预警 + `qalter` 续期；空闲回收默认关闭
@@ -385,6 +629,12 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 | docker daemon 依赖 / udocker / proot | 需要 root 或不是安全边界（ADR-014） |
 | 多节点调度、跨机弹性 | 后端只有 `local` 与 `sge`；sge 的调度由 SGE 自己负责 |
 | 原生 SaaS 多租户（组织/计费） | 面向实验室内部，非商用多租户 |
+| **SRCOS 作为 MCP Client**（去调工具自己的 MCP server） | 工具的执行契约是 `work.sh`，MCP 是接口协议，不同层（ADR-019） |
+| **为每个 SRCOS 注册用户建 OS 账号**（真实 UID 隔离） | 需要 root，与 ADR-014 冲突（ADR-021） |
+| **让 agent 直接改 workspace**（第一期） | 确定性执行 + 可审计优先（ADR-019） |
+| **把 dsh 变成硬依赖** | dsh 是可选增强，没装 Node 时 SRCOS 必须照常工作（ADR-016） |
+| **为 SRCOS 定制 dsh bundle/profile**（路 C） | 剥离 agent 栈的回归风险大，dsh 又是 developer preview（ADR-016） |
+| 把 `type: path` 用于**环境**（conda / module / `.sif`） | 环境与数据要分开；`path` 只用于数据 storage（ADR-020/021） |
 
 ---
 
@@ -397,6 +647,10 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 | 3 | 集群的 `ssh 登录节点 → 计算节点` 是否免密可用？共享盘挂载点是哪个？ | 决定隧道方案与 rendezvous/镜像路径 |
 | 4 | 登录节点是否允许长驻进程 / `systemd --user` 是否可用？ | 决定 `local` 驱动默认是否禁用、资源限制走 cgroup 还是 prlimit |
 | 5 | `Flow` 的 `expose` 是否需要"多比较组"模式（对齐 annopi 的 `${cmp.*}`）？ | 首版不做，只做样本维度 |
+| 6 | `storages.yaml` 的 `rw` 是否允许写共享盘？配额怎么做（XFS project quota / 单独卷 / 目录计数）？ | 倾向：home 与项目目录 rw，公共参考数据强制 ro；rw 必须配配额（ADR-020） |
+| 7 | `task` 的 `doneWhen` 探针是否需要内置常见类型（`file_exists` / `dir_nonempty` / `exit_code`）？ | 是，先内置这三个，其余留给工具自己写 |
+| 8 | dsh 集成的 Phase 5.5 何时做？集群/登录节点 Node 可用性如何？ | 取决于实际部署环境，路 B 可先于路 A |
+| 9 | MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？ | 倾向按工具 + 按用户双维度授权 |
 
 ---
 
@@ -405,3 +659,4 @@ srcos job submit -n "cellranger S001" --cpu 8 --mem 32G --time 4:00:00 work.sh
 | 日期 | 变更 |
 |---|---|
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
+| 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
