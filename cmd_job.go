@@ -15,8 +15,11 @@ import (
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/job"
+	"github.com/seqyuan/srcos/internal/portpool"
+	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/sandbox"
+	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -284,12 +287,20 @@ func runJobRun(args []string) {
 	}
 	parseFlagsLoose(fs, args, &positional)
 
-	t, _ := mustLoadTool(*jf.toolsDir, *jf.configDir, *jf.toolID)
+	t, root := mustLoadTool(*jf.toolsDir, *jf.configDir, *jf.toolID)
 	user := resolveUser(*jf.user)
 	if *jf.sandbox != "" {
 		// Debug aid: exercise the degraded path without editing tool.yaml.
 		// Deliberately CLI-only so a job.json can never change its own sandbox.
 		t.Sandbox = tool.Sandbox(*jf.sandbox)
+	}
+	if t.Kind != tool.KindTask {
+		fatalf("tool %s is kind %s; use `srcos svc start` for services", t.ID, t.Kind)
+	}
+
+	runner, _, err := buildRunner(*jf.configDir, root, user)
+	if err != nil {
+		fatalf("%v", err)
 	}
 
 	jobsDir := config.JobsDir(*jf.configDir, user, t.ID)
@@ -305,7 +316,6 @@ func runJobRun(args []string) {
 		return
 	}
 
-	runner := &runtime.Local{ConfigDir: *jf.configDir, User: user, Stdout: os.Stdout}
 	ran := 0
 	for _, loaded := range scan.Jobs {
 		if *jf.jobID != "" && !jobIDMatches(loaded.ID, *jf.jobID) {
@@ -316,7 +326,8 @@ func runJobRun(args []string) {
 			continue
 		}
 
-		recordPath := runtime.InstancePath(*jf.configDir, user, t.ID, loaded.ID)
+		instID := runtime.InstanceID(user, t.ID, loaded.ID)
+		recordPath := runtime.InstancePath(*jf.configDir, instID)
 		if prev, err := runtime.LoadInstance(recordPath); err == nil && !*jf.force {
 			if prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning {
 				fmt.Printf("skip %s (already %s; use --force to re-run)\n", loaded.ID, prev.State)
@@ -325,7 +336,7 @@ func runJobRun(args []string) {
 		}
 
 		fmt.Printf("\n=== running %s (%s) ===\n", loaded.ID, loaded.Job.Name)
-		inst, err := runner.Run(context.Background(), t, loaded)
+		inst, err := runner.RunTask(context.Background(), t, loaded)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -344,6 +355,252 @@ func runJobRun(args []string) {
 	if ran == 0 {
 		fmt.Println("\nnothing to run")
 	}
+}
+
+// buildRunner assembles the runtime for this host: the local backend, the
+// shared port pool, the dynamic routing table and the storage provider.
+//
+// Everything a unit needs to be reachable or to see shared data is wired here,
+// in one place, so no code path can build a runner that silently lacks one of
+// them.
+func buildRunner(configDir, toolsDir, user string) (*runtime.Runner, *route.Table, error) {
+	storages, err := storage.Load(config.StoragesPath(configDir))
+	if err != nil {
+		return nil, nil, err
+	}
+	if checker, ok := storages.(storage.ReachabilityChecker); ok {
+		for _, problem := range checker.CheckReachable() {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", problem)
+		}
+	}
+
+	ports := portpool.New(0, 0)
+	routes := route.NewTable()
+	runner := runtime.NewRunner(runtime.Options{
+		ConfigDir: configDir,
+		ToolsDir:  toolsDir,
+		User:      user,
+		Storages:  storages,
+		Routes:    routes,
+		Backends: map[string]runtime.Backend{
+			"local": &runtime.Local{},
+		},
+	})
+	runner.SetPorts(ports)
+	return runner, routes, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// srcos svc ...
+// ─────────────────────────────────────────────────────────────────────────
+
+func runSvcCmd(args []string) {
+	sub := "list"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+	switch sub {
+	case "start":
+		runSvcStart(args)
+	case "stop":
+		runSvcStop(args)
+	case "list":
+		runSvcList(args)
+	case "reconcile":
+		runSvcReconcile(args)
+	case "reap":
+		runSvcReap(args)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown svc subcommand: %s\n", sub)
+		fmt.Fprintln(os.Stderr, "usage: srcos svc <start|stop|list|reconcile|reap> [options]")
+		os.Exit(1)
+	}
+}
+
+func runSvcStart(args []string) {
+	fs := newFlagSet("svc start")
+	jf := newJobFlags(fs)
+	jf.register(fs)
+	var positional []string
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: srcos svc start --tool ID [--param k=v ...] [--sandbox none|bwrap]")
+		fs.PrintDefaults()
+	}
+	parseFlagsLoose(fs, args, &positional)
+
+	t, root := mustLoadTool(*jf.toolsDir, *jf.configDir, *jf.toolID)
+	user := resolveUser(*jf.user)
+	if *jf.sandbox != "" {
+		t.Sandbox = tool.Sandbox(*jf.sandbox)
+	}
+	if t.Kind != tool.KindService {
+		fatalf("tool %s is kind %s; use `srcos job run` for tasks", t.ID, t.Kind)
+	}
+
+	j := serviceJob(t, *jf.name, *jf.params, *jf.tags)
+	if err := job.Validate(j, t); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runner, routes, err := buildRunner(*jf.configDir, root, user)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	// An existing live instance is replaced, not leaked: starting twice should
+	// converge on one service, matching "one live instance per (user, tool)".
+	if prev, err := runtime.LoadInstance(runtime.InstancePath(*jf.configDir, runtime.InstanceID(user, t.ID, ""))); err == nil {
+		if !prev.State.Terminal() {
+			fmt.Printf("stopping the previous instance (%s)\n", prev.State)
+			_ = runner.StopService(context.Background(), t, prev)
+		}
+	}
+
+	inst, err := runner.StartService(context.Background(), t, j)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if inst.State != runtime.StateRunning {
+		printInstance(inst)
+		os.Exit(1)
+	}
+
+	if err := runtime.WriteServiceManifest(*jf.configDir, user, t.ID, j); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not persist the service parameters: %v\n", err)
+	}
+
+	printInstance(inst)
+	fmt.Printf("\nroute    http://<gateway>/%s\n", strings.TrimPrefix(inst.RoutePath, "/"))
+	if n := routes.Len(); n > 0 {
+		fmt.Printf("routes   %d live\n", n)
+	}
+}
+
+func runSvcStop(args []string) {
+	fs := newFlagSet("svc stop")
+	configDir := configDirFlag(fs)
+	toolsDir := fs.String("tools-dir", "", "tool package root")
+	userFlag := fs.String("user", "", "SRCOS registered user")
+	toolID := fs.String("tool", "", "tool id (required)")
+	var positional []string
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: srcos svc stop --tool ID") }
+	parseFlagsLoose(fs, args, &positional)
+
+	t, root := mustLoadTool(*toolsDir, *configDir, *toolID)
+	user := resolveUser(*userFlag)
+	runner, _, err := buildRunner(*configDir, root, user)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	inst, err := runtime.LoadInstance(runtime.InstancePath(*configDir, runtime.InstanceID(user, t.ID, "")))
+	if err != nil {
+		fatalf("no service instance for %s/%s: %v", user, t.ID, err)
+	}
+	if inst.State.Terminal() {
+		fmt.Printf("already %s\n", inst.State)
+		return
+	}
+	if err := runner.StopService(context.Background(), t, inst); err != nil {
+		fatalf("%v", err)
+	}
+	_ = runtime.WriteServiceManifest(*configDir, user, t.ID, nil)
+	fmt.Printf("stopped %s\n", inst.ID)
+}
+
+func runSvcList(args []string) {
+	fs := newFlagSet("svc list")
+	configDir := configDirFlag(fs)
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	insts, err := runtime.ListInstances(*configDir)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	printed := 0
+	fmt.Printf("%-34s %-11s %-22s %-9s %s\n", "INSTANCE", "STATE", "ENDPOINT", "SANDBOX", "ROUTE")
+	for _, i := range insts {
+		if i.Kind != string(tool.KindService) {
+			continue
+		}
+		printed++
+		fmt.Printf("%-34s %-11s %-22s %-9s %s\n", i.ID, i.State, i.Endpoint, i.Sandbox, i.RoutePath)
+	}
+	if printed == 0 {
+		fmt.Println("no service instances recorded")
+	}
+}
+
+func runSvcReconcile(args []string) {
+	fs := newFlagSet("svc reconcile")
+	configDir := configDirFlag(fs)
+	toolsDir := fs.String("tools-dir", "", "tool package root")
+	userFlag := fs.String("user", "", "SRCOS registered user")
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	user := resolveUser(*userFlag)
+	runner, routes, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	adopted, orphaned, err := runner.Reconcile(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	fmt.Printf("adopted  %d %v\n", len(adopted), adopted)
+	fmt.Printf("orphaned %d %v\n", len(orphaned), orphaned)
+	fmt.Printf("routes   %d live\n", routes.Len())
+}
+
+func runSvcReap(args []string) {
+	fs := newFlagSet("svc reap")
+	configDir := configDirFlag(fs)
+	toolsDir := fs.String("tools-dir", "", "tool package root")
+	userFlag := fs.String("user", "", "SRCOS registered user")
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	user := resolveUser(*userFlag)
+	runner, _, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	reaper := &runtime.Reaper{Runner: runner}
+	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	if len(stopped) == 0 {
+		fmt.Println("nothing to reap")
+		return
+	}
+	for _, s := range stopped {
+		fmt.Printf("stopped %s\n", s)
+	}
+}
+
+// serviceJob builds a Job from CLI flags for a service, which has no
+// submission directory.
+func serviceJob(t *tool.Tool, name string, params, tags kvList) *job.Job {
+	j := &job.Job{
+		SchemaVersion: 1,
+		Name:          name,
+		Params:        map[string]any{},
+		Tags:          map[string]string{},
+	}
+	if j.Name == "" {
+		j.Name = t.Name
+	}
+	for _, kv := range params {
+		j.Params[kv.key] = kv.value
+	}
+	for _, kv := range tags {
+		j.Tags[kv.key] = kv.value
+	}
+	return j
 }
 
 func runJobList(args []string) {
@@ -429,6 +686,12 @@ func printInstance(i *runtime.Instance) {
 		fmt.Printf("  error     %s\n", i.Error)
 	}
 	fmt.Printf("  backend   %s  sandbox=%s  limiter=%s\n", i.Backend, i.Sandbox, i.Limiter)
+	if i.Endpoint != "" {
+		fmt.Printf("  endpoint  %s  route=%s\n", i.Endpoint, i.RoutePath)
+	}
+	if i.BackendRef != "" {
+		fmt.Printf("  unit      %s\n", i.BackendRef)
+	}
 	fmt.Printf("  started   %s\n", i.StartedAt.Format(time.RFC3339))
 	if !i.EndedAt.IsZero() {
 		fmt.Printf("  ended     %s  (%s)\n", i.EndedAt.Format(time.RFC3339), i.Duration)

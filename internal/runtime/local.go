@@ -1,12 +1,3 @@
-// Package runtime executes a validated (Tool, Job) pair as a RunUnit.
-//
-// Phase 1 implements the `local` backend only: one process, sandboxed with
-// bubblewrap, resource-limited through the OS user's own systemd scope (or
-// prlimit as a fallback). The `sge` backend arrives in Phase 6.
-//
-// Everything that decides *what the sandbox looks like* lives in package
-// sandbox; this package owns ordering, resource limiting, log capture and the
-// instance record.
 package runtime
 
 import (
@@ -18,451 +9,42 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
-	"github.com/seqyuan/srcos/internal/config"
-	"github.com/seqyuan/srcos/internal/job"
+	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
-// State is the lifecycle state of an instance.
-type State string
-
-const (
-	StatePending   State = "pending"
-	StateRunning   State = "running"
-	StateSucceeded State = "succeeded"
-	StateFailed    State = "failed"
-)
-
-// Instance is the persisted record of one execution of one job.
-//
-// ServiceInstance and TaskInstance share this table; only Kind differs
-// (ADR-003). Phase 1 only produces tasks.
-type Instance struct {
-	ID       string `yaml:"id"`
-	User     string `yaml:"user"`
-	Tool     string `yaml:"tool"`
-	Kind     string `yaml:"kind"`
-	JobName  string `yaml:"job_name"`
-	State    State  `yaml:"state"`
-	ExitCode int    `yaml:"exit_code"`
-
-	Backend string   `yaml:"backend"`
-	Sandbox string   `yaml:"sandbox"`
-	Limiter string   `yaml:"limiter"` // systemd-run | prlimit | none
-	Command []string `yaml:"command,omitempty"`
-	Mounts  []string `yaml:"mounts,omitempty"` // "host:sandbox:mode:origin"
-
-	LogPath   string    `yaml:"log_path"`
-	WorkDir   string    `yaml:"work_dir"`
-	StartedAt time.Time `yaml:"started_at"`
-	EndedAt   time.Time `yaml:"ended_at,omitempty"`
-	Duration  string    `yaml:"duration,omitempty"`
-
-	Outputs []string          `yaml:"outputs,omitempty"`
-	Tags    map[string]string `yaml:"tags,omitempty"`
-	Error   string            `yaml:"error,omitempty"`
-}
-
-// InstancePath is the deterministic record location for (user, tool, jobID).
-func InstancePath(configDir, user, toolID, jobID string) string {
-	return filepath.Join(config.InstancesDir(configDir), fmt.Sprintf("%s-%s-%s.yaml", user, toolID, jobID))
-}
-
-// SaveInstance writes the record atomically so a crash mid-write cannot leave
-// a half-parsed YAML behind.
-func SaveInstance(path string, inst *Instance) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(inst)
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// LoadInstance reads a record.
-func LoadInstance(path string) (*Instance, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var inst Instance
-	if err := yaml.Unmarshal(data, &inst); err != nil {
-		return nil, err
-	}
-	return &inst, nil
-}
-
-// ListInstances returns every record under data/instances, newest first.
-func ListInstances(configDir string) ([]*Instance, error) {
-	entries, err := os.ReadDir(config.InstancesDir(configDir))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []*Instance
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
-			continue
-		}
-		inst, err := LoadInstance(filepath.Join(config.InstancesDir(configDir), e.Name()))
-		if err != nil {
-			continue
-		}
-		out = append(out, inst)
-	}
-	sortNewestFirst(out)
-	return out, nil
-}
-
-func sortNewestFirst(list []*Instance) {
-	for i := 1; i < len(list); i++ {
-		for j := i; j > 0; j-- {
-			a, b := list[j-1], list[j]
-			if a.StartedAt.After(b.StartedAt) || (a.StartedAt.Equal(b.StartedAt) && a.ID <= b.ID) {
-				break
-			}
-			list[j-1], list[j] = list[j], list[j-1]
-		}
-	}
-}
-
 // ─────────────────────────────────────────────────────────────────────────
-// 资源限制（ADR-014：systemd-run --user 优先，prlimit 兜底）
+// 两个 backend 共享的内层 argv
 // ─────────────────────────────────────────────────────────────────────────
 
-type limiter struct {
-	name string
-	// wrap turns an inner argv into the argv that actually gets executed.
-	wrap func(inner []string) []string
-}
-
-// detectLimiter picks the strongest resource control this host can provide.
+// BuildInner materializes the sandbox and returns the argv that must run
+// *inside* whatever transport the backend uses.
 //
-// systemd-run --user --scope is preferred because its limits are cgroup-based
-// and therefore real: MemoryMax triggers an OOM kill at the cgroup boundary
-// rather than at an address-space heuristic. prlimit only bounds a process's
-// own limits, which children inherit, and cannot cap total resident memory.
-func detectLimiter(res tool.Resources) limiter {
-	props := systemdProps(res)
-	if len(props) > 0 && systemdRunUsable(props) {
-		return limiter{name: "systemd-run", wrap: func(inner []string) []string {
-			out := []string{"systemd-run", "--user", "--scope", "--quiet"}
-			for _, p := range props {
-				out = append(out, "-p", p)
-			}
-			return append(append(out, "--"), inner...)
-		}}
-	}
-
-	if prlimit, ok := prlimitWrap(res); ok {
-		return limiter{name: "prlimit", wrap: prlimit}
-	}
-	return limiter{name: "none", wrap: func(inner []string) []string { return inner }}
-}
-
-func systemdProps(res tool.Resources) []string {
-	var props []string
-	if res.CPU > 0 {
-		props = append(props, fmt.Sprintf("CPUQuota=%d%%", res.CPU*100))
-	}
-	if res.Memory != "" {
-		if b, err := tool.ParseMemory(res.Memory); err == nil {
-			props = append(props, "MemoryMax="+tool.FormatMemory(b))
-			// Refuse to swap instead of OOM-killing: swapping a multi-GB
-			// analysis turns a fast OOM into an unbounded hang.
-			props = append(props, "MemorySwapMax=0")
-		}
-	}
-	// Fork-bomb guard. 512 is generous for a tool that fans out samples.
-	props = append(props, "TasksMax=512")
-	return props
-}
-
-func prlimitWrap(res tool.Resources) (func([]string) []string, bool) {
-	path, err := exec.LookPath("prlimit")
-	if err != nil {
-		return nil, false
-	}
-	var opts []string
-	if res.Memory != "" {
-		if b, err := tool.ParseMemory(res.Memory); err == nil {
-			opts = append(opts, fmt.Sprintf("--as=%d", b))
-		}
-	}
-	if res.CPU > 0 {
-		// RLIMIT_CPU is in seconds of CPU time, not wall clock.
-		opts = append(opts, fmt.Sprintf("--cpu=%d", res.CPU*3600))
-	}
-	opts = append(opts, "--nproc=512")
-
-	return func(inner []string) []string {
-		out := append([]string{path}, opts...)
-		return append(append(out, "--"), inner...)
-	}, true
-}
-
-// systemdRunUsable probes once whether `systemd-run --user --scope` accepts
-// these properties here. Cached: the probe costs a process spawn and the
-// answer cannot change mid-run. HPC login nodes frequently disable
-// systemd --user entirely, which is exactly what this detects.
-var systemdProbe struct {
-	done bool
-	ok   bool
-}
-
-func systemdRunUsable(props []string) bool {
-	if !systemdProbe.done {
-		systemdProbe.done = true
-		if _, err := exec.LookPath("systemd-run"); err == nil {
-			args := []string{"--user", "--scope", "--quiet"}
-			for _, p := range props {
-				args = append(args, "-p", p)
-			}
-			args = append(args, "--", "/bin/true")
-			systemdProbe.ok = exec.Command("systemd-run", args...).Run() == nil
-		}
-	}
-	return systemdProbe.ok
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Runner
-// ─────────────────────────────────────────────────────────────────────────
-
-// Local runs tools with backend: local on this host.
-type Local struct {
-	ConfigDir string
-	User      string
-	// Stdout, when set, receives a live copy of the log while the job runs.
-	Stdout io.Writer
-}
-
-// pathView resolves the contract's sandbox paths into whatever the running
-// process will actually see.
-//
-// With a mount namespace the contract's paths (/workspace, /home/<user>,
-// /tool) are literally true. With `sandbox: none` there is no namespace, so
-// those paths do not exist on the host and the same variables must carry real
-// host paths instead. Tools never need to care: they are required to use
-// $SRCOS_* rather than literal paths (tool-spec §4 规范 #2), which is exactly
-// what makes the degraded mode work.
-type pathView struct {
-	degraded bool
-	host     runPaths
-	user     string
-}
-
-func (v pathView) workspace() string {
-	if v.degraded {
-		return v.host.workspace
-	}
-	return sandbox.PathWorkspace
-}
-
-func (v pathView) home() string {
-	if v.degraded {
-		return v.host.home
-	}
-	return sandbox.HomePath(v.user)
-}
-
-func (v pathView) jobsDir() string {
-	if v.degraded {
-		return filepath.Join(v.host.workspace, "jobs")
-	}
-	return sandbox.PathJobDir
-}
-
-func (v pathView) jobRoot() string {
-	if v.degraded {
-		return v.host.jobDir
-	}
-	return sandbox.JobRootPath(v.host.jobID)
-}
-
-func (v pathView) toolDir(t *tool.Tool) string {
-	if v.degraded {
-		return t.Dir
-	}
-	return sandbox.PathTool
-}
-
-type runPaths struct {
-	workspace    string
-	home         string
-	jobDir       string // host path of <workspace>/jobs/<jobID>
-	jobID        string
-	logPath      string
-	instancePath string
-}
-
-// Run executes one job and returns its instance record.
-//
-// A non-zero exit from the tool is *data*, not an error: it is recorded on the
-// instance and returned with a nil error. Callers distinguish "SRCOS could not
-// run this" (error) from "the tool ran and failed" (state == failed).
-func (l *Local) Run(ctx context.Context, t *tool.Tool, loaded *job.Loaded) (*Instance, error) {
-	if t.Backend != tool.BackendLocal {
-		return nil, fmt.Errorf("tool %s declares backend %q; this runner only handles %q", t.ID, t.Backend, tool.BackendLocal)
-	}
-	if len(t.RequiresStorages) > 0 {
-		return nil, fmt.Errorf("tool %s requires storages %v, but the StorageProvider lands in Phase 2", t.ID, t.RequiresStorages)
-	}
-	if loaded.ID == "" {
-		return nil, fmt.Errorf("job has no id (job directory name)")
-	}
-
-	paths, err := l.prepare(t, loaded.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	inst := &Instance{
-		ID:        fmt.Sprintf("%s-%s-%s", l.User, t.ID, paths.jobID),
-		User:      l.User,
-		Tool:      t.ID,
-		Kind:      string(t.Kind),
-		JobName:   loaded.Job.Name,
-		State:     StatePending,
-		Backend:   string(t.Backend),
-		Sandbox:   string(t.Sandbox),
-		LogPath:   paths.logPath,
-		WorkDir:   paths.jobDir,
-		Outputs:   loaded.Job.Outputs,
-		Tags:      loaded.Job.Tags,
-		StartedAt: time.Now().UTC(),
-	}
-	fail := func(format string, a ...any) *Instance {
-		inst.State = StateFailed
-		inst.Error = fmt.Sprintf(format, a...)
-		inst.EndedAt = time.Now().UTC()
-		_ = SaveInstance(paths.instancePath, inst)
-		return inst
-	}
-
-	spec, err := l.mountSpec(t, paths)
-	if err != nil {
-		return fail("mount spec: %v", err), nil
-	}
-	for _, m := range spec.Mounts() {
-		inst.Mounts = append(inst.Mounts, fmt.Sprintf("%s:%s:%s:%s", m.HostPath, m.SandboxPath, m.Mode, m.Origin))
-	}
-
-	view := pathView{degraded: t.Sandbox == tool.SandboxNone, host: paths, user: l.User}
-
-	argv, cwd, err := resolveCommand(view, t, loaded)
-	if err != nil {
-		return fail("%v", err), nil
-	}
-
-	inner, err := l.buildInner(t, loaded, spec, view, cwd, argv)
-	if err != nil {
-		return fail("%v", err), nil
-	}
-
-	lim := detectLimiter(job.EffectiveResources(loaded.Job, t))
-	inst.Limiter = lim.name
-	final := lim.wrap(inner)
-	inst.Command = final
-
-	logFile, err := os.Create(paths.logPath)
-	if err != nil {
-		return nil, err
-	}
-	defer logFile.Close()
-	var sink io.Writer = logFile
-	if l.Stdout != nil {
-		sink = io.MultiWriter(logFile, l.Stdout)
-	}
-
-	cmd := exec.CommandContext(ctx, final[0], final[1:]...)
-	cmd.Stdout = sink
-	cmd.Stderr = sink
-	cmd.Stdin = nil
-	// With bwrap the environment travels as --setenv; degraded it travels as
-	// an inner `env -i`. Either way the wrapper (systemd-run/prlimit) keeps
-	// the host environment so it can do its job.
-	if view.degraded {
-		cmd.Dir = view.jobRoot()
-	}
-
-	inst.State = StateRunning
-	if err := SaveInstance(paths.instancePath, inst); err != nil {
-		return nil, err
-	}
-
-	runErr := cmd.Run()
-	inst.EndedAt = time.Now().UTC()
-	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
-
-	switch {
-	case ctx.Err() != nil:
-		inst.State = StateFailed
-		inst.Error = "cancelled: " + ctx.Err().Error()
-	case runErr == nil:
-		inst.State = StateSucceeded
-	default:
-		inst.State = StateFailed
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			inst.ExitCode = exitErr.ExitCode()
-			inst.Error = fmt.Sprintf("tool exited with code %d", inst.ExitCode)
-		} else {
-			inst.Error = runErr.Error()
-		}
-	}
-
-	inst.Outputs = l.reportOutputs(spec, loaded.Job.Outputs)
-	if err := SaveInstance(paths.instancePath, inst); err != nil {
-		return nil, err
-	}
-	return inst, nil
-}
-
-// buildInner materializes the sandbox and returns the argv to execute.
-func (l *Local) buildInner(t *tool.Tool, loaded *job.Loaded, spec *sandbox.Spec, view pathView, cwd string, argv []string) ([]string, error) {
+// Local wraps it in a systemd scope/unit; SGE embeds it in a job script that
+// runs on a compute node. Keeping this shared is what makes "the same tool
+// definition runs on either backend" true rather than aspirational.
+func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, argv, env []string) ([]string, error) {
 	switch t.Sandbox {
 	case tool.SandboxBwrap, "":
 		bwrapPath, ok, why := sandbox.BwrapProbe()
 		if !ok {
 			return nil, errors.New(why)
 		}
-		args := sandbox.BwrapArgv(spec, sandbox.BwrapOptions{
-			Cwd:  cwd,
-			Env:  view.env(t, loaded.Job),
-			Argv: argv,
-		})
+		args := sandbox.BwrapArgv(spec, sandbox.BwrapOptions{Cwd: cwd, Env: env, Argv: argv})
 		return append([]string{bwrapPath}, args...), nil
 
 	case tool.SandboxNone:
-		// Degraded mode: no namespace isolation. Jail and MountSpec still
-		// constrain SRCOS's own API, but this process can read anything the OS
-		// user can, and the declared mounts are NOT materialized. The caller
-		// surfaces the degradation (ennote's convention).
-		//
-		// The env carries host paths here (see pathView), so a tool written
-		// against the contract still works — which is why 规范 #2 forbids
-		// hard-coded paths.
-		//
-		// The environment is cleared by an inner `env -i` rather than by
-		// replacing the outer command's Env: the resource limiter
-		// (systemd-run --user) needs the caller's DBUS_SESSION_BUS_ADDRESS and
+		// Degraded mode. The environment is cleared by an inner `env -i`
+		// rather than by replacing the outer command's Env: the resource
+		// limiter needs the caller's DBUS_SESSION_BUS_ADDRESS and
 		// XDG_RUNTIME_DIR to reach the user manager, so the wrapper must
 		// inherit the host environment while the tool must not.
-		return append(append([]string{"env", "-i"}, view.env(t, loaded.Job)...), argv...), nil
+		return append(append([]string{"env", "-i"}, env...), argv...), nil
 
 	case tool.SandboxApptainer:
 		return nil, errors.New("sandbox: apptainer is not implemented yet (Phase 6)")
@@ -472,224 +54,452 @@ func (l *Local) buildInner(t *tool.Tool, loaded *job.Loaded, spec *sandbox.Spec,
 	}
 }
 
-// resolveCommand decides what to execute and from where.
+// ResolveArgv decides what to execute for a unit.
 //
-// Two submission styles are supported (ADR-004):
-//
-//   - the job directory carries its own work.sh — the tool UI generated the
-//     script for this particular run;
-//   - it does not — the tool package's declared `entry` is used instead.
-//
-// The job directory is always the working directory, so a submitted script can
-// reference sibling files without absolute paths.
-func resolveCommand(view pathView, t *tool.Tool, loaded *job.Loaded) (argv []string, cwd string, err error) {
-	cwd = view.jobRoot()
-
-	if len(loaded.Job.Command) > 0 {
-		return loaded.Job.Command, cwd, nil
+// For a task, a work.sh inside the job directory means the submitter generated
+// this run's script; otherwise the tool package's entry is used. A service has
+// no job directory, so it always uses the tool entry.
+func ResolveArgv(t *tool.Tool, view PathView, jobDir string) ([]string, error) {
+	if jobDir != "" {
+		if _, err := os.Stat(filepath.Join(jobDir, "work.sh")); err == nil {
+			return []string{"bash", "work.sh"}, nil
+		}
 	}
-
-	// A work.sh inside the job directory means the submitter generated this
-	// run's script; otherwise the tool package's entry is used.
-	if _, statErr := os.Stat(filepath.Join(loaded.Dir, "work.sh")); statErr == nil {
-		return []string{"bash", "work.sh"}, cwd, nil
-	}
-
 	if t.Entry == "" {
-		return nil, "", errors.New("no work.sh in the job directory and the tool declares no entry")
+		return nil, errors.New("no work.sh in the job directory and the tool declares no entry")
 	}
-	return []string{"bash", view.toolDir(t) + "/" + t.Entry}, cwd, nil
+	return []string{"bash", view.ToolDir(t) + "/" + t.Entry}, nil
 }
 
-func (l *Local) prepare(t *tool.Tool, jobID string) (runPaths, error) {
-	p := runPaths{
-		workspace: config.WorkspaceDir(l.ConfigDir, l.User, t.ID),
-		home:      config.HomeDir(l.ConfigDir, l.User),
-		jobDir:    filepath.Join(config.JobsDir(l.ConfigDir, l.User, t.ID), jobID),
-		jobID:     jobID,
-	}
-	p.logPath = filepath.Join(config.LogsDir(l.ConfigDir, l.User, t.ID), jobID+".log")
-	p.instancePath = InstancePath(l.ConfigDir, l.User, t.ID, jobID)
+// ─────────────────────────────────────────────────────────────────────────
+// local backend
+// ─────────────────────────────────────────────────────────────────────────
 
-	for _, d := range []string{p.workspace, p.home, p.jobDir, filepath.Dir(p.logPath)} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return p, err
-		}
-	}
-
-	if t.Workspace != nil && t.Workspace.InitFrom != "" {
-		if err := InitFromTemplate(filepath.Join(t.Dir, t.Workspace.InitFrom), p.workspace); err != nil {
-			return p, err
-		}
-	}
-	if t.Home != nil && t.Home.InitFrom != "" {
-		if err := InitFromTemplate(filepath.Join(t.Dir, t.Home.InitFrom), p.home); err != nil {
-			return p, err
-		}
-	}
-	return p, nil
-}
-
-// InitFromTemplate copies a template directory into target exactly once.
+// Local runs units on this host.
 //
-// The marker lives inside the target: a user who deliberately deletes the
-// seeded files should not have them silently restored on the next run.
-func InitFromTemplate(templateDir, target string) error {
-	info, err := os.Stat(templateDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("init_from %q does not exist", templateDir)
+// Tasks use a transient *scope* (`systemd-run --scope`), which blocks and
+// propagates the exit code — the natural fit for run-to-completion work.
+//
+// Services use a transient *unit* (`systemd-run --unit=<name>`), which returns
+// immediately and gives us what a long-running unit needs: cgroup limits,
+// restart policy, a stable handle for `systemctl --user stop`, and a lifecycle
+// systemd owns rather than SRCOS re-implementing.
+//
+// Both fall back to a plain child process when the user manager is absent,
+// which is common on HPC login nodes (ADR-014).
+type Local struct {
+	// SystemdUser forces or forbids the user manager. Zero value auto-detects.
+	SystemdUser *bool
+	// Stdout receives a live copy of the log. Optional.
+	Stdout func(instanceID string, line []byte)
+}
+
+func (l *Local) Name() string { return "local" }
+
+// systemdAvailable probes `systemd-run --user --scope`. Cached: the probe
+// costs a process spawn and the answer cannot change mid-run.
+var systemdProbe struct {
+	once sync.Once
+	ok   bool
+}
+
+func (l *Local) useSystemd() bool {
+	if l.SystemdUser != nil {
+		return *l.SystemdUser
+	}
+	systemdProbe.once.Do(func() {
+		if _, err := exec.LookPath("systemd-run"); err != nil {
+			return
 		}
-		return err
+		systemdProbe.ok = exec.Command("systemd-run", "--user", "--scope", "--quiet", "--", "/bin/true").Run() == nil
+	})
+	return systemdProbe.ok
+}
+
+// Start launches the unit.
+func (l *Local) Start(ctx context.Context, req StartRequest) (Handle, error) {
+	inner, err := BuildInner(req.Tool, req.View, req.Spec, req.Cwd, req.Argv, req.Env)
+	if err != nil {
+		return nil, err
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("init_from %q is not a directory", templateDir)
+
+	logFile, err := os.Create(req.LogPath)
+	if err != nil {
+		return nil, err
 	}
-	marker := filepath.Join(target, ".srcos-initialized")
-	if _, err := os.Stat(marker); err == nil {
+	sink := sinkFor(logFile, req.InstanceID, l.Stdout)
+
+	if req.Tool.Kind == tool.KindService {
+		return l.startService(ctx, req, inner, logFile, sink)
+	}
+	return l.startTask(ctx, req, inner, logFile, sink)
+}
+
+// startTask runs a scope synchronously in a goroutine so Start can return a
+// handle immediately, matching the Backend contract.
+func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string, logFile *os.File, sink io.Writer) (Handle, error) {
+	path, args, limiterName := l.taskCommand(ctx, req, inner)
+
+	cmd := exec.Command(path, args...)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	cmd.Stdin = nil
+	if req.View.Degraded {
+		cmd.Dir = req.Cwd
+	}
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return nil, err
+	}
+	h := &processHandle{
+		ref:     req.UnitName,
+		cmd:     cmd,
+		logFile: logFile,
+		done:    make(chan ExitStatus, 1),
+		limiter: limiterName,
+		command: append([]string{path}, args...),
+	}
+	go func() {
+		err := cmd.Wait()
+		logFile.Close()
+		h.done <- ExitStatus{Code: exitCode(err), Err: err}
+	}()
+	return h, nil
+}
+
+// taskCommand renders the task invocation, wrapping in the strongest resource
+// limiter this host offers.
+func (l *Local) taskCommand(ctx context.Context, req StartRequest, inner []string) (string, []string, string) {
+	if l.useSystemd() {
+		args := []string{"--user", "--scope", "--quiet"}
+		for _, p := range req.Limiter.SystemdProps {
+			args = append(args, "-p", p)
+		}
+		args = append(args, "--")
+		return "systemd-run", append(args, inner...), "systemd-run"
+	}
+	if len(req.Limiter.PrlimitArgs) > 0 {
+		if path, err := exec.LookPath("prlimit"); err == nil {
+			args := append([]string{}, req.Limiter.PrlimitArgs...)
+			return path, append(append(args, "--"), inner...), "prlimit"
+		}
+	}
+	return inner[0], inner[1:], "none"
+}
+
+// startService launches a transient unit and returns as soon as it is
+// registered, so the caller can healthcheck and publish a route.
+func (l *Local) startService(ctx context.Context, req StartRequest, inner []string, logFile *os.File, sink io.Writer) (Handle, error) {
+	h := &systemdUnitHandle{
+		ref:     req.UnitName,
+		unit:    req.UnitName,
+		logFile: logFile,
+		command: append([]string{"systemd-run"}, inner...),
+		useUnit: l.useSystemd(),
+	}
+	if !h.useUnit {
+		return l.startServiceFallback(req, inner, logFile, sink, h)
+	}
+
+	// A previous run of the same (user, tool) may have left a failed unit
+	// behind, which would make this start fail on a name collision.
+	_ = exec.Command("systemctl", "--user", "reset-failed", req.UnitName).Run()
+
+	args := []string{"--user", "--unit", req.UnitName}
+	for _, p := range req.Limiter.SystemdProps {
+		args = append(args, "-p", p)
+	}
+	// A service is expected to be up for a long time; restart on failure gives
+	// crash recovery without SRCOS polling for liveness.
+	if req.Tool.Lifecycle != nil && req.Tool.Lifecycle.Restart != "" && req.Tool.Lifecycle.Restart != "never" {
+		args = append(args, "-p", "Restart="+req.Tool.Lifecycle.Restart)
+	}
+	args = append(args, "--")
+	cmd := exec.Command("systemd-run", append(args, inner...)...)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	h.command = append([]string{"systemd-run"}, append(args, inner...)...)
+
+	if err := cmd.Run(); err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("systemd-run --unit %s: %w", req.UnitName, err)
+	}
+	return h, nil
+}
+
+// startServiceFallback runs a service as a plain child process. No cgroup
+// limits and no restart policy apply; the caller is told which limiter was
+// used so it can surface the degradation.
+func (l *Local) startServiceFallback(req StartRequest, inner []string, logFile *os.File, sink io.Writer, h *systemdUnitHandle) (Handle, error) {
+	cmd := exec.Command(inner[0], inner[1:]...)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	if req.View.Degraded {
+		cmd.Dir = req.Cwd
+	}
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return nil, err
+	}
+	h.process = cmd
+	h.command = inner
+	go func() { _ = cmd.Wait(); logFile.Close() }()
+	return h, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Handles
+// ─────────────────────────────────────────────────────────────────────────
+
+// fanoutWriter tees the instance log to an optional live sink so the CLI can
+// stream it while the run is still in progress.
+type fanoutWriter struct {
+	log      io.Writer
+	instance string
+	extra    func(string, []byte)
+}
+
+func (w fanoutWriter) Write(p []byte) (int, error) {
+	n, err := w.log.Write(p)
+	if n > 0 && w.extra != nil {
+		w.extra(w.instance, append([]byte(nil), p[:n]...))
+	}
+	return n, err
+}
+
+func sinkFor(logFile *os.File, instanceID string, extra func(string, []byte)) io.Writer {
+	if extra == nil {
+		return logFile
+	}
+	return fanoutWriter{log: logFile, instance: instanceID, extra: extra}
+}
+
+// processHandle is a task running as a direct child (systemd scope or plain
+// process).
+type processHandle struct {
+	ref     string
+	cmd     *exec.Cmd
+	logFile *os.File
+	done    chan ExitStatus
+	limiter string
+	command []string
+
+	stopOnce sync.Once
+}
+
+func (h *processHandle) Ref() string                    { return h.ref }
+func (h *processHandle) Command() []string              { return h.command }
+func (h *processHandle) Limiter() string                { return h.limiter }
+func (h *processHandle) Endpoint() (route.Target, bool) { return route.Target{}, false }
+func (h *processHandle) WantEndpoint() bool             { return false }
+
+func (h *processHandle) Wait(ctx context.Context) ExitStatus {
+	select {
+	case st := <-h.done:
+		return st
+	case <-ctx.Done():
+		_ = h.Stop(context.Background())
+		return ExitStatus{Code: -1, Err: ctx.Err()}
+	}
+}
+
+func (h *processHandle) Stop(ctx context.Context) error {
+	h.stopOnce.Do(func() {
+		if h.cmd.Process != nil {
+			// bwrap runs with --die-with-parent, so killing the direct child
+			// takes the whole sandbox down with it.
+			_ = h.cmd.Process.Signal(syscall.SIGTERM)
+		}
+	})
+	select {
+	case <-h.done:
+		return nil
+	case <-time.After(5 * time.Second):
+	}
+	if h.cmd.Process != nil {
+		_ = h.cmd.Process.Kill()
+	}
+	select {
+	case <-h.done:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("unit %s did not exit after SIGKILL", h.ref)
+	}
+	return nil
+}
+
+func (h *processHandle) Alive() bool {
+	if h.cmd.Process == nil {
+		return false
+	}
+	select {
+	case <-h.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// systemdUnitHandle is a service running as a transient systemd unit (or, in
+// the fallback, as a plain child process).
+type systemdUnitHandle struct {
+	ref     string
+	unit    string
+	useUnit bool
+	process *exec.Cmd
+	logFile *os.File
+	command []string
+
+	stopOnce sync.Once
+}
+
+func (h *systemdUnitHandle) Ref() string { return h.ref }
+
+// Limiter names the mechanism holding the service's resources. "none" means the
+// fallback ran it as a plain child process, i.e. no cgroup limits apply and the
+// caller must surface that.
+func (h *systemdUnitHandle) Limiter() string {
+	if h.useUnit {
+		return "systemd-run"
+	}
+	return "none"
+}
+func (h *systemdUnitHandle) Command() []string              { return h.command }
+func (h *systemdUnitHandle) Endpoint() (route.Target, bool) { return route.Target{}, false }
+func (h *systemdUnitHandle) WantEndpoint() bool             { return false }
+
+func (h *systemdUnitHandle) Alive() bool {
+	if !h.useUnit {
+		if h.process == nil || h.process.Process == nil {
+			return false
+		}
+		return processAlive(h.process.Process.Pid)
+	}
+	out, err := exec.Command("systemctl", "--user", "is-active", h.unit).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
+}
+
+func (h *systemdUnitHandle) Wait(ctx context.Context) ExitStatus {
+	t := time.NewTicker(300 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if !h.Alive() {
+			return ExitStatus{Code: h.exitCode()}
+		}
+		select {
+		case <-ctx.Done():
+			return ExitStatus{Code: -1, Err: ctx.Err()}
+		case <-t.C:
+		}
+	}
+}
+
+func (h *systemdUnitHandle) Stop(ctx context.Context) error {
+	// Stopping is idempotent: the reaper and an explicit stop can race.
+	h.stopOnce.Do(func() {
+		if h.useUnit {
+			_ = exec.Command("systemctl", "--user", "stop", h.unit).Run()
+			return
+		}
+		if h.process != nil && h.process.Process != nil {
+			_ = h.process.Process.Signal(syscall.SIGTERM)
+		}
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if !h.Alive() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	if h.useUnit {
+		_ = exec.Command("systemctl", "--user", "kill", "--signal=SIGKILL", h.unit).Run()
+	} else if h.process != nil && h.process.Process != nil {
+		_ = h.process.Process.Kill()
+	}
+	return nil
+}
+
+// exitCode reads the unit's exit status before the unit is reset.
+func (h *systemdUnitHandle) exitCode() int {
+	if !h.useUnit {
+		return -1
+	}
+	out, err := exec.Command("systemctl", "--user", "show", "-p", "ExecMainStatus", "--value", h.unit).Output()
+	if err != nil {
+		return -1
+	}
+	var code int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &code); err != nil {
+		return -1
+	}
+	return code
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 按引用停止 / 探测
+//
+// These are the paths the reaper, `srcos svc stop` and startup reconciliation
+// take after a SRCOS restart, when the only thing that survives is the
+// persisted BackendRef. Without them a "stopped" service would keep serving
+// traffic with no record saying so.
+// ─────────────────────────────────────────────────────────────────────────
+
+// StopUnit implements runtime.UnitStopper.
+//
+// It calls `stop` unconditionally rather than probing first:
+// `systemctl list-units <pattern>` does not match a unit by bare name (it needs
+// a glob), so a "does it exist?" pre-check silently reports false and the stop
+// is then skipped — which is exactly how a service survives its own stop.
+// Interpreting the stop's own error is both simpler and correct.
+func (l *Local) StopUnit(ctx context.Context, ref string, t *tool.Tool) error {
+	if ref == "" {
 		return nil
 	}
-	if err := CopyTree(templateDir, target); err != nil {
-		return err
+	if !l.useSystemd() {
+		return fmt.Errorf("unit %s was started without a user systemd, so it cannot be stopped by name "+
+			"after a restart; reconcile will mark it orphaned (kill the pid manually if it still runs)", ref)
 	}
-	return os.WriteFile(marker, []byte("initialized from "+templateDir+"\n"), 0o644)
+	out, err := exec.CommandContext(ctx, "systemctl", "--user", "stop", ref).CombinedOutput()
+	if err != nil {
+		msg := strings.ToLower(string(out))
+		// Already gone is success: stopping races with natural exit.
+		for _, gone := range []string{"not loaded", "not found", "no such unit", "could not be found"} {
+			if strings.Contains(msg, gone) {
+				return nil
+			}
+		}
+		return fmt.Errorf("systemctl --user stop %s: %w: %s", ref, err, strings.TrimSpace(string(out)))
+	}
+	// Reset so the unit name is free for the next start of the same (user, tool).
+	_ = exec.Command("systemctl", "--user", "reset-failed", ref).Run()
+	return nil
 }
 
-// CopyTree copies regular files and directories, preserving permission bits.
-func CopyTree(src, dst string) error {
-	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		out := filepath.Join(dst, rel)
-		if fi.IsDir() {
-			return os.MkdirAll(out, 0o755)
-		}
-		if !fi.Mode().IsRegular() {
-			return nil // skip sockets/devices; templates never need them
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(out, data, fi.Mode().Perm())
-	})
-}
-
-// mountSpec builds the sandbox view. Intent order:
+// UnitAlive implements runtime.UnitProber.
 //
-//	builtin (workspace, virtual home, tool package) -> environment -> data storages
-//
-// Every entry is an exact path. Binding a parent would hand the sandbox
-// everything under it that is group-readable (see package sandbox docs).
-func (l *Local) mountSpec(t *tool.Tool, p runPaths) (*sandbox.Spec, error) {
-	spec := &sandbox.Spec{}
-
-	builtin := []sandbox.Mount{
-		{
-			HostPath:    p.workspace,
-			SandboxPath: sandbox.PathWorkspace,
-			Mode:        sandbox.ReadWrite,
-			Origin:      "builtin",
-		},
-		{
-			HostPath:    p.home,
-			SandboxPath: sandbox.HomePath(l.User),
-			Mode:        sandbox.ReadWrite,
-			Origin:      "builtin",
-		},
-		{
-			HostPath:    t.Dir,
-			SandboxPath: sandbox.PathTool,
-			Mode:        sandbox.ReadOnly,
-			Origin:      "tool",
-		},
+// "active" is the only state that counts: activating, deactivating and failed
+// all mean the service is not serving, which is what reconcile needs in order
+// to choose between adopting and orphaning it.
+func (l *Local) UnitAlive(ctx context.Context, ref string, t *tool.Tool) bool {
+	if ref == "" || !l.useSystemd() {
+		return false
 	}
-	for _, m := range builtin {
-		if err := spec.Add(m); err != nil {
-			return nil, err
-		}
-	}
-
-	// Environment mounts: host paths the tool author declared (conda trees,
-	// module prefixes, .sif overlays). Read-only, and deliberately allowed to
-	// be coarse because they hold no user data (AGENTS.md: 环境与数据要分开).
-	for _, rm := range t.ROMounts {
-		if !strings.HasPrefix(rm.SandboxPath, "/") {
-			return nil, fmt.Errorf("ro_mounts: sandbox_path %q must be absolute", rm.SandboxPath)
-		}
-		if sandbox.SandboxPathIsReserved(rm.SandboxPath) {
-			return nil, fmt.Errorf("ro_mounts: sandbox_path %q is inside a read-only system directory "+
-				"(%s are bound read-only, so bubblewrap cannot create a mount point there) — "+
-				"mount into %s instead, which is first on the sandbox PATH",
-				rm.SandboxPath, strings.Join([]string{"/usr", "/bin", "/lib"}, "/"), sandbox.PathToolBin)
-		}
-		if _, err := os.Stat(rm.Host); err != nil {
-			return nil, fmt.Errorf("ro_mounts: host %q is not readable: %w", rm.Host, err)
-		}
-		if err := spec.Add(sandbox.Mount{
-			HostPath:    rm.Host,
-			SandboxPath: rm.SandboxPath,
-			Mode:        sandbox.ReadOnly,
-			Origin:      "env",
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	// Data storages (requires_storages) land here in Phase 2, sourced from a
-	// StorageProvider. Run rejected them earlier with a clear message.
-	return spec, nil
-}
-
-// env renders the complete environment the tool will see (tool-spec §4.1).
-//
-// All paths come from the pathView, so this is correct in both the sandboxed
-// and the degraded case.
-func (v pathView) env(t *tool.Tool, j *job.Job) []string {
-	home := v.home()
-	// In a sandbox PATH is part of the contract (it includes /opt/srcos/bin).
-	// Degraded, there is no sandbox to attach to, so the host PATH is carried
-	// over — otherwise a tool could not even find `bash`.
-	path := sandbox.DefaultPath
-	if v.degraded {
-		path = os.Getenv("PATH")
-	}
-	return append([]string{
-		"PATH=" + path,
-		"SRCOS_WORKSPACE=" + v.workspace(),
-		"SRCOS_HOME=" + home,
-		// HOME points at the *virtual* home, so .cache/.condarc/.config land in
-		// an isolated directory instead of the OS user's real home (ADR-021).
-		"HOME=" + home,
-		"SRCOS_JOB_DIR=" + v.jobsDir(),
-		"SRCOS_JOB_ROOT=" + v.jobRoot(),
-		"SRCOS_USER=" + v.user,
-		"SRCOS_TOOL=" + t.ID,
-		"SRCOS_TASK_ID=" + v.host.jobID,
-		"SRCOS_TOOL_VERSION=" + t.Version,
-	}, job.ParamEnv(job.EffectiveParams(j, t))...)
-}
-
-// reportOutputs resolves declared output paths and annotates which actually
-// exist, keeping "declared" and "produced" distinct in the user surface.
-func (l *Local) reportOutputs(spec *sandbox.Spec, declared []string) []string {
-	out := make([]string, 0, len(declared))
-	for _, d := range declared {
-		host, _, err := spec.Resolve(d)
-		if err != nil {
-			out = append(out, d+" (unresolvable)")
-			continue
-		}
-		if _, err := os.Stat(host); err != nil {
-			out = append(out, d+" (missing)")
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
+	out, err := exec.CommandContext(ctx, "systemctl", "--user", "is-active", ref).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
 }

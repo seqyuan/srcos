@@ -21,7 +21,7 @@ type harness struct {
 	toolsDir  string
 	toolDir   string
 	user      string
-	runner    *Local
+	runner    *Runner
 }
 
 func newHarness(t *testing.T, sandboxMode string, workSh string, extraToolYAML string) *harness {
@@ -79,7 +79,14 @@ resources: {cpu: 1, memory: "256Mi", walltime: "0:01:00"}
 		toolsDir:  toolsDir,
 		toolDir:   toolDir,
 		user:      "alice",
-		runner:    &Local{ConfigDir: configDir, User: "alice"},
+		runner: NewRunner(Options{
+			ConfigDir: configDir,
+			ToolsDir:  toolsDir,
+			User:      "alice",
+			// No StorageProvider: every fixture here declares no storages, and
+			// a tool that did would fail loudly rather than silently.
+			Backends: map[string]Backend{"local": &Local{SystemdUser: boolPtr(false)}},
+		}),
 	}
 }
 
@@ -150,7 +157,7 @@ func TestRunSandboxNoneSucceeds(t *testing.T) {
 	h := newHarness(t, "none", okScript, "")
 	loaded := h.submit(t, "j1", `{"schemaVersion":1,"name":"demo","params":{"msg":"hi"},"outputs":["/workspace/out"]}`)
 
-	inst, err := h.runner.Run(context.Background(), h.tool(t), loaded)
+	inst, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -173,7 +180,7 @@ func TestRunSandboxNoneSucceeds(t *testing.T) {
 	}
 
 	// The record is on disk and reloads.
-	saved, err := LoadInstance(InstancePath(h.configDir, h.user, "demo", "j1"))
+	saved, err := LoadInstance(InstancePath(h.configDir, InstanceID("alice", "demo", "j1")))
 	if err != nil {
 		t.Fatalf("instance record: %v", err)
 	}
@@ -195,7 +202,7 @@ func TestRunWithBwrapIsolatesWorkspace(t *testing.T) {
 	h := newHarness(t, "bwrap", okScript, "")
 	loaded := h.submit(t, "j2", `{"schemaVersion":1,"name":"demo","params":{"msg":"sandboxed"},"outputs":["/workspace/out"]}`)
 
-	inst, err := h.runner.Run(context.Background(), h.tool(t), loaded)
+	inst, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -227,7 +234,7 @@ func TestRunNonZeroExitIsDataNotError(t *testing.T) {
 	h := newHarness(t, "none", failScript, "")
 	loaded := h.submit(t, "j3", `{"schemaVersion":1,"name":"demo"}`)
 
-	inst, err := h.runner.Run(context.Background(), h.tool(t), loaded)
+	inst, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
 	if err != nil {
 		t.Fatalf("a tool failure must not be a SRCOS error: %v", err)
 	}
@@ -251,7 +258,7 @@ func TestRunIsIdempotentPerTask(t *testing.T) {
 
 	for i, id := range []string{"taskA", "taskB"} {
 		loaded := h.submit(t, id, `{"schemaVersion":1,"name":"demo"}`)
-		inst, err := h.runner.Run(context.Background(), tl, loaded)
+		inst, err := h.runner.RunTask(context.Background(), tl, loaded)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,7 +281,7 @@ func TestRunIsIdempotentPerTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded.Job = j
-	inst, err := h.runner.Run(context.Background(), tl, loaded)
+	inst, err := h.runner.RunTask(context.Background(), tl, loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,12 +294,12 @@ func TestRunRejectsUnimplementedFeaturesClearly(t *testing.T) {
 	h := newHarness(t, "none", okScript, "requires_storages: [cluster-share]\n")
 	loaded := h.submit(t, "j4", `{"schemaVersion":1,"name":"demo"}`)
 
-	_, err := h.runner.Run(context.Background(), h.tool(t), loaded)
+	_, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
 	if err == nil {
 		t.Fatal("a tool requiring storages must fail loudly until the provider exists")
 	}
-	if !strings.Contains(err.Error(), "Phase 2") {
-		t.Fatalf("the error should say when it arrives: %v", err)
+	if !strings.Contains(err.Error(), "StorageProvider") {
+		t.Fatalf("the error should name the missing seam: %v", err)
 	}
 }
 
@@ -301,7 +308,7 @@ func TestUnusableSandboxProducesFailedInstance(t *testing.T) {
 `)
 	loaded := h.submit(t, "j5", `{"schemaVersion":1,"name":"demo"}`)
 
-	inst, err := h.runner.Run(context.Background(), h.tool(t), loaded)
+	inst, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -312,7 +319,7 @@ func TestUnusableSandboxProducesFailedInstance(t *testing.T) {
 		t.Fatalf("unexpected error: %s", inst.Error)
 	}
 	// The failure must be recorded, not just printed.
-	if _, err := LoadInstance(InstancePath(h.configDir, h.user, "demo", "j5")); err != nil {
+	if _, err := LoadInstance(InstancePath(h.configDir, InstanceID("alice", "demo", "j5"))); err != nil {
 		t.Fatalf("failed instances must still be recorded: %v", err)
 	}
 }
@@ -322,7 +329,7 @@ func TestListInstancesNewestFirst(t *testing.T) {
 	tl := h.tool(t)
 	for _, id := range []string{"a", "b", "c"} {
 		loaded := h.submit(t, id, `{"schemaVersion":1,"name":"demo"}`)
-		if _, err := h.runner.Run(context.Background(), tl, loaded); err != nil {
+		if _, err := h.runner.RunTask(context.Background(), tl, loaded); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -373,17 +380,19 @@ func TestInitFromTemplateMissingDir(t *testing.T) {
 
 // TestDetectLimiterNeverPanics checks that limiter selection is total: on any
 // host one of the three names comes back.
-func TestDetectLimiterNeverPanics(t *testing.T) {
+func TestBuildLimiterNeverPanics(t *testing.T) {
 	for _, res := range []tool.Resources{
 		{},
 		{CPU: 4, Memory: "1Gi"},
 		{CPU: 1, Memory: "not-a-size"},
 	} {
-		if name := detectLimiter(res).name; name == "" {
-			t.Fatalf("no limiter name for %+v", res)
+		if lim := BuildLimiter(res); lim.Name != "" {
+			t.Fatalf("Limiter.Name should stay empty (the backend picks the mechanism), got %q", lim.Name)
 		}
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 func readFile(t *testing.T, path string) string {
 	t.Helper()

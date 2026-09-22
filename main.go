@@ -144,6 +144,10 @@ func main() {
 		runJobCmd(args)
 		return
 	}
+	if cmd == "svc" {
+		runSvcCmd(args)
+		return
+	}
 
 	// Parse options
 	opts, err := parseOptions(args)

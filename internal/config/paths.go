@@ -49,6 +49,11 @@ func LogPath(configDir string) string {
 	return filepath.Join(configDir, LogFile)
 }
 
+// StoragesPath is the administrator-authored shared-data declaration.
+func StoragesPath(configDir string) string {
+	return filepath.Join(configDir, "storages.yaml")
+}
+
 func UsersDir(configDir string) string {
 	return filepath.Join(configDir, UsersDirName)
 }

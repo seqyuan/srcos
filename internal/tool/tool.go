@@ -167,6 +167,14 @@ type Ingress struct {
 	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty"`
 }
 
+// HealthcheckPath is the probe path, defaulting to the root.
+func (i *Ingress) HealthcheckPath() string {
+	if i == nil || i.Healthcheck == nil || i.Healthcheck.Path == "" {
+		return "/"
+	}
+	return i.Healthcheck.Path
+}
+
 type Healthcheck struct {
 	Path         string `yaml:"path,omitempty"`
 	Timeout      string `yaml:"timeout,omitempty"`

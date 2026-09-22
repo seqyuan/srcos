@@ -596,18 +596,27 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 另一个实现期发现：`bwrap` **无法在已只读绑定的 `/usr` `/bin` `/lib*` 内创建挂载点**，
 所以工具自带二进制统一放 `/opt/srcos/bin`（沙箱 `PATH` 第一项），注册期直接拒绝违规配置。
 
-### Phase 2：实例化运行时（`local`）
-- [ ] `Tool` / `RunUnit` / `TaskInstance` 的 Go 类型定义 + `tool.yaml` 校验器
-- [ ] `Runtime` 接口 + `local` backend（含 cgroup / prlimit 降级路径）
-- [ ] `MountSpec` + `Jail`（自 ennote 移植改造）—— 含**内建挂载**
-      （`/workspace` ← `data/ws/<user>/<tool>/`、`/home/<user>` ← `data/homes/<user>/`）
-      与虚拟 home 模板初始化（ADR-021）
-- [ ] `job.json` 落盘扫描器（目录即队列）+ `srcos job submit/list/status/logs/cancel` CLI
-- [ ] 动态路由表 + 实例 registry + **启动时 reconcile**（清孤儿实例与端口）
-- [ ] 端口池分配器（`127.0.0.1:20000-30000`）
-- [ ] 「启动中」进度页 + 探活（端口就绪 + HTTP 200）
-- [ ] 空闲回收 reaper（WebSocket 活跃期间视为不空闲）
-- [ ] `StorageProvider` 第一个实现：`storages.yaml` + `/api/paths` + `srcos-path-picker`（ADR-020）
+### Phase 2：实例化运行时（**进行中**）
+- [x] `Tool` / `RunUnit` / `Instance` 的 Go 类型定义 + `tool.yaml` 校验器（Phase 1）
+- [x] `job.json` 落盘扫描器（目录即队列）+ `srcos job submit/run/list/status/logs` CLI（Phase 1）
+- [x] `MountSpec` + `Jail` + **内建挂载**（`/workspace`、虚拟 `/home/<user>`）+ 模板初始化（Phase 1）
+- [x] `Backend` / `Handle` 抽象 —— 一个原语两个 flavor（task 用 systemd scope，service 用 systemd 瞬时 unit）
+- [x] `local` backend，含 cgroup（`systemd-run --user`）与 prlimit 降级路径
+- [x] **`kind: service` 全链路**：端口池 → 物化 → 启动 → 探活 → 发布路由
+- [x] `StorageProvider`（ADR-020）：`storages.yaml` + Jail 复用 + `type: path` 闭环
+- [x] `internal/route` 动态路由表（非回环目标被拒；`DeleteInstance` 有归属栅栏）
+- [x] `internal/portpool` 端口池（真 bind 探测、并发安全、`Reserve` 供 reconcile）
+- [x] **`Reconcile`**：重启后收养仍活着的实例（重新占端口 + 重发路由），把记录与真实状态对齐
+- [x] **`Reaper`**：`maxLifetime` / `idleTTL`；有开放 WebSocket 时不算空闲；SGE 上默认不做空闲回收（ADR-015）
+- [x] `doneWhen` 探针轮询（`file_exists` / `dir_nonempty`）
+- [x] **`sge` backend 架构**（ADR-015，未接真集群）：
+      `qsub` 参数翻译（`cpu`→`-pe smp`、内存→**按 slot 均分** `h_vmem`、`walltime`→`h_rt`）、
+      `qstat -xml` 解析（**区分挂起 `s` 与真死**）、rendezvous 共享文件当控制通道、
+      `ssh -L` 本地转发当数据通道、作业脚本内做端口冲突回退与就绪探活
+- [ ] 「启动中」进度页（HTTP 侧，Phase 3 与管理端一起）
+- [ ] `/api/paths` + `srcos-path-picker` 原语控件（provider 已就绪，缺 HTTP 面）
+- [ ] 端口/路由的持久化审计与 `srcos svc reap` 的定时调度
+- [ ] prlimit 路径下的 RSS 看门狗（RLIMIT 无法表达"每单元进程数"，见 ADR-014 新增说明）
 
 ### Phase 3：注册、授权与管理端
 - [ ] 工具注册：扫描 `srcos-tools/`（→ 后续支持 registry 拉取）
@@ -711,5 +720,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
 | 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
 | 2026-09-22 | 新增 `scripts/probe-env.sh` 与 `docs/environments.md`；完成 node01 探测（bwrap 被 AppArmor 拦、systemd-run --user 可用、数据盘是 ext4、node01 非 SGE 登录节点、shiny/RStudio/dsh 已在跑）；待决策扩到 13 项 |
+| 2026-09-22 | **Phase 2 主体完成**：`Backend`/`Handle` 抽象、`kind: service` 全链路、`StorageProvider`（`/Volumes/data`）、动态路由表、端口池、`Reconcile`、`Reaper`、`doneWhen` 探针、**SGE backend 架构**（qsub 翻译 / qstat -xml 解析含挂起区分 / rendezvous 控制通道 / ssh -L 数据通道）；新增 `internal/{storage,portpool,route}` 与 `internal/runtime/sge`；修掉 RLIMIT_NPROC 的语义错误（按 real UID 全系统计数，会连 bwrap 的 namespace 一起挡掉） |
 | 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
 | 2026-09-22 | **bwrap 修复已执行并验证通过**（AppArmor 按二进制授权，非全局关 sysctl）；确认「不用 root」是架构偏好（ADR-014 补前提）；**发现 userns 把 group 权限位变成人人可读** → `MountSpec` 粒度 = 数据可见范围，写入 `AGENTS.md` 安全不变式，并修正 ADR-021 的“Jail vs MountSpec 两个边界”表述；探测脚本修正误导（按二进制授权列表 + T4 权限折叠探测） |
