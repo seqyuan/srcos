@@ -67,6 +67,17 @@ func AgentTokensPath(configDir string) string {
 	return filepath.Join(configDir, "agent-tokens.yaml")
 }
 
+// ServiceActivityPath is the proxy-written record of when each service
+// instance was last used.
+//
+// It is not part of the instance record on purpose: the record is written by
+// whoever starts or stops a unit (the CLI may be another process), so a
+// heartbeat that rewrote it could clobber a state change with a stale
+// "running".
+func ServiceActivityPath(configDir string) string {
+	return filepath.Join(DataDir(configDir), "service-activity.yaml")
+}
+
 // AgentTokenUsagePath is the runtime record of when each token was last used.
 // It lives under data/ because the gateway writes it while the CLI writes
 // agent-tokens.yaml: keeping the two apart means neither writer can clobber

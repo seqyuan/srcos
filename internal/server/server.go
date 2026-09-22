@@ -11,6 +11,7 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
+	"github.com/seqyuan/srcos/internal/activity"
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/auth"
@@ -55,6 +56,10 @@ type Server struct {
 	// layer (ADR-003). It is a cache of "what is reachable right now", rebuilt
 	// from the instance records at startup and on every scan tick.
 	routes *route.Table
+	// serviceActivity records when each instance was last *used*, which only
+	// the proxy can see (the record knows when a service started, not whether
+	// anyone is still working in it).
+	serviceActivity *activity.Journal
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -169,6 +174,10 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// Usage is gateway-written runtime state in data/, deliberately separate
 	// from the CLI-written registry.
 	agentTokens.AttachUsage(agenttoken.LoadUsage(config.AgentTokenUsagePath(configDir)))
+
+	// Which service instances are actually being used. The reaper needs it:
+	// idleTTL must measure traffic, not time since start.
+	serviceActivity := activity.Load(config.ServiceActivityPath(configDir), serviceActivityHeader)
 	// A credential must not outlive its account: the store refuses a token
 	// whose user is gone, and every front-end that authenticates through it
 	// (the REST API, MCP) gets that for free.
@@ -213,7 +222,8 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 		},
-		routes: route.NewTable(),
+		routes:          route.NewTable(),
+		serviceActivity: serviceActivity,
 	}
 	// Publish the services that were already running when this process started
 	// (they were started by the CLI, in another process), so a gateway restart
@@ -946,6 +956,11 @@ func (s *Server) forwardAsIs(w http.ResponseWriter, r *http.Request, match *conf
 }
 
 func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request, svc *config.ServiceConfig, fc proxy.ProxyForwardContext) {
+	// Record the use before it happens: an instance is "in use" from the moment
+	// someone asks for it, and a request that fails is still evidence that the
+	// service is wanted.
+	s.touchActivity(fc.Username, svc)
+
 	rp := proxy.NewReverseProxy(svc, fc)
 	rp.Transport = s.transport
 	// Go's ReverseProxy logs body-copy errors ("unexpected EOF") through its

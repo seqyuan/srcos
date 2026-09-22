@@ -603,6 +603,15 @@ type Reaper struct {
 	Runner *Runner
 	// ActiveWS reports whether an instance currently has live connections.
 	ActiveWS func(instanceID string) bool
+	// LastActive returns the newest observed activity for an instance, or the
+	// zero time when the caller has none to offer.
+	//
+	// It exists because the *record* only knows when the instance started:
+	// activity is only observable where the traffic is, which is the proxy (the
+	// gateway's, or a second process's). Without this, idleTTL would measure
+	// "time since start" and a notebook someone has been working in all
+	// afternoon would be reaped mid-thought.
+	LastActive func(instanceID string) time.Time
 }
 
 // Sweep performs one pass and returns the instances it stopped.
@@ -638,12 +647,19 @@ func (rp *Reaper) Sweep(ctx context.Context, now time.Time) ([]string, error) {
 			idleTTL := parseDurationOr(t.Lifecycle.IdleTTL, 0)
 			// A backend on a cluster queues for minutes to hours, so idle
 			// reaping is opt-in there (ADR-015).
-			if t.Backend != tool.BackendSGE && idleTTL > 0 && !inst.LastActiveAt.IsZero() &&
-				now.Sub(inst.LastActiveAt) > idleTTL {
-				if rp.ActiveWS != nil && rp.ActiveWS(inst.ID) {
-					continue // open WebSocket: not idle, whatever the clock says
+			if t.Backend != tool.BackendSGE && idleTTL > 0 {
+				lastActive := inst.LastActiveAt
+				if rp.LastActive != nil {
+					if observed := rp.LastActive(inst.ID); observed.After(lastActive) {
+						lastActive = observed
+					}
 				}
-				reason = "idle past idleTTL"
+				if !lastActive.IsZero() && now.Sub(lastActive) > idleTTL {
+					if rp.ActiveWS != nil && rp.ActiveWS(inst.ID) {
+						continue // open WebSocket: not idle, whatever the clock says
+					}
+					reason = "idle past idleTTL"
+				}
 			}
 		}
 		if reason == "" {

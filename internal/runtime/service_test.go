@@ -433,3 +433,47 @@ func mustWrite(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// idleTTL measures traffic, not time since start. The record only knows the
+// latter, so a caller that can see the traffic (the proxy) supplies the former
+// — without it, a notebook someone has been working in all afternoon gets
+// reaped mid-thought.
+func TestReaperHonoursObservedActivity(t *testing.T) {
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+
+	// The record says the service started an hour ago; the proxy saw traffic a
+	// minute ago.
+	inst.LastActiveAt = time.Now().Add(-time.Hour)
+	if err := SaveInstance(InstancePath(h.configDir, inst.ID), inst); err != nil {
+		t.Fatal(err)
+	}
+
+	reaper := &Reaper{
+		Runner:     h.runner,
+		LastActive: func(id string) time.Time { return time.Now().Add(-time.Minute) },
+	}
+	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("a service with recent traffic must not be reaped: %v", stopped)
+	}
+
+	// With no observation at all the record stands on its own, and the old
+	// behaviour (reap it) is what remains.
+	plain := &Reaper{Runner: h.runner}
+	stopped, err = plain.Sweep(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(stopped) != 1 {
+		t.Fatalf("stopped = %v", stopped)
+	}
+}

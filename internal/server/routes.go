@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"strings"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/route"
@@ -175,6 +176,31 @@ func serviceForEntry(e route.Entry) *config.ServiceConfig {
 		WebSocket:   e.WebSocket,
 		BWLimit:     e.BWLimit,
 		BackendPath: e.BackendPath,
+	}
+}
+
+// serviceActivityHeader explains the file to whoever opens it.
+const serviceActivityHeader = "# SRCOS 服务实例活跃时间（运行态，由网关写入）\n" +
+	"# 记录每个实例最近一次被访问的时间；`svc reap`（在网关或 CLI 里）读它判断 idleTTL。\n" +
+	"# 与实例记录分开：记录由启动/停止它的人写（可能是另一个进程），\n" +
+	"# 而心跳若改写记录，可能用陈旧的 running 覆盖掉一次状态变更。\n" +
+	"# 按实例降频（首次访问即时落盘），崩溃最多丢掉最后 30 秒。\n\n"
+
+// touchActivity records that an instance was used.
+//
+// Only instance-backed routes are tracked: SRCOS does not manage a static
+// card's lifetime, so it has no reason to know when one was visited.
+func (s *Server) touchActivity(username string, svc *config.ServiceConfig) {
+	if s.serviceActivity == nil || username == "" || svc == nil {
+		return
+	}
+	e, ok := s.routes.Get(username, svc.ID)
+	if !ok {
+		return
+	}
+	if err := s.serviceActivity.Touch(e.InstanceID, time.Now()); err != nil {
+		// A failed heartbeat must never fail the request it describes.
+		log.Printf("[srcos] activity: %v", err)
 	}
 }
 

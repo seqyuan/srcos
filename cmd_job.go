@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seqyuan/srcos/internal/activity"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
@@ -597,7 +598,13 @@ func runSvcReap(args []string) {
 	if err != nil {
 		fatalf("%v", err)
 	}
-	reaper := &runtime.Reaper{Runner: runner}
+	// The proxy's heartbeat is what makes idleTTL mean "no traffic" rather than
+	// "started a while ago": read the same journal the gateway writes.
+	activityJournal := activity.Load(config.ServiceActivityPath(*configDir), "")
+	reaper := &runtime.Reaper{
+		Runner:     runner,
+		LastActive: activityJournal.Last,
+	}
 	stopped, err := reaper.Sweep(context.Background(), time.Now())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)

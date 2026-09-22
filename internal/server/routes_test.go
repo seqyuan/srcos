@@ -339,24 +339,30 @@ func TestWebSocketUpgradeIsForwardedToAnInstance(t *testing.T) {
 // 与静态卡片的关系
 // ─────────────────────────────────────────────────────────────────────────
 
-// cardGateway adds a static card for alice pointing at a sink.
-func cardGateway(t *testing.T, sink *proxySink, servicePath string, websocket bool) (*Server, string) {
+// writeCard writes a static card into a user's config, the way the dashboard or
+// `/api/services` would.
+func writeCard(t *testing.T, configDir, servicePath, endpoint string, websocket bool) {
 	t.Helper()
-	srv, configDir := proxyGateway(t)
-	host, portStr, err := net.SplitHostPort(sink.endpoint())
+	host, port, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := strconv.Atoi(portStr); err != nil {
+	if _, err := strconv.Atoi(port); err != nil {
 		t.Fatal(err)
 	}
-	port := portStr
 	cfg := "auth:\n  password_hash: \"" + strings.Repeat("1", 64) + "\"\n" +
 		"services:\n  - id: web\n    name: Web\n    host: " + host + "\n    port: " + port + "\n" +
 		"    path: " + servicePath + "\n    websocket: " + boolText(websocket) + "\n"
 	if err := os.WriteFile(config.UserConfigPath(configDir, "alice"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// cardGateway adds a static card for alice pointing at a sink.
+func cardGateway(t *testing.T, sink *proxySink, servicePath string, websocket bool) (*Server, string) {
+	t.Helper()
+	srv, configDir := proxyGateway(t)
+	writeCard(t, configDir, servicePath, sink.endpoint(), websocket)
 	srv.registry.Reload()
 	return srv, configDir
 }
@@ -502,5 +508,43 @@ func TestBareShortPathRedirectsToAnInstance(t *testing.T) {
 	srv.syncRoutes()
 	if rec := srv.getAs(t, "alice", "/secret/x", ""); rec.Code == http.StatusFound {
 		t.Fatalf("cross-user bare path redirected to %q", rec.Header().Get("Location"))
+	}
+}
+
+// The reaper must not reap a service someone is working in: idleTTL measures
+// traffic, and only the proxy sees traffic.
+func TestProxiedTrafficRecordsActivity(t *testing.T) {
+	srv, configDir := proxyGateway(t)
+	sink := newProxySink(t)
+	inst := saveService(t, configDir, "alice", "web", sink.endpoint(), nil)
+	srv.syncRoutes()
+
+	if !srv.serviceActivity.Last(inst.ID).IsZero() {
+		t.Fatal("nothing has been served yet")
+	}
+	if rec := srv.getAs(t, "alice", "/proxy/alice/web/", ""); rec.Code != 200 {
+		t.Fatalf("setup: %d", rec.Code)
+	}
+	at := srv.serviceActivity.Last(inst.ID)
+	if at.IsZero() {
+		t.Fatal("a proxied request must count as activity")
+	}
+	if time.Since(at) > time.Minute {
+		t.Fatalf("activity timestamp looks wrong: %v", at)
+	}
+
+	// A static card is not SRCOS's to reap, so traffic through one is not
+	// recorded as instance activity (and it never enters the table).
+	cardSink := newProxySink(t)
+	writeCard(t, configDir, "/jupyter", cardSink.endpoint(), true)
+	srv.registry.Reload()
+	if rec := srv.getAs(t, "alice", "/proxy/alice/jupyter/", ""); rec.Code != 200 {
+		t.Fatalf("card setup: %d", rec.Code)
+	}
+	if !srv.serviceActivity.Last("alice-web-svc").IsZero() && len(cardSink.paths) == 0 {
+		t.Fatal("the card did not serve")
+	}
+	if _, ok := srv.routes.Get("alice", "jupyter"); ok {
+		t.Fatalf("a card must not enter the dynamic table: %+v", srv.routes.List())
 	}
 }
