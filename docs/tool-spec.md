@@ -360,7 +360,25 @@ cellranger count --transcriptome="${REF}" ...
 **`/api/paths` 与参数值一律用沙箱路径**（工具在沙箱里直接可用）。
 SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知道宿主路径**。
 
-### 5.4 工具 UI 怎么接
+### 5.4 storage 声明的硬要求（重要）
+
+1. **`host_root` 必须是 bind 的最小粒度的路径。**
+   bwrap 的 userns 会把未映射的 gid 折叠成 `65534`，而沙箱进程本身就在 `65534` 组里，
+   因此**宿主的 `group` 权限位在沙箱内等于公开可读**。
+   把 `host_root` 写成 `/share` 就等于把 `/share` 下**所有 group-readable 内容**
+   （含其他项目组的 `drwxrwx---` 目录）都交给了沙箱，与 `Jail` 的子路径限制无关。
+   → **粒度就是数据可见范围。需要多个目录就声明多个 storage。**
+2. **`host_root` 必须对 SRCOS 的 OS 用户可达。** bind 不改变权限，只让路径可见；
+   宿主不可读的内容，沙箱内也读不到（而 SRCOS 也无法预览）。
+   若目标是组独占目录（`drwxrwx--- group`），推荐用 ACL 而非改组：
+
+   ```bash
+   sudo setfacl -R -m u:<SRCOS 的 OS 用户>:r-x /share/projectA
+   ```
+   （已实测有效；比 `chmod o+rx` 安全，比改组简单。）
+3. `mode: ro` 的 storage 在沙箱内同时是 `ro` 挂载，工具无法写入。
+
+### 5.5 工具 UI 怎么接
 
 | 工具 UI 是什么 | 怎么接 |
 |---|---|

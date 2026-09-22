@@ -425,9 +425,19 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - **不借用**：bwrap 的硬编码参数、以及「bwrap 能管资源」的隐含假设——bwrap 不做 cgroup 资源限制。
 
 ### ADR-014：不用需要 root 的工具
-- **决策**：排除 docker daemon、udocker/proot。隔离方案优先级：**apptainer/singularity**（HPC 事实标准，SIF 镜像 + `-B` + `--containall`）→ **bubblewrap**（无镜像、无镜像需求时的降级）→ 可选 Enroot。
+- **决策**：排除 docker daemon、udocker/proot。隔离方案优先级：**apptainer/singularity**（HPC 事实标准，SIF 镜像 + `-B` + `--containall`）→ **bubblewrap**（无镜像、无镜像需求时的降级）。
 - **理由**：部署在无 sudo 的登录节点。`proot` 是 ptrace 模拟、不是安全边界（`ennote` 的设计文档已明确此判断），不可退回去当隔离手段。
-- **已知缺口**：无 root 下的资源限制需降级路径 —— `systemd-run --user --scope`（可用时首选）→ `prlimit`（`RLIMIT_AS`/`RLIMIT_CPU`/`RLIMIT_NPROC`，子进程继承）+ **轮询 RSS 超限 kill 整个进程组**。HPC 登录节点常禁用 `systemd --user`，所以降级路径不是可选项。
+- **✅ 前提已确认（2026-09-22）**：这是**架构偏好**而非环境限制 —— node01 上免密 sudo 与 `docker` 组均可用，但选择不用。
+  理由是可移植性 / 分发性 / 避免特权守护进程，以及真正的 SGE 登录节点（无 sudo）能同样工作。
+  **推论：docker 最多作为可选 backend，不得成为 `local` 路径的必需项。**
+- **✅ bwrap 可用性已解决（2026-09-22）**：Ubuntu 24.04 的 `apparmor_restrict_unprivileged_userns=1`
+  会拦未带 setuid 的 bwrap；采用**按二进制单独授权**的 AppArmor profile 解决（与 Ubuntu 自带的
+  `lxc-usernsexec` / `podman` / `runc` 同机制），**不全局关闭 sysctl**。node01 已修复并验证通过。
+  重跑 `scripts/probe-env.sh` 可确认；探测记录见 [`environments.md`](environments.md)。
+- **资源限制降级路径**（ADR 的实现细节）：`systemd-run --user --scope`（可用时首选）→ `prlimit`
+  （`RLIMIT_AS`/`RLIMIT_CPU`/`RLIMIT_NPROC`，子进程继承）+ 轮询 RSS 超限 kill 整个进程组。
+  node01 上 `systemd-run --user` **完全可用**（`CPUQuota`/`MemoryMax`/`TasksMax` 均被接受，`Linger=yes`），
+  所以首选路径成立，`prlimit` 只作保险。
 
 ### ADR-015：HPC 上「实例是 Job 不是 Pod」
 - **决策**：SGE 驱动的生命周期语义单独定义——资源限制交给 SGE（`-pe smp` / `-l h_vmem`），生命周期上限用 `-l h_rt`，停止用 `qdel`，**空闲回收默认关闭**（排队代价高），改为到期前预警 + `qalter` 续期。
@@ -535,9 +545,18 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - 沙箱内 `$HOME` = 虚拟 home，因此 `.cache` / `.condarc` / `.config` / `.jupyter` 天然隔离，
     既不污染 OS 用户的真实 home，也不会在并发实例间互踩。虚拟 home 首次使用时从模板初始化。
 - **关键推论（已知限制，必须记录）**：所有实例都以**同一个 OS 用户**身份运行，
-  所以**隔离不靠 Unix UID，靠 mount namespace + `Jail` 路径校验**。
-  若 `MountSpec` 配错、挂到了不该挂的父目录，实例之间可以互访文件。
-  防护：**每个实例只挂自己的 workspace + 自己声明的 storage，绝不挂父目录**，且 `Jail` 是唯一路径解析入口。
+  所以**隔离不靠 Unix UID**。真正的边界有两个，且必须分开看待：
+  - **沙箱内进程** ← **`MountSpec` 的粒度**（bind 了什么都看得见）+ 文件权限位
+  - **SRCOS 的 API（用户 / agent）** ← **`Jail` 路径校验**
+
+  而 `MountSpec` 粒度这条有一个实测确认的细节（2026-09-22，见 [`environments.md`](environments.md)）：
+  bwrap 的 userns 把未映射的 gid 折叠成 `65534`，且沙箱进程就在 `65534` 组里，
+  所以**宿主的 `group` 权限位在沙箱内等于公开可读**。
+  即：**bind 粒度直接等于数据可见范围**。
+
+  防护：**每个实例只挂自己的 workspace + 自己声明的 storage，绝不挂父目录。**
+  需要多个 storage 就 bind 多个精确路径 —— 因为 bind 了父目录就等于把父目录下
+  **所有 group-readable 内容**（含其他项目组的 `drwxrwx---`）一并交出。
 - **明确不做**：为每个 SRCOS 注册用户建系统账号（真实 UID 隔离）—— 需要 root，与 ADR-014 冲突。
 - **环境 vs 数据分离**：conda env / `module` / `.sif` 属于**环境**（宿主真实路径，ro 挂载，管理员在 `tool.yaml` 写）；
   共享参考数据与项目目录属于**数据 storage**（`storages.yaml` 声明）。两者不要混用同一套声明。
@@ -662,10 +681,12 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 7 | `task` 的 `doneWhen` 探针是否需要内置常见类型（`file_exists` / `dir_nonempty` / `exit_code`）？ | 是，先内置这三个，其余留给工具自己写 |
 | 8 | dsh 集成的 Phase 5.5 何时做？集群/登录节点 Node 可用性如何？ | 取决于实际部署环境，路 B 可先于路 A |
 | 9 | MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？ | 倾向按工具 + 按用户双维度授权 |
-| 10 | **「不用 root」是架构偏好还是环境限制？** node01 上免密 sudo + docker 组均可用 | 若是偏好 → docker backend 可作候选；若是环境限制 → `sandbox: bwrap` 必须先修 AppArmor |
-| 11 | **是否执行 bwrap 修复**（AppArmor profile，需一次 root）？ node01 上已验证根因 | 建议执行；不执行则降级为 `sandbox: none` |
+| 10 | ~~**「不用 root」是架构偏好还是环境限制？**~~ | ✅ **已决（2026-09-22）**：架构偏好。docker 最多作可选 backend，不得成为 `local` 必需项 |
+| 11 | ~~**是否执行 bwrap 修复**（AppArmor profile）？~~ | ✅ **已执行并验证通过**（2026-09-22）；重跑 `scripts/probe-env.sh` 确认 |
 | 12 | **真正的 SGE 登录节点在哪？** 需要在它上面也跑一次 `scripts/probe-env.sh` | 阻塞 `backend: sge` 的全部实现细节 |
 | 13 | `runc 1.2.4` + `/etc/apparmor.d/runc` 已存在 → 是否能做无 root 容器化（ADR-014 的进阶方案）？ | 值得实测：`rootlesskit` + `runc` |
+| 14 | **Phase 1 首个真实用例用哪个**：dsh(3080) / shiny-server(3838) / RStudio(8787)？ | 它们已在 node01 上运行，建议直接用现状验证，而非另造 `hello-fanout` |
+| 15 | **`host_root` 可达性校验怎么做**：SRCOS 在注册 storage 时如何确认 OS 用户能读到（bind 不改变权限）？ | 倾向：注册时试读 + 报错时给 `setfacl` 建议（已实测 `setfacl -m u:$OS_USER:r-x` 有效） |
 
 ---
 
@@ -676,3 +697,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
 | 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
 | 2026-09-22 | 新增 `scripts/probe-env.sh` 与 `docs/environments.md`；完成 node01 探测（bwrap 被 AppArmor 拦、systemd-run --user 可用、数据盘是 ext4、node01 非 SGE 登录节点、shiny/RStudio/dsh 已在跑）；待决策扩到 13 项 |
+| 2026-09-22 | **bwrap 修复已执行并验证通过**（AppArmor 按二进制授权，非全局关 sysctl）；确认「不用 root」是架构偏好（ADR-014 补前提）；**发现 userns 把 group 权限位变成人人可读** → `MountSpec` 粒度 = 数据可见范围，写入 `AGENTS.md` 安全不变式，并修正 ADR-021 的“Jail vs MountSpec 两个边界”表述；探测脚本修正误导（按二进制授权列表 + T4 权限折叠探测） |

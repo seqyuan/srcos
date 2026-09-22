@@ -56,32 +56,48 @@ if command -v unshare >/dev/null 2>&1; then
   if unshare --user --map-root-user /bin/true 2>"$WS/e0"; then
     pass "实测 unshare --user 可用 → 非特权 userns 确实能创建"
   else
-    fail "实测 unshare --user 失败 → 非特权 userns 被拦"
+    fail "实测 unshare --user 失败 → 无 profile 的二进制无法创建 userns"
     sed 's/^/      /' "$WS/e0"
-    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
-      warn "原因: Ubuntu 24.04+ 的 apparmor_restrict_unprivileged_userns=1"
-      echo
-      echo "      两种修法（均需 root，一次性）："
-      echo "      ✅ 推荐：只给 bwrap 授 userns 能力（与 Ubuntu 自带的 lxc-usernsexec 同机制）"
-      echo "         sudo tee /etc/apparmor.d/bwrap >/dev/null <<'P'"
-      echo "         abi <abi/4.0>,"
-      echo "         include <tunables/global>"
-      echo "         profile bwrap /usr/bin/bwrap flags=(unconfined) {"
-      echo "           userns,"
-      echo "           include if exists <local/bwrap>"
-      echo "         }"
-      echo "         P"
-      echo "         sudo apparmor_parser -r /etc/apparmor.d/bwrap"
-      echo "         # 撤销: sudo apparmor_parser -R /etc/apparmor.d/bwrap && sudo rm /etc/apparmor.d/bwrap"
-      echo
-      echo "      ⚠️  降级方案：全局关掉（降低纵深防御，覆盖面更大）"
-      echo "         sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-      echo "         持久化: echo 'kernel.apparmor_restrict_unprivileged_userns=0' \\"
-      echo "                   | sudo tee /etc/sysctl.d/99-userns.conf && sudo sysctl --system"
-    fi
+    warn "注意：这不等于 bwrap 不能用 —— Ubuntu 支持按二进制单独授权（见下）"
   fi
-else
-  warn "无 unshare"
+fi
+
+# Ubuntu 24.04+ 的机制：在 /etc/apparmor.d/ 里给某个二进制加一份带 `userns,` 的 profile，
+# 即可单独解除 apparmor_restrict_unprivileged_userns 对它的限制（不影响全局）。
+# 官方为 90+ 个二进制这幺做了（lxc-usernsexec / podman / runc / buildah / flatpak / chrome …）。
+if [ -d /etc/apparmor.d ]; then
+  GRANTED=$(grep -l '^[[:space:]]*userns,' /etc/apparmor.d/* 2>/dev/null \
+            | xargs -r -n1 basename | sort | tr '\n' ' ')
+  if [ -n "$GRANTED" ]; then
+    pass "已通过 AppArmor profile 单独授予 userns 的二进制（$(printf '%s' "$GRANTED" | wc -w) 个）:"
+    printf '        %s\n' "$GRANTED" | fold -s -w 100 | sed 's/^/      /'
+    case " $GRANTED " in
+      *" bwrap "*) pass "  ✅ bwrap 已在其中 → 不受 apparmor_restrict_userns 限制" ;;
+      *)           warn "  ❌ bwrap 不在其中 → 需要按上面的方法加一份 profile" ;;
+    esac
+  else
+    warn "未发现任何 userns profile（非 Ubuntu 或未启用 AppArmor）"
+  fi
+  if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] \
+     && [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "1" ] \
+     && ! printf '%s' " $GRANTED " | grep -q " bwrap "; then
+    echo
+    echo "      ── 修复 bwrap 的两种方法 ──"
+    echo "      ✅ 推荐（精准，只给 bwrap 一个二进制授权）:"
+    echo "         sudo tee /etc/apparmor.d/bwrap >/dev/null <<'P'"
+    echo "         abi <abi/4.0>,"
+    echo "         include <tunables/global>"
+    echo "         profile bwrap /usr/bin/bwrap flags=(unconfined) {"
+    echo "           userns,"
+    echo "           include if exists <local/bwrap>"
+    echo "         }"
+    echo "         P"
+    echo "         sudo apparmor_parser -r /etc/apparmor.d/bwrap"
+    echo "         # 撤销: sudo apparmor_parser -R /etc/apparmor.d/bwrap && sudo rm /etc/apparmor.d/bwrap"
+    echo
+    echo "      ⚠️  降级（全局，降低纵深防御）:"
+    echo "         sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+  fi
 fi
 
 # ─────────────────────────────────────────────── 2. bubblewrap
@@ -142,8 +158,22 @@ if command -v bwrap >/dev/null 2>&1; then
       *)
         warn "T3 \$HOME 仍可见：$out" ;;
     esac
+
+    # T4：权限位折叠 —— userns 会把未映射 gid 折叠为 65534(nogroup)，
+    # 而沙箱进程本身就在 65534 组，所以宿主的 group 权限位在沙箱内等于"人人可读"。
+    # 这不是 bug 是 userns 的固有语义，但它把“OS 用户可读”扩大为“任何 group 可读”，
+    # 因此 MountSpec 必须 bind 最小必要路径，绝不 bind 父目录。
+    echo "  沙箱内 id: $(bwrap --die-with-parent --new-session --unshare-pid \
+          --ro-bind / / -- /bin/sh -c 'id' 2>/dev/null)"
+    if bwrap --die-with-parent --new-session --unshare-pid \
+         --ro-bind / / -- /bin/sh -c 'grep -q 65534 /proc/self/status' 2>/dev/null; then
+      warn "T4 沙箱内组列表含 65534 → group 权限位在沙箱内等同于公开可读"
+      warn "   → MountSpec 必须 bind 到最小必要路径（storages.yaml 的 host_root 不要再加父层）"
+    else
+      pass "T4 未观察到 65534 组折叠"
+    fi
   else
-    warn "T3 已跳过（bwrap 未通过 T1/T2）"
+    warn "T3/T4 已跳过（bwrap 未通过 T1/T2）"
   fi
 else
   fail "未安装 bwrap"

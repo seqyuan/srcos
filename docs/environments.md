@@ -17,17 +17,21 @@
 | 项 | 结果 | 判定 |
 |---|---|---|
 | `unprivileged_userns_clone` | `1` | ✅ |
-| **`apparmor_restrict_unprivileged_userns`** | **`1`** | ❌ **bwrap 挂掉的根因** |
+| **`apparmor_restrict_unprivileged_userns`** | **`1`** | ⚠️ 全局处于限制状态，但已按二进制单独豁免（见下） |
 | `user.max_user_namespaces` | `2061776` | ✅ |
-| 实测 `unshare --user` | ❌ `写失败：/proc/self/uid_map: 不允许的操作` | ❌ userns 被拦 |
-| `bwrap` 0.9.0（`/usr/bin/bwrap`） | 无 setuid → `setting up uid map: Permission denied` | ❌ **当前不可用** |
+| 实测 `unshare --user` | ❌ `写失败：/proc/self/uid_map: 不允许的操作` | 预期内（`unshare` 未获授权，**不代表 bwrap 不行**） |
+| **`bwrap` 0.9.0（`/usr/bin/bwrap`）** | **✅ 已修复并验证通过（2026-09-22）** | ✅ **可用** |
 | `apptainer` / `singularity` | 未安装（注意 `/usr/games/singularity` 是 pygame 同名游戏） | ❌ |
-| `/etc/apparmor.d/` userns profile 机制 | 有 90+ 个（含 `podman` `runc` `buildah` `rootlesskit` `lxc-usernsexec`） | ✅ **可照抄** |
+| `/etc/apparmor.d/` userns profile 机制 | **90 个二进制已获单独授权**（含 `bwrap` `runc` `podman` `buildah` `rootlesskit` `lxc-usernsexec`） | ✅ |
 | `apparmor_parser` | `4.0.0~beta3` | ✅ |
-| 免密 sudo | ✅ 可用（用户在 `sudo` 组） | ✅ **可自行修复** |
+| 免密 sudo | ✅ 可用（用户在 `sudo` 组） | ✅ |
 | `runc` / `rootlesskit` / `slirp4netns` | `runc 1.2.4` 已装且 profile 存在 | 待验证 |
 
-**结论**：`bwrap` 只需一次 root 操作即可启用，**推荐 AppArmor profile 而非全局 sysctl**：
+#### 修复记录（已执行）
+
+Ubuntu 24.04 的 `apparmor_restrict_unprivileged_userns=1` 会拦掉未带 setuid 的 `bwrap`。
+采用**按二进制单独授权**（与 Ubuntu 自带的 `lxc-usernsexec` / `ch-run` / `podman` / `runc` 同机制），
+**而非全局关闭 `kernel.apparmor_restrict_unprivileged_userns`**（不降低纵深防御）：
 
 ```bash
 sudo tee /etc/apparmor.d/bwrap >/dev/null <<'P'
@@ -40,10 +44,39 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
 }
 P
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
-bwrap --ro-bind / / -- /bin/true && echo OK
 ```
 
 撤销：`sudo apparmor_parser -R /etc/apparmor.d/bwrap && sudo rm /etc/apparmor.d/bwrap`
+
+验证结果：T1 最小调用 ✓ · T2 SRCOS 同款挂载集 ✓ · T3 隔离性 ✓（沙箱内 `/` 仅剩 `bin dev lib lib64 proc tmp usr workspace`，`/home/seqyuan` 不可见）。
+
+#### ⚠️ 重要发现：userns 把 group 权限位变成"人人可读"
+
+```
+宿主:  uid=1000(seqyuan) gid=1000 组=1000,4,24,27,30,46,101,110,985,1001   ← 10 个补充组
+沙箱:  uid=1000         gid=1000 组=1000,65534(nogroup)                    ← 只剩主组 + overflow
+```
+
+bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进程本身就在 `65534` 组里。
+因此宿主的 `group` 权限位在沙箱内**等于公开可读**。实测对照：
+
+| 文件权限 | 宿主（`seqyuan`） | 沙箱 | 判定 |
+|---|---|---|---|
+| `-rw-------` owner-only | 仅 root | **拒绝** | ✅ 有效隔离 |
+| `-rw-r-----` group | 仅 root / `docker` 组 | **可读** | ⚠️ **权限被放宽** |
+| `-rw-r--r--` other | 所有人 | 可读 | — |
+| `--uid 0 --gid 0`（userns 内 root） | — | 与默认相同 | ✅ 不额外提权 |
+
+**对 SRCOS 的硬约束**：
+
+1. **MountSpec 的粒度就是隔离的粒度。** bind 了 `/share`，沙箱内就能读 `/share` 下
+   **所有 group-readable** 的内容（包含其他项目组的 `drwxrwx---` 目录），绕过 `Jail` 的子路径限制。
+   → **必须 bind 到最小必要路径，绝不 bind 父目录。** 需多个 storage 就 bind 多个精确路径。
+2. **`Jail` 与 `MountSpec` 是两个不同的边界**，不要混为一谈：
+   - `Jail` 保护 **SRCOS 自己的 API**（`/api/paths`、文件预览、MCP）
+   - `MountSpec` 保护 **沙箱内的进程**
+3. `storages.yaml` 的 `host_root` **就是** bind 源，粒度不能更粗；且必须保证 SRCOS 的 OS 用户可达
+   （bind 不改变权限，只让路径可见）。
 
 ### 资源限制通道（ADR-014）
 
@@ -105,10 +138,24 @@ bwrap --ro-bind / / -- /bin/true && echo OK
 | rootless docker socket | ❌ 无 `/run/user/1000/docker.sock` → **是系统 daemon，即 root 等价** |
 | `/etc/subuid` | ✅ 已配置（`seqyuan:100000:65536`，另有 `yuan`/`deng`/`tennis` 三个真实系统用户） |
 
-> **这动摇了 ADR-014 的前提**：本机免密 sudo + docker 组 = 环境上**并不缺 root**，
-> 「不用需要 root 的工具」是**架构偏好**（可移植性 / 分发性 / 避免特权守护进程），
-> 而不是环境限制。**已向用户确认中** —— 若确认是偏好，则 docker backend 可作候选；
-> 若是"环境禁止 root"（例如真正的 SGE 登录节点），则 node01 只是宽松的例外。
+> **已确认（2026-09-22）：「不用需要 root 的工具」是架构偏好，不是环境限制。**
+> node01 上免密 sudo + docker 组均可用，所以这是**主动选择** ——
+> 为了可移植性、分发性、避免特权守护进程，也为了在真正的 SGE 登录节点（无 sudo）上能同样工作。
+> 推论：docker 最多作为**可选 backend**，不得成为 `local` 路径的必需项；
+> 主线仍是 `bwrap`（已修好）+ `systemd-run --user`。
+
+---
+
+## Phase 1 可直接用的真实用例
+
+node01 上**已经在跑** SRCOS 想接管的三个目标工具，因此 Phase 1 的端到端验证可以直接用现状，
+不必先造 `hello-fanout`：
+
+| 工具 | 现状 | 建议的 `kind` / `backend` / `sandbox` |
+|---|---|---|
+| dsh | `127.0.0.1:3080` | `service` / `local` / `bwrap`（只绑回环，与 SRCOS 安全模型一致） |
+| shiny-server | `*:3838`，`/srv/shiny-server` | `service` / `local` / `bwrap`（注意 `run_as shiny` 与组权限） |
+| RStudio Server | `0.0.0.0:8787` | `service` / `local` / `bwrap`（**绑了全网卡，需改配置只为回环**） |
 
 ---
 

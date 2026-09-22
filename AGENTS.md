@@ -54,8 +54,6 @@ UI 造起来便宜了 → UI 不再是护城河
 **所有工具实例都以同一个 OS 用户身份运行**（无 root，见 ADR-014）。因此：
 
 - **隔离不靠 Unix UID，靠 mount namespace + `Jail` 路径校验。**
-  这是一个**已知限制**：如果 `MountSpec` 配错、挂到了不该挂的父目录，实例之间可以互访文件。
-  防护手段是「每个实例只挂自己的 workspace + 自己声明的 storage，绝不挂父目录」，且 `Jail` 是唯一路径解析入口。
 - 如需真实 UID 隔离，必须为每个 SRCOS 注册用户建系统账号 —— 需要 root，**明确不做**。
 
 ### 虚拟 home 与虚拟 workspace
@@ -97,6 +95,16 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 - **工具实例只监听回环。** 网关是唯一入口，这是全部安全模型的基石，也是「后端零改动挂到子路径」的前提。
 - **`Jail` 是唯一的路径解析入口。** 任何「用户可控参数 → 文件系统路径」都必须过 `Jail`：
   禁止 `..`、绝对宿主路径、symlink 逃逸。
+- **`MountSpec` 的粒度就是隔离的粒度。** bwrap 的 userns 会把未映射的 gid 折叠成 `65534`，
+  而沙箱进程本身就在 `65534` 组里 —— 因此宿主的 `group` 权限位在沙箱内**等于公开可读**
+  （实测：`-rw-r----- root:somegroup` 宿主不可读、沙箱可读；`-rw-------` 两边都拒绝）。
+  所以：**必须 bind 到最小必要路径，绝不 bind 父目录。**
+  需要多个 storage 就 bind 多个精确路径 —— bind 了 `/share` 就等于把 `/share` 下
+  **所有 group-readable 内容**（含其他项目组的 `drwxrwx---`）给了沙箱。依据见
+  [`docs/environments.md`](docs/environments.md)。
+- **`Jail` 与 `MountSpec` 是两个不同的边界，不要混为一谈：**
+  `Jail` 保护 **SRCOS 自己的 API**（`/api/paths`、文件预览、MCP）；
+  `MountSpec` 保护 **沙箱内的进程**。混用会产生虚假的安全感。
 - **HTML 预览必须 sandbox iframe + 独立 origin。** 代理后端与网关同源，同源脚本可以调用管理 API；
   同源渲染用户上传的 HTML 会直接放大这个风险。
 - **身份头由网关覆盖，绝不透传。** SSO / agent token 一律先删客户端传入的同名头再写入。
