@@ -79,7 +79,7 @@
 - 授权：`Grant`（**默认拒绝**、只有「允许」没有 deny、组/用户/public/通配、**聚合配额**）
 - HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`、`/tools`、`/tools/<id>`、`/assets/*`
 - 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
-- CLI：`tool` / `job` / `svc` / `grant` / `token` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
+- CLI：`tool` / `job` / `svc` / `grant` / `token` / `flow` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
 - **MCP Server**（`/mcp`，read-only，agent token 认证）：9 个只读工具 + `interface → JSON Schema` 派生
 
 **工程基线**
@@ -87,7 +87,7 @@
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 21 个包 / 约 3.1 万行 / 约 460 个测试用例 / 43 个测试文件，`go vet` + `go test` 全绿
+- 22 个包 / 约 3.2 万行 / 约 500 个测试用例 / 44 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
@@ -103,7 +103,8 @@
 ### 2.3 下一步
 
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端都已完成。
-下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Flow 编排**（Phase 4，需先写 `docs/flow-spec.md`）。
+下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Flow 调度器**（Phase 4 主体）——
+契约已在 [`flow-spec.md`](flow-spec.md) 冻结、注册期校验已在 `internal/flow`，接下来是把它跑起来。
 
 ---
 
@@ -620,7 +621,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `internal/sandbox`（MountSpec + Jail + bwrap 物化）、`internal/runtime`（local backend）
 - [x] CLI：`srcos tool validate|list`、`srcos job submit|run|list|status|logs`
 - [x] `sandbox: none` 降级模式（含 `env -i` 内层清环境，见下）
-- [ ] `docs/flow-spec.md` —— 流程管理员契约（可推后到 Phase 4 之前）
+- [x] **`docs/flow-spec.md`** —— 流程管理员契约（2026-09-22 建立：schema、类型兼容表、
+      14 条注册期校验、执行语义（规划）、与 annopi 的对照、明确不做）
 - [ ] `docs/storage-spec.md` —— 管理端契约（可推后到 Phase 2 存储实现时）
 
 **Phase 1 实现中暴露的四个真问题**（已修，并已写回 `tool-spec.md`）：
@@ -708,12 +710,17 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] 端到端验证：官方 Python MCP SDK 客户端连上 → initialize / list_tools / call_tool 全通
 - [x] 一份实现两个前端：`internal/inspect` 是只读答案的唯一实现，REST API、HTML 页面、MCP 共用
 
-### Phase 4：云流程
-- [ ] `Flow` 注册 + 校验（类型兼容、DAG 无环、`executor`×`backend` 交叉校验）
+### Phase 4：云流程（**起步**）
+- [x] **`docs/flow-spec.md`** 契约冻结（2026-09-22）
+- [x] **`Flow` 注册 + 校验**（2026-09-22）：`internal/flow` —— DAG 无环（报出环路径）、
+      节点 id 可寻址、`id@version` 精确匹配、节点工具必须 `kind: task`、
+      连线地址/存在性/类型兼容（只允许路径流动）、一次报出全部问题 +
+      闭环校验「每个必填输入有且仅有一个来源（默认值 / binding / expose）」+
+      `srcos flow list|validate`
 - [ ] 用户侧实例化：渲染 `expose` + 样本表 → `FlowRun` → 展开 `TaskInstance`
 - [ ] 最小 DAG 调度器：拓扑序投递、`depends_on` AND、`when: on_success|always`
 - [ ] 失败只重跑失败节点及下游；每流程并发上限；重试计数
-- [ ] 断点续跑（状态表 + `.sign`）
+- [ ] 断点续跑（`.sign` 是人类逃生口）+ `flow run|status|resume|cancel` CLI
 - [ ] 把 `annopi` 注册为普通工具模块（逃生口）
 
 ### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer
@@ -804,3 +811,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **代理层接入动态路由表** —— 网关从实例记录重建路由表（启动同步 / 扫描同步 / 按需读记录），`/proxy/<user>/<tool>/` 可达；实例优先于静态卡片；`route.ParseTarget` 把「端点必须回环」变成单一入口（记录被手改也进不了表）；拨号失败即丢弃路由（`svc stop` 在另一进程执行时表现为 502 后 404）；裸路径 / Referer / 路由 cookie 三处解析统一走 `matchRouteForUser` |
 | 2026-09-22 | **冷启动体验 + 自动回收**：`internal/activity`（write-behind 时间戳日志，agenttoken.Usage 改为它的薄封装）+ `Reaper.LastActive` + 网关写 `data/service-activity.yaml`（修掉 idleTTL 只看启动时间的缺陷，否则会回收正在使用的服务）+ `proxy.ActiveConns`（真实 WebSocket 计数）+ 网关启动 reconcile / 扫描 tick 自动 reap + 「启动中」进度页与失败说明页 |
 | 2026-09-22 | **管理端**：`grant.Policy` 线程安全 + `ReplaceWith`（授权热加载）；`runtime.UnitUsage`/`UnitSampler`（systemd cgroup 或 /proc 的资源快照）+ `inspect.AdminInstances/AdminTools`（管理视图与只读模型共用）；`/api/admin/*`（实例总览/强制停止/日志/工具授权/组/管理员，仅管理员 + Origin 校验）；`/admin` 控制台（服务端渲染 + 少量 JS 动作）+ 仪表盘入口 |
+| 2026-09-22 | **Phase 4 起步：流程契约 + 注册期校验** —— `docs/flow-spec.md`（schema / 类型兼容表 / 14 条校验 / 执行语义（规划）/ 与 annopi 对照 / 明确不做）+ `internal/flow`（DAG 拓扑序与环检测、连线类型兼容、必填输入闭环校验、`id@version` 精确匹配、节点必须 kind: task）+ `srcos flow list|validate` |

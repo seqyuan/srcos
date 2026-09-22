@@ -715,6 +715,10 @@ curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 #   endpoint : http://<gateway>/mcp     （Streamable HTTP）
 #   header   : Authorization: Bearer srcos_...
 
+# 流程：把已注册工具按 output → input 连成 DAG（Phase 4 起步，只有校验与列举）
+./srcos flow list     --flows-dir srcos-flows --tools-dir srcos-tools
+./srcos flow validate --flows-dir srcos-flows --tools-dir srcos-tools
+
 # 网关（新增 --tools-dir）
 ./srcos serve -d /opt/srcos/config --tools-dir srcos-tools --port 30152
 ```
@@ -810,6 +814,27 @@ curl -b cj -X PUT -H 'Content-Type: application/json' \
 curl -b cj -X POST http://gw:30152/api/admin/instances/<id>/stop # 等价于 srcos svc stop（可跨用户）
 curl -b cj http://gw:30152/api/admin/instances/<id>/logs?tail=200
 ```
+
+### 流程（`flow.yaml`，Phase 4 起步）
+
+流程 = **把已注册工具按 `output → input` 连成一张 DAG**：管理员不写命令、不写代码，
+用户只填 `expose` 出来的参数 + 一张样本表。契约见 [`docs/flow-spec.md`](docs/flow-spec.md)。
+
+```yaml
+nodes:
+  - {id: count, tool: count@1.2.3}
+  - {id: qc,    tool: scqc@0.3.0, depends_on: [count]}
+  - {id: report, tool: qcreport@1.0.0, depends_on: [qc], when: always}
+bindings:
+  - {from: count.outputs.outs, to: qc.inputs.input_dir}
+expose:
+  - {node: count, input: fastq_dir, from: sample.fastq_dir}   # 样本表的一列
+  - {node: count, input: transcriptome, from: user}           # 运行时填一次
+```
+
+`srcos flow validate` 在注册期检查 14 类问题（DAG 无环、连线类型兼容、必填输入有且仅有一个来源、
+节点必须是 `kind: task` 的工具、`id@version` 精确匹配……），一次报出全部问题。
+**调度器（`flow run` / `FlowRun`）尚未实现** —— 进度见 roadmap §6 Phase 4。
 
 ### 工具开发者
 

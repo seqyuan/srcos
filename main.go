@@ -35,6 +35,8 @@ const usage = `Usage:
   srcos 2fa-reset <name>       Disable a user's two-factor authentication
   srcos token <cmd>            Manage agent tokens (program credentials for the
                                 agent / MCP surface): create | list | revoke
+  srcos flow <cmd>             Inspect flows (the orchestration contract):
+                                list | validate
   srcos sso [options]          Show or configure lightweight SSO (identity
                                 header forwarded to backends; see below)
 
@@ -165,6 +167,10 @@ func main() {
 	}
 	if cmd == "token" {
 		runTokenCmd(args)
+		return
+	}
+	if cmd == "flow" {
+		runFlowCmd(args)
 		return
 	}
 
