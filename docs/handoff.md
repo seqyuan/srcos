@@ -313,6 +313,20 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
   http://127.0.0.1:31111/api/tools        # 401：撤销立即生效，网关未重启
 ```
 
+### 在 node01（有 systemd）上验证降级路径
+
+降级模式的代码只在 `useSystemd()` 为假时才会走到。这台机器有 `systemd-run`，所以想验证
+「无 user systemd 的登录节点」那条路，就用一个只含所需可执行文件的 PATH 跑 CLI（缺了
+`systemd-run` 探测就会失败 → 降级）：
+
+```bash
+mkdir -p /tmp/fakebin
+for b in bash sh python3 env sleep kill cat printf; do ln -sf "$(command -v $b)" /tmp/fakebin/$b; done
+env -i PATH=/tmp/fakebin HOME=/tmp SRCOS_USER=alice SRCOS_TOOLS_DIR=<tools> \
+  ./srcos svc start -d /tmp/e2e/config --tools-dir <tools> --tool <service-tool>
+# 记录里应出现 pid + pid_start；再另起一个同样 PATH 的进程 svc stop → 进程应真的消失
+```
+
 ### 清理测试残留（容易漏）
 
 ```bash
