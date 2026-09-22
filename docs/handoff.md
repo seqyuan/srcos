@@ -10,7 +10,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成）
+> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成；**agent token 认证面完成**）
 
 ---
 
@@ -18,11 +18,14 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，17 个包，约 2.1 万行，250 个测试用例），
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，18 个包，约 2.3 万行，约 350 个测试用例），
 在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了**工具平台**四层：
-工具契约、实例化运行时、存储 provider、授权模型。全部在 node01 上端到端实测过。
+工具契约、实例化运行时、存储 provider、授权模型。认证面现在有两扇门：
+浏览器的 session cookie，与程序（agent / MCP 客户端）的 agent token（`Authorization: Bearer`）。
+全部在 node01 上端到端实测过。
 
-下一步：**agent token → MCP Server（read-only）**。它是"走向现代化"的招牌，且全部前置件已就绪。
+下一步：**MCP Server（read-only）** —— 认证面已就绪（agent token），剩下 `interface → MCP schema 派生`
+与 `/mcp` 端点本身。它是"走向现代化"的招牌。
 
 ---
 
@@ -70,6 +73,7 @@ UI 造起来便宜了 → UI 不再是护城河
 ```
 ┌─ 控制面 ────────────────────────────────────────────────────────────┐
 │ ✅ 认证/授权：Grant（默认拒绝 · 组/用户/public/通配 · 聚合配额）      │
+│ ✅ 程序认证：agent token（Bearer · 只存哈希 · scope · 过期 · 撤销）  │
 │ ✅ 工具注册：扫描 --tools-dir / $SRCOS_TOOLS_DIR                    │
 │ ⛔ 流程注册（Flow）：Phase 4                                        │
 │ ✅ 实例编排：Backend/Handle + 端口池 + 动态路由表 + Reconcile/Reaper│
@@ -89,7 +93,8 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 存储：StorageProvider（/Volumes/data → /data，ro）               │
 │ ✅ HTTP 面：/api/tools · /api/tools/<id> · /api/paths · /api/jobs   │
 │ ✅ 生成式表单 + srcos-path-picker 原语控件                          │
-│ ⛔ agent token + MCP Server：Phase 3.5（下一步）                    │
+│ ✅ agent token：Bearer 认证 · 只存哈希 · 只读 scope · 立即撤销       │
+│ ⛔ MCP Server：Phase 3.5（下一步）                                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,17 +112,18 @@ UI 造起来便宜了 → UI 不再是护城河
 | **授权** | 无 `grants.yaml` → 所有工具对非管理员不可见；授权后 alice 可见可提交，carol 的目录/描述/提交/浏览全部 403「未授权」而非「未知」 |
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
+| **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
 - ⛔ **流程编排（Flow / FlowRun）** —— Phase 4，`docs/flow-spec.md` 也未写
-- ⛔ **MCP Server** —— Phase 3.5
-- ⛔ **agent token 认证面** —— `config/agent-tokens.yaml` 还不存在
+- ⛔ **MCP Server** —— Phase 3.5（认证面已完成；缺 `interface → MCP schema` 派生与 `/mcp` 端点）
 - ⛔ **管理端页面** —— 工具上架/下架/实例总览/强制停止都只有 CLI 与 HTTP API
 - ⛔ **代理层接入动态路由表** —— `internal/route` 已就绪且已测，但 `handleProxy` 仍只读静态卡片，
   所以 service 实例目前**还不能通过网关访问**（只能直连 endpoint）
 - ⛔ **授权变更热加载** —— 改 `grants.yaml` 需重启网关
-- ⛔ **审计日志** —— 只有实例记录与日志文件，没有专门的审计流
+- ⛔ **审计日志** —— 目前每个被接受的 agent 请求会写一行网关日志（含用户/token/方法/路径），
+  但没有独立的审计流、没有结构化落盘、也没有“改配置”的审计
 - ⛔ **`apptainer` sandbox** —— 声明了会明确报错
 - ⛔ **SGE 未接真集群** —— 架构与测试都在（用 fake runner），但从未在真登录节点上跑过
 - ⛔ **前端打包（`webui/`）** —— ADR-012 的 Vite 包还没建；目前前端是 Go 内嵌模板 + 一个原语控件
@@ -131,8 +137,8 @@ UI 造起来便宜了 → UI 不再是护城河
 
 | # | 做什么 | 为什么现在做 |
 |---|---|---|
-| **1** | **agent token 认证面**：`config/agent-tokens.yaml`（只存 hash、scope、过期、标签）+ `srcos token create\|list\|revoke` | MCP 的前置；agent 是程序，不能用浏览器 session cookie |
-| **2** | **MCP Server（read-only）**：网关内置 `/mcp`（Streamable HTTP），工具 schema 从 `interface` **自动派生** | 全部前置件已就绪（机器可读 interface、`/api/paths`、`/api/jobs`）。这是"走向现代化"的招牌，让「探索用 AI，执行用 SRCOS」可演示 |
+| ~~1~~ | ~~**agent token 认证面**~~：✅ **已完成**（`internal/agenttoken` + `srcos token` + `/api/*` 的 Bearer） | 见 §2.2 与 roadmap ADR-019「实现契约」 |
+| **2** | **MCP Server（read-only）**：网关内置 `/mcp`（Streamable HTTP），工具 schema 从 `interface` **自动派生** | 前置已全部就绪：机器可读 interface、`/api/paths`、`/api/jobs`、**agent token 认证面**。这是"走向现代化"的招牌，让「探索用 AI，执行用 SRCOS」可演示 |
 | **3** | **代理层接入动态路由表** | 目前 service 实例还不能通过网关访问，`/proxy/<user>/<tool>` 只对静态卡片生效。这是"平台"缺的最后一块 |
 | **4** | 启动中进度页 + `svc reap` 定时调度 | 冷启动体验与自动回收 |
 | **5** | 管理端页面（上架/授权/实例总览） | 让非 CLI 用户能运维 |
@@ -177,6 +183,8 @@ UI 造起来便宜了 → UI 不再是护城河
 | **`systemctl list-units <pattern>` 不按裸名匹配**（需要 glob） | "先问存在吗"的预检会静默返回 false 并跳过 stop —— 服务于是活过了自己的停止命令。正解：**直接 `stop` 并解释它自己的错误**（`not loaded`/`not found` 视为成功） |
 | **降级模式下替换外层 `cmd.Env` 会弄丢 `DBUS_SESSION_BUS_ADDRESS`** | `systemd-run --user` 起不来，报 `Failed to connect to bus`。正解：用**内层 `env -i`** 清环境，让外层 limiter 继承宿主环境 |
 | **`pkill -f '<pattern>'` 会匹配到执行它的 shell 自身** | 如果 pattern 出现在 shell 的命令行里（通常都会），pkill 会杀掉自己。用不自匹配的模式（如 `srcos[-]dev`）或改用 `lsof -ti:<port> \| xargs kill` |
+| **`pkill -f 'srcos[-]dev serve'` 也自救不了** 如果同一条命令行里另有 `srcos-dev serve` 字面量（如 `nohup /tmp/srcos-dev serve ...`） | 括号只能避开「pattern 自己」，避不开同行其他字面量。症状：整条命令静默无输出（shell 被杀）。安全做法：**kill 与 start 分两次命令**，kill 用 `lsof -ti:<port> \| xargs kill` |
+| **`go test ./internal/runtime/` 每次泄漏 5 个 `python3 -m http.server`**（测试端口范围 24100–24120） | 服务测试用 `SystemdUser=false` 强制走 fallback，而 `StartService` 成功后**丢掉了活跃 Handle**，`StopService` 只能走 `UnitStopper.StopUnit(ref)`（按名停）—— 降级模式没有 unit 可停，于是 `_ = h.Stop()` 永远不会发生，但实例被标成 stopped。连跑 **4 次**就占满测试端口池，服务测试全部变红（`no free port: port pool exhausted`）；这不是测试特有的，**降级模式下 `svc stop` 真的停不掉自己启动的服务**。真正的修法：`Runner` 保存活跃 `Handle`（map[instanceID]Handle），`StopService` 优先用活跃 handle，仅重启后才回退到 `StopUnit(ref)`（另立一项做）。暂时每轮测试后清（见 §6） |
 
 ### 4.3 契约与幂等
 
@@ -223,7 +231,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 014 | 不用需要 root 的工具（架构偏好）；`bwrap` 优先，`systemd-run --user` 限资源，`prlimit` 兜底 |
 | 015 | HPC 上**实例是 Job 不是 Pod**；资源交给 SGE；闲置回收默认关闭；共享 FS 当控制通道 + `ssh -L` 当数据通道 |
 | 017 | 定位：AI 平台的确定性执行后端；**必须**从 `interface` 自动生成 fallback 表单，否则"不管 UI"自相矛盾 |
-| 019 | MCP Server 内置网关，第一期 read-only；新增 agent token；**不做** MCP Client |
+| 019 | MCP Server 内置网关，第一期 read-only；新增 agent token（✅ 认证面已完成，见 roadmap「实现契约」）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
@@ -289,6 +297,19 @@ curl -s -c cj -X POST http://127.0.0.1:31111/login -H 'Origin: http://127.0.0.1:
   --data 'username=alice&password=...'
 curl -s -b cj http://127.0.0.1:31111/api/tools
 curl -s -b cj 'http://127.0.0.1:31111/api/paths?tool=<tool>&input=<path-input>'
+
+# 6. agent token（程序凭据）——与浏览器 session 完全独立
+TOK=$(/tmp/srcos-dev token create -d /tmp/e2e/config --user alice --label annovibe \
+      | grep -o 'srcos_[a-z2-7]*\.[A-Za-z0-9_-]*' | head -1)
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
+  http://127.0.0.1:31111/api/tools        # 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' -d '{"tool":"hello-fanout"}' \
+  http://127.0.0.1:31111/api/jobs         # 403：第一期只读（需预留的 submit scope）
+ID=$(/tmp/srcos-dev token list -d /tmp/e2e/config | awk 'NR==2{print $1}')
+/tmp/srcos-dev token revoke -d /tmp/e2e/config "$ID"
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
+  http://127.0.0.1:31111/api/tools        # 401：撤销立即生效，网关未重启
 ```
 
 ### 清理测试残留（容易漏）
@@ -297,6 +318,8 @@ curl -s -b cj 'http://127.0.0.1:31111/api/paths?tool=<tool>&input=<path-input>'
 systemctl --user stop 'srcos-*' && systemctl --user reset-failed 'srcos-*'
 lsof -ti:20000-30000 2>/dev/null | xargs -r kill    # 端口池范围
 lsof -ti:31111,31112,31113 2>/dev/null | xargs -r kill
+pkill -f 'http[.]server 241'                        # runtime 服务测试泄漏的 python3（见 §4.2）
+ss -tln | awk '$4 ~ /:241[0-9][0-9]$/'              # 应为空；不为空则服务测试将变红
 ```
 
 ---
@@ -304,12 +327,16 @@ lsof -ti:31111,31112,31113 2>/dev/null | xargs -r kill
 ## 7. 代码地图
 
 ```
-main.go                     CLI 入口与一级子命令分发（serve/user/sso/tool/job/svc/grant）
+main.go                     CLI 入口与一级子命令分发（serve/user/sso/tool/job/svc/grant/token）
 cmd_job.go                  tool / job / svc 子命令 + 通用 flag 解析
 cmd_grant.go                grant 子命令
+cmd_token.go                token 子命令（create / list / revoke；`--expires 90d|never|<date>`）
 
 internal/config/            用户/状态/路径/存储与授权文件位置；registry 扫描 users/*.yaml
 internal/auth/              密码（bcrypt）、TOTP、会话 cookie、SSO、ClientIP/SameOrigin
+internal/agenttoken/        agent token（程序凭据）：只存 SHA-256、每次校验重读文件、失败关闭
+  ├ agenttoken.go           Token/Store/Identity/Scope + 格式解析 + 注册期校验
+  └ usage.go                使用时间（data/agent-token-usage.yaml，网关写、按 token 降频）
 internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全部逻辑
 internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
@@ -372,10 +399,13 @@ scripts/probe-env.sh        无 root 环境探测
 ## 10. 重开会话时的第一句话建议
 
 ```
-读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 1 项
-（agent token 认证面）开始。
+读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 2 项
+（MCP Server，read-only）开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。
 如果要**换方向**，先说清要改哪一条不变式（`AGENTS.md`）或哪一条 ADR，
 因为按仓库约定，架构回退必须先改文档再改代码。
+
+> 上一轮（agent token 认证面）的收尾：`make vet && make test` 全绿；
+> 端到端验证过的命令与输出见 §2.2 最后一行。

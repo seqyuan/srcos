@@ -59,6 +59,22 @@ func StoragesPath(configDir string) string {
 	return filepath.Join(configDir, "storages.yaml")
 }
 
+// AgentTokensPath is the agent token registry: program credentials for the
+// agent / MCP surface, stored as SHA-256 hashes only (ADR-019). Unlike
+// grants.yaml this file is written by `srcos token ...`, i.e. it is a
+// credential store rather than a policy.
+func AgentTokensPath(configDir string) string {
+	return filepath.Join(configDir, "agent-tokens.yaml")
+}
+
+// AgentTokenUsagePath is the runtime record of when each token was last used.
+// It lives under data/ because the gateway writes it while the CLI writes
+// agent-tokens.yaml: keeping the two apart means neither writer can clobber
+// the other's file.
+func AgentTokenUsagePath(configDir string) string {
+	return filepath.Join(DataDir(configDir), "agent-token-usage.yaml")
+}
+
 func UsersDir(configDir string) string {
 	return filepath.Join(configDir, UsersDirName)
 }

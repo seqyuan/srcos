@@ -79,19 +79,19 @@
 - 授权：`Grant`（**默认拒绝**、只有「允许」没有 deny、组/用户/public/通配、**聚合配额**）
 - HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`、`/tools`、`/tools/<id>`、`/assets/*`
 - 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
-- CLI：`tool` / `job` / `svc` / `grant` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
+- CLI：`tool` / `job` / `svc` / `grant` / `token` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
 
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 17 个包 / 约 2.1 万行 / 250 个测试用例 / 26 个测试文件，`go vet` + `go test` 全绿
+- 18 个包 / 约 2.3 万行 / 约 350 个测试用例 / 30 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
 - 流程编排（`Flow` / `FlowRun`）—— Phase 4
-- MCP Server 与 agent token —— Phase 3.5
+- **MCP Server**（`/mcp`，read-only）—— Phase 3.5（认证面 agent token 已完成）
 - 管理端页面（上架 / 授权 / 实例总览 / 强制停止）
 - **代理层接入动态路由表** —— 路由表已就绪且已测，但 `handleProxy` 仍只读静态卡片，
   所以 service 实例目前只能直连 endpoint，还不能通过网关访问
@@ -102,8 +102,10 @@
 
 ### 2.3 下一步
 
-见 §6 的 Phase 3.5 —— **agent token → MCP Server（read-only）**，
-其全部前置件（机器可读 `interface`、`/api/paths`、`/api/jobs`）已就绪。
+见 §6 的 Phase 3.5 —— **MCP Server（read-only）**。
+认证面（agent token，`internal/agenttoken` + `srcos token` + `Authorization: Bearer`）已完成，
+剩下 `interface → MCP tool schema 自动派生` 与 `/mcp` 端点本身；
+其余前置件（机器可读 `interface`、`/api/paths`、`/api/jobs`）也已就绪。
 详细排序与理由见 [`handoff.md`](handoff.md) §3。
 
 ---
@@ -526,6 +528,23 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   工具的执行契约是 `work.sh`（确定性、有退出码、有产物），MCP 是「谁可以调它、怎么发现签名」的接口协议，
   两者不同层。混在一起会模糊「确定性执行」这个核心卖点。
 - **同样不做**：让 agent 直接改 workspace（第一期只读）。
+- **实现契约（2026-09-22 已实现认证面，`internal/agenttoken`）**：
+  - 明文格式 `srcos_<8位 base32 小写 id>.<43位 base64url secret>`；id 是明文查找键，
+    所以校验只需哈希一条记录（256 bit 熵 → 用 SHA-256 即可，不需要盐/KDF，与密码不同）。
+    文件里只有 `sha256(整条明文)` 的 hex，明文仅在 `srcos token create` 打印一次。
+  - **每次校验都重新读文件**（不做 mtime 缓存）：凭据文件很小，而
+    「已撤销的 token 仍被接受」是这个面最不能出的 bug（粗粒度时间戳的 FS 上 mtime 缓存会漏掉撤销）。
+  - **失败关闭**：文件缺失 = 无 token；文件格式错 = 全部失效并记日志（只记一次），修好即恢复。
+  - **token 不放大权限**：以所属用户身份行事，Grant 照常生效；scope 只收窄。
+    `read` 可签发；`submit` 是预留 scope，`Create` 直接拒绝签发（而不是发一个“什么都不做”的凭据）。
+  - **API 层规则**：HTTP 非 GET/HEAD/OPTIONS 且无 `submit` scope → 403（第一期即只读面）；
+    Bearer 请求免 `Origin` 校验（token 不是浏览器自动携带的凭据）；
+    每次认证都写审计日志行（被拒时另记一行）。
+  - **撤销**：`token revoke <id>` / `--user <name> --all`；`srcos del <user>` 一并撤销；
+    网关侧还有「用户必须存在」的失败关闭兜底。
+  - **使用时间**写在 `data/agent-token-usage.yaml`（运行态、网关写、按 token 降频、
+    首次使用即时落盘），与 CLI 写的 `config/agent-tokens.yaml` 分开两个文件、两个写入者。
+    它是提示而不是审计日志（审计流仍是独立的待办项）。
 
 ### ADR-020：存储与路径 provider 化，并用闭环消除「选了却看不到」
 - **背景**：工具需要访问集群/云路径并把路径作为参数，用户在工具 UI 里预览后选择。
@@ -634,7 +653,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs` + `/tools`、`/tools/<id>` 生成式表单
 - [x] **原语控件 `srcos-path-picker`**（Web Component，工具自建 UI 也能用）
 - [x] **生成式表单**（ADR-017 的必要补全：只有 `work.sh` + `interface` 的工具立即可用）
-- [ ] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）
+- [x] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）：
+      `internal/agenttoken`（创建/校验/撤销/失败关闭 + 使用时间）+ `srcos token create|list|revoke` +
+      HTTP 面 `Authorization: Bearer`（第一期只读：写接口需预留的 `submit` scope，现不可签发）+ 审计日志行
 - [ ] 管理端页面：工具上架/下架/授权、storage 声明、实例总览（CPU/内存实时采样、日志、强制停止）
 - [ ] 授权变更的热加载（现在改 `grants.yaml` 需重启）
 - [ ] 审计日志（含 agent token 调用）
@@ -737,5 +758,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **新增 `docs/handoff.md`（会话交接简报）** —— 目标 / 已验证事实 / 下一步 / **已踩的坑清单** / 代码地图 / 环境事实 / 验证脚本；roadmap §2 重写为准确状态并指向它；AGENTS.md 文档分工表加入 handoff 与 environments；README 增补「工具平台」章节（命令 / 配置 / 网页入口 / 工具开发者入口） |
 | 2026-09-22 | **Phase 3 主体启动**：`Grant` 授权模型（默认拒绝 / 只有允许 / 组+用户+public / 通配 / 管理员绕过 / 聚合配额）+ `srcos grant` CLI；HTTP 面补齐（工具目录、机器可读 interface、路径浏览、提交、实例列表）+ 生成式表单 + `srcos-path-picker` 原语控件；`serve --tools-dir`；修掉 `parseFlagsLoose` 的假交错解析（Go flag 遇位置参数即停止） |
 | 2026-09-22 | **Phase 2 主体完成**：`Backend`/`Handle` 抽象、`kind: service` 全链路、`StorageProvider`（`/Volumes/data`）、动态路由表、端口池、`Reconcile`、`Reaper`、`doneWhen` 探针、**SGE backend 架构**（qsub 翻译 / qstat -xml 解析含挂起区分 / rendezvous 控制通道 / ssh -L 数据通道）；新增 `internal/{storage,portpool,route}` 与 `internal/runtime/sge`；修掉 RLIMIT_NPROC 的语义错误（按 real UID 全系统计数，会连 bwrap 的 namespace 一起挡掉） |
-| 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
 | 2026-09-22 | **bwrap 修复已执行并验证通过**（AppArmor 按二进制授权，非全局关 sysctl）；确认「不用 root」是架构偏好（ADR-014 补前提）；**发现 userns 把 group 权限位变成人人可读** → `MountSpec` 粒度 = 数据可见范围，写入 `AGENTS.md` 安全不变式，并修正 ADR-021 的“Jail vs MountSpec 两个边界”表述；探测脚本修正误导（按二进制授权列表 + T4 权限折叠探测） |
+| 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |
+| 2026-09-22 | **agent token 认证面完成（Phase 3.5 前置）** —— `internal/agenttoken`（只存 SHA-256、每次校验重读文件、失败关闭、使用时间落 `data/`）+ `srcos token create\|list\|revoke`（默认 90 天、`never`）+ `/api/*` 的 `Authorization: Bearer`（第一期只读，写接口需预留的 `submit`）+ 审计日志行 + `srcos del` 连带撤销；ADR-019 补「实现契约」小节 |

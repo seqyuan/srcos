@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
@@ -47,6 +49,10 @@ type Options struct {
 	Grants GrantChecker
 	// RenderToolForm renders a tool's generated form page.
 	RenderToolForm RenderToolForm
+	// AgentTokens authenticates `Authorization: Bearer` requests, i.e. programs
+	// (agents, MCP clients) rather than browsers (ADR-019). Nil means token
+	// authentication is not wired and only session cookies are accepted.
+	AgentTokens *agenttoken.Store
 }
 
 // Handler handles REST API requests for service management.
@@ -90,15 +96,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	// CSRF guard: state-changing requests from browsers must carry an Origin
 	// matching the gateway's own host. Browsers always send Origin on
 	// POST/PUT/DELETE, so cross-site (and cross-host) pages are rejected.
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !auth.SameOriginRequest(r) {
+	//
+	// A bearer token is exempt: it is not an ambient credential (the browser
+	// never attaches one by itself), so a cross-site page cannot ride on it,
+	// and some MCP clients legitimately send their own Origin.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		!agenttoken.HasBearerCredentials(r) && !auth.SameOriginRequest(r) {
 		writeJSON(w, 403, map[string]string{"error": "cross-origin request rejected"})
 		return true
 	}
 
-	username := h.requireSession(w, r)
-	if username == "" {
+	ident, ok := h.identity(w, r)
+	if !ok {
 		return true
 	}
+
+	// Scope gate. An agent token is a read credential in this phase: the write
+	// surface (submit / cancel / run_flow) is the second half of ADR-019, and
+	// no token can hold `submit` yet — so the check is here to make the rule
+	// explicit at the one place that would have to change.
+	if ident.Agent && !isReadMethod(r.Method) && !ident.Has(agenttoken.ScopeSubmit) {
+		log.Printf("[srcos] agent %s refused (read-only token): %s %s", ident.Describe(), r.Method, r.URL.Path)
+		writeJSON(w, 403, map[string]string{
+			"error": "agent token is read-only (scope \"read\"); writing requires the \"submit\" scope, which is reserved for the second phase of ADR-019",
+		})
+		return true
+	}
+	username := ident.User
 
 	switch {
 	case path == "/api/services" && r.Method == "GET":
@@ -136,13 +160,55 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func (h *Handler) requireSession(w http.ResponseWriter, r *http.Request) string {
+// identity resolves who the request acts as: an agent token if one is
+// presented, otherwise a browser session.
+//
+// A presented-but-invalid token is a hard failure rather than a fallback to
+// the cookie: a program that sent a bad credential must be told so, not
+// silently served as whatever browser session the caller happens to hold.
+func (h *Handler) identity(w http.ResponseWriter, r *http.Request) (agenttoken.Identity, bool) {
+	if h.opts.AgentTokens != nil {
+		ident, err := h.opts.AgentTokens.Authenticate(r)
+		switch {
+		case err == nil:
+			// A token is only as good as its user. `srcos del` also revokes the
+			// user's tokens, but this is the fail-closed backstop: a credential
+			// must never outlive its account.
+			if h.Registry.GetUser(ident.User) == nil {
+				writeJSON(w, 401, map[string]string{"error": "agent token's user no longer exists"})
+				return agenttoken.Identity{}, false
+			}
+			// The audit line for every accepted agent call (ADR-019). It records
+			// the authentication event — who acted, as which user, with which
+			// scopes — because that is the fact an auditor asks for. Whether the
+			// call was then allowed is decided (and, when refused, logged) by the
+			// scope gate below.
+			log.Printf("[srcos] agent %s %s %s", ident.Describe(), r.Method, r.URL.Path)
+			return ident, true
+		case errors.Is(err, agenttoken.ErrNoCredential):
+			// No credential: fall through to the session cookie.
+		default:
+			writeJSON(w, 401, map[string]string{"error": err.Error()})
+			return agenttoken.Identity{}, false
+		}
+	}
+
 	session := h.sessionFromCookies(r.Header.Get("Cookie"))
 	if !session.Valid || session.UserID == "" {
 		writeJSON(w, 401, map[string]string{"error": "Unauthorized"})
-		return ""
+		return agenttoken.Identity{}, false
 	}
-	return session.UserID
+	return agenttoken.HumanIdentity(session.UserID), true
+}
+
+// isReadMethod reports whether an HTTP method only reads. Anything else is a
+// write and needs a scope that can write.
+func isReadMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
 }
 
 // currentSessionRev returns the per-account session revision derived from the

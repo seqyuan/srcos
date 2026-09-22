@@ -107,8 +107,14 @@ TLS 设置会持久化到 `state.yaml`（`tls_cert` / `tls_key`），之后的 `
 # 用户管理（管理员）
 ./srcos user <name>        创建用户账号（交互设置密码）
 ./srcos passwd <name>      重置用户密码
-./srcos del <name>         删除用户账号
+./srcos del <name>         删除用户账号（同时撤销该用户全部 agent token）
 ./srcos 2fa-reset <name>   关闭指定用户的两步验证
+
+# Agent token（程序凭据，给 agent / MCP 客户端用；只存哈希）
+./srcos token create --user alice --label annovibe   创建（明文只显示一次）
+./srcos token list                                   列出（含过期时间与最近使用）
+./srcos token revoke <id>                            撤销一个（立即生效，无需重启）
+./srcos token revoke --user alice --all              撤销某用户的全部 token
 
 # 轻量级单点登录（可选）
 ./srcos sso                                查看当前 SSO 配置
@@ -139,11 +145,13 @@ Options:
 ```text
 /opt/srcos/
 ├── srcos                  # 二进制
-└── config/                 # 0700，网关属主
-    ├── state.yaml          # 网关状态（监听地址/端口、trusted_proxy、session_secret）
-    └── users/              # 每个用户一个独立配置文件
-        ├── alice.yaml
-        └── bob.yaml
+├── config/                 # 0700，网关属主
+│   ├── state.yaml          # 网关状态（监听地址/端口、trusted_proxy、session_secret）
+│   ├── agent-tokens.yaml   # agent token（只存 SHA-256 哈希；`srcos token` 维护）
+│   └── users/              # 每个用户一个独立配置文件
+│       ├── alice.yaml
+│       └── bob.yaml
+└── data/                   # 运行态（虚拟 home / workspace / 实例记录 / token 使用时间）
 ```
 
 多用户共享同一端口：登录后每个用户只能看到和管理自己的服务，访问路径为 `/proxy/<用户名>/<服务>/`。
@@ -345,11 +353,47 @@ srcos 2fa-reset <用户名>
 > 密钥以 base32 形式存在 `config/users/<用户名>.yaml` 的 `auth.totp_secret` 字段（权限 0600，
 > 与 `session_secret` 同级保护）。动态码校验带有 ±1 个 30 秒窗口的时钟容错，且同样受登录限速保护。
 
+### Agent token（`config/agent-tokens.yaml`，程序凭据）
+
+浏览器用 session cookie，程序（agent、MCP 客户端、脚本）用 **agent token**：
+`Authorization: Bearer <token>`。它解决的是「agent 是程序，拿不到也不能用浏览器 cookie」。
+
+```bash
+# 创建（明文只在这一次输出，之后只剩哈希，无法恢复）
+srcos token create -d /opt/srcos/config --user alice --label annovibe --expires 90d
+#   → srcos_hml5na3g.kVC-NFz6WrBzarEWERINKmzdygunpiUBr9JaNyor-3Q
+
+# 列出 / 撤销（撤销立即生效，网关无需重启）
+srcos token list   -d /opt/srcos/config
+srcos token revoke -d /opt/srcos/config <id>
+
+# 使用：读工具目录、路径、任务状态（第一期只读面）
+curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
+```
+
+- **只存哈希**：`config/agent-tokens.yaml` 是 SHA-256 哈希 + 用户 + scope + 过期 + 标签，
+  没有明文。因此这份文件（或它的备份）泄露不等于凭据泄露。
+- **scope 只收窄不放宽**：token 以「所属用户」的身份行事，Grant 授权策略照常生效；
+  scope 只能在其之上收窄。目前只能签发 `read`；`submit`（提交/取消/跑流程）是
+  ADR-019 第二期的保留 scope，现在会明确拒绝签发。
+- **只读**：写接口（`POST /api/jobs` 等）用 token 调用会被拒（403），提示需要 `submit`。
+- **过期**：默认 90 天，`--expires never` 可取消，`--expires 2026-12-21` / `12h` 亦可。
+- **删除用户即撤销**：`srcos del <user>` 会一并撤销该用户的 token；即使文件里残留，
+  网关也会因用户不存在而拒绝（需存在才算有效凭据）。
+- **失败关闭**：文件被改坏时**所有** token 立即失效（日志提示），修好即恢复，
+  不会沿用旧快照。
+- **使用时间**存在 `data/agent-token-usage.yaml`（运行态，网关写入，按 token 降频），
+  与 `config/` 里的凭据文件分开，避免两个进程互相覆盖；`token list` 会读它。
+
 ### 管理 API 的 CSRF 防护
 
 管理 API（增删改服务、调整布局）和登录接口会对浏览器请求校验 `Origin` 头：
 跨站页面（钓鱼网站、恶意网页）发起的请求会被拒绝（403）。非浏览器客户端
 （curl、脚本）不带 `Origin`，不受影响。
+
+> 带 `Authorization: Bearer` 的 agent token 请求不受 `Origin` 校验约束：token 不是
+> 浏览器自动携带的凭据，跨站页面无法借它发起请求；而程序客户端（含部分 MCP 客户端）
+> 可能带自己的 `Origin`。它仍然受 scope 限制（第一期只读）。
 
 > **残余风险说明**：通过网关代理的后端服务与网关**同源**（同一主机/端口），
 > 因此任何被代理页面中的脚本都可以像用户本人一样调用管理 API（浏览器自动携带
@@ -620,6 +664,12 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
   --max-cpu 16 --max-memory 64Gi --max-instances 3
 ./srcos grant list -d /opt/srcos/config
 
+# Agent token：给程序（agent / MCP 客户端 / 脚本）用的凭据，浏览器不用它
+./srcos token create -d /opt/srcos/config --user alice --label annovibe
+./srcos token list   -d /opt/srcos/config
+./srcos token revoke -d /opt/srcos/config <id>
+curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
+
 # 网关（新增 --tools-dir）
 ./srcos serve -d /opt/srcos/config --tools-dir srcos-tools --port 30152
 ```
@@ -632,6 +682,7 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
 |---|---|---|
 | `config/storages.yaml` | 共享数据根（工具通过 `type: path` 参数从中选择） | [`config/storages.example.yaml`](config/storages.example.yaml) |
 | `config/grants.yaml` | 授权策略（谁可以用哪个工具、聚合配额多少） | [`config/grants.example.yaml`](config/grants.example.yaml) |
+| `config/agent-tokens.yaml` | agent token（程序凭据，只存 SHA-256 哈希） | 由 `srcos token` 维护，见下文 |
 
 ### 网页入口
 

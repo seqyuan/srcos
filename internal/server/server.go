@@ -11,6 +11,7 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
+	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
@@ -138,11 +139,26 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		}
 	}
 
+	// Agent tokens: program credentials for the agent / MCP surface (ADR-019).
+	// The file holds hashes only, and a broken one leaves the store empty —
+	// fail closed, never "keep the previous snapshot alive".
+	agentTokens := agenttoken.New(config.AgentTokensPath(configDir))
+	if err := agentTokens.Reload(); err != nil {
+		log.Printf("[srcos] agent-tokens.yaml: %v — rejecting every agent token until it is fixed", err)
+	}
+	// Usage is gateway-written runtime state in data/, deliberately separate
+	// from the CLI-written registry.
+	agentTokens.AttachUsage(agenttoken.LoadUsage(config.AgentTokenUsagePath(configDir)))
+	if n := len(agentTokens.Tokens()); n > 0 {
+		log.Printf("[srcos] %d agent token(s) loaded (Authorization: Bearer)", n)
+	}
+
 	apiOpts := api.Options{
-		ConfigDir: configDir,
-		ToolsDir:  toolsDir,
-		Storages:  storages,
-		Grants:    grants,
+		ConfigDir:   configDir,
+		ToolsDir:    toolsDir,
+		Storages:    storages,
+		Grants:      grants,
+		AgentTokens: agentTokens,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},

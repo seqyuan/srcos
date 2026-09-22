@@ -33,6 +33,8 @@ const usage = `Usage:
   srcos passwd <name>          Reset a user's password
   srcos del <name>             Delete a user account
   srcos 2fa-reset <name>       Disable a user's two-factor authentication
+  srcos token <cmd>            Manage agent tokens (program credentials for the
+                                agent / MCP surface): create | list | revoke
   srcos sso [options]          Show or configure lightweight SSO (identity
                                 header forwarded to backends; see below)
 
@@ -72,6 +74,12 @@ HTTPS turns the whole site into a secure context, which unlocks every
 secure-context Web API (crypto.randomUUID, crypto.subtle, navigator.storage,
 clipboard, ...) for proxied apps over plain LAN HTTP. TLS settings persist in
 state.yaml; to disable, delete the tls_cert/tls_key lines and restart.
+
+Agent tokens (srcos token ...) are bearer credentials for programs: an agent or
+MCP client cannot hold a browser session cookie. Only the token's SHA-256 hash
+is stored in config/agent-tokens.yaml; the plaintext is shown once at creation.
+A token acts as its user (Grant still applies) and carries "read" scope only —
+the write surface is the second phase of ADR-019.
 
 Run in the foreground (Ctrl+C to stop). For a persistent session, run it in
 tmux/screen or with nohup:
@@ -153,6 +161,10 @@ func main() {
 	}
 	if cmd == "grant" {
 		runGrantCmd(args)
+		return
+	}
+	if cmd == "token" {
+		runTokenCmd(args)
 		return
 	}
 
@@ -336,6 +348,16 @@ func runUserDel(opts options, username string) {
 	configPath := config.UserConfigPath(opts.configDir, username)
 	if _, err := os.Stat(configPath); err != nil {
 		log.Fatalf("user %s does not exist (%s)", username, configPath)
+	}
+	// Agent tokens are credentials for the account: deleting the account must
+	// not leave a working one behind, and recreating the same name must not
+	// resurrect the old token. Best effort — the account deletion is what the
+	// operator asked for, and the gateway's "user still exists" check is the
+	// fail-closed backstop.
+	if n, err := revokeTokensFor(opts.configDir, username); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not revoke agent tokens: %v\n", err)
+	} else if n > 0 {
+		fmt.Printf("[srcos] revoked %d agent token(s) of %s\n", n, username)
 	}
 	if err := os.Remove(configPath); err != nil {
 		log.Fatalf("remove config: %v", err)
