@@ -64,6 +64,12 @@ type prepared struct {
 // It is separate from start so that a failure here is reported before any
 // port is taken or any unit is launched.
 func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, error) {
+	// A runner without a user can reconcile and reap records (they carry their
+	// own user), but it must not start a unit: that would invent a workspace
+	// path for nobody, and the instance would be unowned.
+	if r.opts.User == "" {
+		return nil, errors.New("this runner has no user: it can reconcile and reap instances, but not start them")
+	}
 	if len(t.RequiresStorages) > 0 && r.opts.Storages == nil {
 		return nil, fmt.Errorf("tool %s requires storages %v but no StorageProvider is configured",
 			t.ID, t.RequiresStorages)

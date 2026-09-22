@@ -29,6 +29,9 @@ var twofaTpl string
 //go:embed templates/twofa_setup.html
 var twofaSetupTpl string
 
+//go:embed templates/service_status.html
+var serviceStatusTpl string
+
 //go:embed templates/script.js
 var dashboardScript string
 
@@ -137,6 +140,86 @@ func DashboardPage(siteTitle, username string, services []config.ServiceConfig, 
 func NotFoundPage(siteTitle string) string {
 	body := notFoundTpl
 	return PageShell(siteTitle, "404", body)
+}
+
+// ServiceStatus is what the gateway shows when a service instance is not (yet)
+// serving: a progress page while it starts, and the reason once it is not
+// running.
+//
+// It exists because a proxy request to a service that is still coming up would
+// otherwise be a bare 404 or 502 — and "your notebook is starting, here is what
+// it has printed so far" is the difference between a platform and a port
+// forwarder.
+type ServiceStatus struct {
+	// User is the registered user the instance belongs to (the page's own path
+	// is rebuilt from it).
+	User      string
+	Instance  string
+	Tool      string
+	State     string
+	Error     string
+	Endpoint  string
+	StartedAt string
+	// Log is the tail of the instance's log, already truncated.
+	Log string
+	// Retry, when positive, makes the page re-check itself in that many seconds.
+	Retry int
+}
+
+// ServiceStatusPage renders the progress/failure page for a service instance.
+func ServiceStatusPage(siteTitle string, st ServiceStatus) string {
+	starting := st.Retry > 0
+	icon := `<div class="ss-tip">⏳</div>`
+	title := "服务启动中"
+	sub := "正在拉起实例，页面会自动刷新"
+	if !starting {
+		icon = `<div class="ss-tip">⚠️</div>`
+		title = "服务未在运行"
+		sub = "这个实例当前没有在提供服务"
+	}
+
+	errBlock := ""
+	if st.Error != "" {
+		errBlock = fmt.Sprintf(`<div class="ss-err">%s</div>`, esc(st.Error))
+	}
+
+	rows := ""
+	add := func(k, v string) {
+		if v == "" {
+			return
+		}
+		rows += fmt.Sprintf(`<div class="ss-key">%s</div><div class="ss-val">%s</div>`, esc(k), esc(v))
+	}
+	add("实例", st.Instance)
+	add("工具", st.Tool)
+	add("状态", st.State)
+	add("端口", st.Endpoint)
+	add("启动于", st.StartedAt)
+
+	logBlock := ""
+	if strings.TrimSpace(st.Log) != "" {
+		logBlock = fmt.Sprintf(`<div class="ss-log-label">日志（末尾）</div><div class="ss-log">%s</div>`, esc(st.Log))
+	}
+
+	hint := "实例就绪后本页会自动变成服务本身。"
+	if !starting {
+		hint = fmt.Sprintf("重新启动：srcos svc start --tool %s；查看日志：srcos job logs %s", st.Tool, st.Instance)
+	}
+
+	body := fmt.Sprintf(serviceStatusTpl,
+		icon, esc(title), esc(sub), errBlock, rows, logBlock,
+		esc(st.SelfPath()), esc(st.Tool), esc(hint))
+	if starting {
+		body = fmt.Sprintf(`<meta http-equiv="refresh" content="%d">`+"\n", st.Retry) + body
+	}
+	return PageShell(siteTitle, title, body)
+}
+
+// SelfPath is the page's own URL: it is the proxy path of the instance, so a
+// refresh re-enters the same resolution and becomes the service as soon as it
+// is ready.
+func (s ServiceStatus) SelfPath() string {
+	return "/proxy/" + s.User + "/" + s.Tool + "/"
 }
 
 // TwoFAPage renders the second login step: enter the 6-digit TOTP code.

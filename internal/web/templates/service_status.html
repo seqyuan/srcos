@@ -1,0 +1,84 @@
+<style>
+  .ss-wrap {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+  }
+  .ss-card {
+    width: 100%;
+    max-width: 640px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 28px;
+    box-shadow: var(--shadow);
+  }
+  .ss-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .ss-title { font-size: 18px; font-weight: 650; color: var(--text); }
+  .ss-sub { color: var(--text-muted); font-size: 14px; margin-bottom: 18px; }
+  .ss-spinner {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    animation: ss-spin 0.9s linear infinite;
+  }
+  @keyframes ss-spin { to { transform: rotate(360deg); } }
+  .ss-rows { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; margin-bottom: 18px; }
+  .ss-key { color: var(--text-muted); }
+  .ss-val { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .ss-err {
+    background: color-mix(in srgb, var(--danger, #d33) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger, #d33) 35%, transparent);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 18px;
+    white-space: pre-wrap;
+  }
+  .ss-log-label { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .ss-log {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text);
+  }
+  .ss-actions { margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .ss-link {
+    display: inline-flex; align-items: center; height: 40px; padding: 0 18px;
+    border-radius: var(--r-pill); font-size: 14px; font-weight: 600; text-decoration: none;
+    background: var(--accent); color: #fff;
+  }
+  .ss-link.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .ss-hint { color: var(--text-muted); font-size: 12px; margin-top: 14px; }
+  .ss-theme { position: fixed; top: 1rem; right: 1rem; }
+</style>
+<div class="ss-wrap">
+  <button type="button" class="theme-btn ss-theme" id="theme-toggle" onclick="toggleTheme()">🌙</button>
+  <div class="ss-card">
+    <div class="ss-head">
+      %s
+      <div class="ss-title">%s</div>
+    </div>
+    <div class="ss-sub">%s</div>
+    %s
+    <div class="ss-rows">%s</div>
+    %s
+    <div class="ss-actions">
+      <a class="ss-link" href="%s">重新检查</a>
+      <a class="ss-link ghost" href="/">返回仪表盘</a>
+      <a class="ss-link ghost" href="/tools/%s">查看该工具</a>
+    </div>
+    <div class="ss-hint">%s</div>
+  </div>
+</div>

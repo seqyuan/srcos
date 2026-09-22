@@ -10,7 +10,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成；**agent token + MCP（只读）+ 代理层动态路由**完成）
+> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 主体完成；**agent token + MCP（只读）+ 代理层动态路由 + 冷启动/自动回收**完成）
 
 ---
 
@@ -18,7 +18,7 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，20 个包，约 2.8 万行，约 420 个测试用例；37 个测试文件），
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，21 个包，约 2.9 万行，约 440 个测试用例；40 个测试文件），
 在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了**工具平台**四层：
 工具契约、实例化运行时、存储 provider、授权模型。认证面现在有两扇门：
 浏览器的 session cookie，与程序（agent / MCP 客户端）的 agent token（`Authorization: Bearer`）。
@@ -29,7 +29,10 @@
 
 服务实例现在**可以通过网关访问**（`/proxy/<user>/<tool>/`，动态路由表从实例记录重建）。
 
-下一步：**「启动中」进度页 + `svc reap` 定时调度**（见 §3.1 第 4 项）。
+网关现在还会**自己收养与回收**：启动时 reconcile（活着的收养、死了的标 stopped）、每 10 秒按
+`lifecycle` 回收（`idle_ttl` 计流量，不是计"启动多久"），未就绪实例在浏览器里是进度页而不是 404。
+
+下一步：**管理端页面**（工具上架/授权/实例总览/强制停止，见 §3.1 第 5 项）。
 
 ---
 
@@ -85,6 +88,7 @@ UI 造起来便宜了 → UI 不再是护城河
 ┌─ 数据面（继承自 goprox）────────────────────────────────────────────┐
 │ ✅ 反向代理：<base> 注入 · WebSocket · 带宽限制 · SSO 头 · cookie 隔离│
 │ ✅ 代理层接入动态路由表：/proxy/<user>/<tool>/ 可达 · 实例优先于卡片   │
+│ ✅ 网关自查：启动 reconcile · 按 tick 回收 · 启动中/失败给页面而非 404 │
 └─────────────────────────────────────────────────────────────────────┘
 ┌─ 运行层 ────────────────────────────────────────────────────────────┐
 │ ✅ local（bwrap 沙箱 + systemd-run --user 限额，prlimit 兜底）       │
@@ -117,6 +121,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
+| **冷启动与自动回收** | `svc start` 一个 8 秒才就绪的服务 → 浏览器访问拿到 **503 + Retry-After: 3 + 「服务启动中」进度页**（自动刷新、含日志末尾）→ 就绪后再访问 **200**；`idle_ttl: 20s` 的实例被每 5 秒访问、持续 40 秒**不被回收**（活跃心跳写到 `data/service-activity.yaml`），停止访问 20 秒后网关日志出现 `reaped alice-idle1-svc (idle past idleTTL)`、unit 变 inactive、记录 stopped、页面变 **502「服务未在运行」+ 重启命令**；重启网关时日志 `reconcile: adopted 1 [alice-slow-svc]`、服务仍 200；`idle_ttl: 10m` 的邻居实例不受影响 |
 | **服务实例经网关访问** | CLI `svc start` 起一个 service 工具 → `curl -b cj /proxy/alice/websvc/` → 200（含 `<base>` 注入）；子路径 `/index.html` → 200；裸路径 `/index.html` 带路由 cookie → 200（SPA 回投）；bob 访问 alice 的实例 → 404；裸短链接 `/websvc/lab` → 302 到 `/proxy/alice/websvc/lab`；**重启网关**后仍 200（启动时从记录重建路由表）；`svc stop`（另一进程）→ 第一次 502 + 日志「dropped ... after a failed dial」→ 第二次 404；记录被手改成 `10.0.0.5:80` / `169.254.169.254:80` → 不成为路由 |
 | **MCP（agent 面）** | 官方 Python MCP SDK 客户端连 `/mcp` → `initialize`（`srcos dev`、协议 2025-06-18）/ `list_tools`（9 个）/ `call_tool`：列工具、列 storage（范围=工具声明）、浏览 `/data/ref`、读 `/data/ref/genes.tsv`、查实例状态与日志、列产物全部正确；`read_file /etc/passwd` → `isError`「not under any mount」；无 token → 401 + `WWW-Authenticate`；GET → 405；通知 → 202 空体；每次调用一行审计日志；撤销 token 后立即 401 |
 | **降级模式的停止/回收** | 把 `systemd-run` 从 PATH 里拿掉（等价于无 user systemd 的登录节点）启动 service → 记录里有 `pid` + `pid_start`；**另起一个进程** `svc stop` → 进程消失、端口释放、记录 `stopped` 且无 error；`svc reap` 同样停掉；`svc reconcile` 对活着的降级实例 `adopted 1`、杀掉进程后 `orphaned 1`；systemd 可用时行为不变（`limiter=systemd-run` → `is-active` 变 inactive、unit 无残留） |
@@ -124,7 +129,10 @@ UI 造起来便宜了 → UI 不再是护城河
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
 - ⛔ **流程编排（Flow / FlowRun）** —— Phase 4，`docs/flow-spec.md` 也未写
-- ⛔ **管理端页面** —— 工具上架/下架/实例总览/强制停止都只有 CLI 与 HTTP API
+- ⛔ **管理端页面** —— 工具上架/下架/实例总览/强制停止都只有 CLI 与 HTTP API；
+  网关也没有「起停服务」的接口（`svc start/stop` 只有 CLI），管理端页面的自然落点
+  是先给网关一个 admin API，再把页面架上去
+- ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **授权变更热加载** —— 改 `grants.yaml` 需重启网关
 - ⛔ **审计日志** —— 目前每个被接受的 agent 请求会写一行网关日志（含用户/token/方法/路径），
   但没有独立的审计流、没有结构化落盘、也没有“改配置”的审计
@@ -144,8 +152,8 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~1~~ | ~~**agent token 认证面**~~：✅ **已完成** | 见 §2.2 与 roadmap ADR-019「实现契约」 |
 | ~~2~~ | ~~**MCP Server（read-only）**~~：✅ **已完成**（`internal/mcp` + `internal/inspect`，9 个只读工具，`interface → JSON Schema` 派生） | 招牌功能已可演示；只读面 + `submit` 预留 |
 | ~~3~~ | ~~**代理层接入动态路由表**~~：✅ **已完成**（网关从实例记录重建路由表；实例优先于卡片；裸路径/Referer/路由 cookie 三处解析统一） | 平台缺的最后一块已经补上：`/proxy/<user>/<tool>/` 可达 |
-| **4** | 启动中进度页 + `svc reap` 定时调度 | 冷启动体验与自动回收（顺带把 `svc reconcile` 也接到启动/定时流程，目前只有 CLI 手动跑） |
-| **5** | 管理端页面（上架/授权/实例总览） | 让非 CLI 用户能运维 |
+| ~~4~~ | ~~**启动中进度页 + `svc reap` 定时调度**~~：✅ **已完成**（网关启动 reconcile、按 tick 回收、`idle_ttl` 按流量判定、未就绪给页面） | 冷启动体验与自动回收都到位了 |
+| **5** | 管理端页面（上架/授权/实例总览/强制停止） | 让非 CLI 用户能运维；也是把 `svc start/stop` 从 CLI 搬进网关（admin API）的自然位置 |
 | **6** | Flow 编排（Phase 4） | 需要先定 `docs/flow-spec.md` |
 | 7 | MCP 第二期（`submit` / `cancel` / `run_flow`，需先定 `submit` scope 的粒度：roadmap §8 #9） | 让 agent 真的能"执行用 SRCOS"，而不只是看 |
 
@@ -397,8 +405,9 @@ internal/agenttoken/        agent token（程序凭据）：只存 SHA-256、每
   ├ agenttoken.go           Token/Store/Identity/Scope + 格式解析 + 注册期校验
   └ usage.go                使用时间（data/agent-token-usage.yaml，网关写、按 token 降频）
 internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全部逻辑
+  └ conns.go                ActiveConns：长连接（WebSocket）计数，供回收判断"在用"
 internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
-  └ routes.go               动态路由：从实例记录重建表 + 实例优先于卡片的路径解析
+  └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 未就绪状态页
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
 internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（生成式表单）
   └ templates/srcos-path-picker.js   原语控件（Web Component）
@@ -416,8 +425,10 @@ internal/runtime/           编排层
   ├ local.go                local backend（task=scope，service=unit）+ BuildInner
   ├ proc_unix.go            processAlive + pid starttime（降级模式停止进程的身份校验）
   ├ run.go                  RunTask / StartService / StopService / Reap / Reconcile
+  │                         （Reaper.LastActive：由调用方提供「最近一次流量」）
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/route/             动态路由表（编排层与代理层唯一的耦合点；ParseTarget 只收环回端点）
+internal/activity/          write-behind 时间戳日志（token 使用时间 / 服务活跃时间共用）
 internal/rate/              令牌桶限速（登录 + 带宽）
 
 srcos-tools/hello-fanout/   示例工具：tool.yaml + work.sh + workspace-template
@@ -461,13 +472,13 @@ scripts/probe-env.sh        无 root 环境探测
 ## 10. 重开会话时的第一句话建议
 
 ```
-读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 4 项
-（「启动中」进度页 + `svc reap` 定时调度）开始。
+读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 5 项
+（管理端页面：上架/授权/实例总览/强制停止）开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。
 如果要**换方向**，先说清要改哪一条不变式（`AGENTS.md`）或哪一条 ADR，
 因为按仓库约定，架构回退必须先改文档再改代码。
 
-> 上一轮（代理层动态路由）的收尾：`make vet && make test` 全绿；
-> 端到端验证见 §2.2 的「服务实例经网关访问」行。
+> 上一轮（冷启动体验 + 自动回收）的收尾：`make vet && make test` 全绿；
+> 端到端验证见 §2.2 的「冷启动与自动回收」行。

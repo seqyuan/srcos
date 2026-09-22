@@ -1,7 +1,10 @@
 package server
 
 import (
+	"context"
 	"log"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/tool"
+	"github.com/seqyuan/srcos/internal/web"
 )
 
 // This file is the proxy layer's half of ADR-003/ADR-019's division of labour:
@@ -22,6 +26,52 @@ import (
 // and on every scan tick, and a lookup that misses does one targeted record
 // load before giving up — which is what makes a service started a second ago
 // reachable now, without polling faster than the scan loop.
+
+// reconcile brings the instance records and the routing table in line with
+// reality at startup.
+//
+// A gateway restart must not take every running service offline: the records
+// say what was running, the backends can say whether it still is, and only
+// Reconcile can tell the two apart. Without a supervisor runner there is
+// nothing to probe with, so this degrades to publishing what the records claim
+// (which is what a read-only deployment can honestly do).
+func (s *Server) reconcile() {
+	if s.runner != nil {
+		adopted, orphaned, err := s.runner.Reconcile(context.Background())
+		if err != nil {
+			log.Printf("[srcos] reconcile: %v", err)
+		}
+		if len(adopted) > 0 || len(orphaned) > 0 {
+			log.Printf("[srcos] reconcile: adopted %d %v, orphaned %d %v", len(adopted), adopted, len(orphaned), orphaned)
+		}
+	}
+	s.syncRoutes()
+}
+
+// reapServices enforces the lifecycle ceilings once and reports what it stopped
+// (each entry names the reason).
+//
+// The reaper stops services that exceeded maxLifetime or sat idle past idleTTL;
+// "idle" is decided from the proxy's own observations plus (for an open
+// WebSocket) the live connection count, so a service someone is working in is
+// never reclaimed, however quiet it looks. A maxLifetime ceiling is not
+// negotiable: it is the tool author's statement of how long a run may take.
+func (s *Server) reapServices() []string {
+	if s.reaper == nil {
+		return nil
+	}
+	stopped, err := s.reaper.Sweep(context.Background(), time.Now())
+	if err != nil {
+		log.Printf("[srcos] reap: %v", err)
+	}
+	for _, id := range stopped {
+		log.Printf("[srcos] reaped %s", id)
+	}
+	if len(stopped) > 0 {
+		s.syncRoutes()
+	}
+	return stopped
+}
 
 // syncRoutes rebuilds the dynamic routing table from the instance records.
 //
@@ -130,17 +180,11 @@ func (s *Server) instanceMatch(requestPath, sessionUser string) *config.ServiceM
 	if user == "" || user != sessionUser {
 		return nil
 	}
-	rest := strings.TrimPrefix(requestPath, "/proxy/"+user+"/")
-	if rest == "" {
-		return nil
-	}
-	toolID := rest
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		toolID = rest[:i]
-	}
+	toolID := toolFromProxyPath(requestPath, user)
 	if toolID == "" {
 		return nil
 	}
+	rest := strings.TrimPrefix(requestPath, "/proxy/"+user+"/")
 
 	e, ok := s.routes.Get(user, toolID)
 	if !ok {
@@ -186,22 +230,111 @@ const serviceActivityHeader = "# SRCOS 服务实例活跃时间（运行态，�
 	"# 而心跳若改写记录，可能用陈旧的 running 覆盖掉一次状态变更。\n" +
 	"# 按实例降频（首次访问即时落盘），崩溃最多丢掉最后 30 秒。\n\n"
 
-// touchActivity records that an instance was used.
+// toolFromProxyPath extracts the tool segment of /proxy/<user>/<tool>/...
+// ("" for any other shape, including the legacy /proxy<path> form).
+func toolFromProxyPath(requestPath, username string) string {
+	rest, ok := strings.CutPrefix(requestPath, "/proxy/"+username+"/")
+	if !ok || rest == "" {
+		return ""
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
+}
+
+// serveInstanceStatus explains why a service instance is not serving.
+//
+// A request that reaches no route because its instance is still coming up (or
+// has died) deserves better than a bare 404: "it is starting, here is what it
+// has printed so far" is the difference between a platform and a port
+// forwarder. A failure gets the reason instead of a 502 with no explanation.
+//
+// It answers for the explicit /proxy/<user>/<tool>/... path only, and only with
+// a page when the client asked for HTML: a program gets the honest status code
+// and one line of text, because an SPA's fetch of a JSON endpoint must not be
+// handed a progress page.
+func (s *Server) serveInstanceStatus(w http.ResponseWriter, r *http.Request, username, toolID string) bool {
+	configDir := config.DirOf(s.registry)
+	inst, err := runtime.LoadInstance(runtime.InstancePath(configDir, runtime.InstanceID(username, toolID, "")))
+	if err != nil {
+		return false // no such instance: not this page's business
+	}
+	// A running instance that reached no route has a broken endpoint or an
+	// unpublished route; the outcome is a 404 either way, and inventing a page
+	// for it would hide the problem.
+	if inst.State == runtime.StateRunning || inst.State == runtime.StateIdle {
+		return false
+	}
+
+	transient := inst.State == runtime.StateStarting || inst.State == runtime.StatePending ||
+		inst.State == runtime.StateSubmitted || inst.State == runtime.StateStopping
+
+	status := http.StatusBadGateway
+	retryAfter := 0
+	headline := "this service instance is not running"
+	if transient {
+		status = http.StatusServiceUnavailable
+		retryAfter = 3
+		headline = "this service instance is starting"
+	}
+	if inst.Error != "" {
+		headline = inst.Error
+	} else {
+		headline = "state: " + string(inst.State)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	if !wantsHTML(r) {
+		http.Error(w, headline, status)
+		return true
+	}
+
+	st := web.ServiceStatus{
+		User:      username,
+		Instance:  inst.ID,
+		Tool:      inst.Tool,
+		State:     string(inst.State),
+		Error:     inst.Error,
+		Endpoint:  inst.Endpoint,
+		StartedAt: inst.StartedAt.Local().Format("2006-01-02 15:04:05"),
+		Retry:     retryAfter,
+	}
+	// The log is SRCOS's own copy of what the tool printed; it is the only way
+	// to see *why* a start is slow or a service died.
+	if tail, err := s.reader().Logs(username, inst.ID, 60); err == nil {
+		st.Log = tail
+	}
+	sendHTML(w, status, web.ServiceStatusPage(s.siteTitle, st))
+	return true
+}
+
+// wantsHTML reports whether a client is asking for a page (a browser
+// navigation) rather than data.
+func wantsHTML(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// touchActivity records that an instance was used and returns its instance id
+// ("" for a static card).
 //
 // Only instance-backed routes are tracked: SRCOS does not manage a static
 // card's lifetime, so it has no reason to know when one was visited.
-func (s *Server) touchActivity(username string, svc *config.ServiceConfig) {
-	if s.serviceActivity == nil || username == "" || svc == nil {
-		return
+func (s *Server) touchActivity(username string, svc *config.ServiceConfig) string {
+	if s.serviceActivity == nil || username == "" || svc == nil || s.routes == nil {
+		return ""
 	}
 	e, ok := s.routes.Get(username, svc.ID)
 	if !ok {
-		return
+		return ""
 	}
 	if err := s.serviceActivity.Touch(e.InstanceID, time.Now()); err != nil {
 		// A failed heartbeat must never fail the request it describes.
 		log.Printf("[srcos] activity: %v", err)
 	}
+	return e.InstanceID
 }
 
 // dropDeadRoute removes a route whose target just refused a connection.

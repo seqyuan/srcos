@@ -60,6 +60,15 @@ type Server struct {
 	// the proxy can see (the record knows when a service started, not whether
 	// anyone is still working in it).
 	serviceActivity *activity.Journal
+	// activeConns counts open WebSocket/tunneled connections per instance: an
+	// open notebook is not idle, whatever the clock says (ADR-015).
+	activeConns *proxy.ActiveConns
+	// runner is the supervisor: it re-adopts instances after a restart and
+	// reclaims the ones whose lifetime is over. Nil means this process only
+	// serves (a read-only or single-purpose deployment).
+	runner *runtime.Runner
+	// reaper enforces the tool's lifecycle ceilings via the same runner.
+	reaper *runtime.Reaper
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -80,6 +89,15 @@ type Options struct {
 	// Version is the build version reported to MCP clients in `initialize`.
 	// Empty means "dev".
 	Version string
+	// Routes is the dynamic routing table. When set (the gateway builds one
+	// runner for the whole process) it must be the *same* table the runner
+	// publishes into, or the proxy would read a table nobody writes.
+	Routes *route.Table
+	// Supervisor, when set, is the runner the gateway uses to re-adopt live
+	// instances at startup and to reclaim expired ones on the scan tick. It
+	// must not carry a user: reconciling and reaping act on records, not on
+	// behalf of an actor (package runtime refuses to start units without one).
+	Supervisor *runtime.Runner
 }
 
 // New creates a new Server from state config. configDir is where the shared
@@ -116,6 +134,10 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	mcpVersion := opts.Version
 	if mcpVersion == "" {
 		mcpVersion = "dev"
+	}
+	routes := opts.Routes
+	if routes == nil {
+		routes = route.NewTable()
 	}
 	storages := opts.Storages
 	if storages == nil {
@@ -222,13 +244,25 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 		},
-		routes:          route.NewTable(),
+		routes:          routes,
 		serviceActivity: serviceActivity,
+		activeConns:     proxy.NewActiveConns(),
+		runner:          opts.Supervisor,
 	}
-	// Publish the services that were already running when this process started
-	// (they were started by the CLI, in another process), so a gateway restart
-	// does not take every service instance offline.
-	srv.syncRoutes()
+	if srv.runner != nil {
+		srv.reaper = &runtime.Reaper{
+			Runner: srv.runner,
+			// Traffic is only observable here, and an open WebSocket is the
+			// strongest form of "in use".
+			ActiveWS:   srv.activeConns.Active,
+			LastActive: srv.serviceActivity.Last,
+		}
+	}
+	// Bring the records and the routing table in line with reality before
+	// serving: adopt the instances that are still alive (they were started by
+	// the CLI, in another process), mark the dead ones stopped, and publish the
+	// survivors so a gateway restart does not take every service offline.
+	srv.reconcile()
 	return srv
 }
 
@@ -909,6 +943,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Try legacy path
 	legacyMatch := s.registry.FindLegacyService(path, session.UserID)
 	if legacyMatch == nil {
+		// Nothing can serve this path. Before saying 404, explain what happened
+		// to the instance the path names: a progress page while it starts, the
+		// reason once it died. It runs last so a stopped instance never shadows
+		// a working static card.
+		if toolID := toolFromProxyPath(path, session.UserID); toolID != "" &&
+			s.serveInstanceStatus(w, r, session.UserID, toolID) {
+			return
+		}
 		sendHTML(w, 404, web.NotFoundPage(s.siteTitle))
 		return
 	}
@@ -959,7 +1001,12 @@ func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request, svc *c
 	// Record the use before it happens: an instance is "in use" from the moment
 	// someone asks for it, and a request that fails is still evidence that the
 	// service is wanted.
-	s.touchActivity(fc.Username, svc)
+	instanceID := s.touchActivity(fc.Username, svc)
+	if isWebSocketUpgrade(r) {
+		// A tunnel that stays open is activity in its own right, counted until
+		// the connection closes (the reaper asks before reclaiming).
+		w = proxy.TrackHijack(w, instanceID, s.activeConns)
+	}
 
 	rp := proxy.NewReverseProxy(svc, fc)
 	rp.Transport = s.transport
@@ -1192,6 +1239,10 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// service started or stopped by the CLI (another process) becomes
 			// reachable or unreachable within one tick.
 			s.syncRoutes()
+			// Enforce the lifecycle ceilings (idleTTL / maxLifetime). Idle
+			// means "no traffic", which is why the reaper is given the proxy's
+			// observations rather than the record's start time.
+			s.reapServices()
 		case <-stop:
 			return
 		}

@@ -87,7 +87,7 @@
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 20 个包 / 约 2.8 万行 / 约 420 个测试用例 / 37 个测试文件，`go vet` + `go test` 全绿
+- 21 个包 / 约 2.9 万行 / 约 440 个测试用例 / 40 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
@@ -103,8 +103,8 @@
 
 ### 2.3 下一步
 
-Phase 3.5（MCP）与代理层的动态路由都已完成。下一步见 §6 与 [`handoff.md`](handoff.md) §3：
-**「启动中」进度页 + `svc reap` 的定时调度**（顺带把 `svc reconcile` 也纳入启动/定时流程）。
+Phase 3.5（MCP）、代理层的动态路由、冷启动体验与自动回收都已完成。
+下一步见 §6 与 [`handoff.md`](handoff.md) §3：**管理端页面**（上架/授权/实例总览/强制停止）。
 
 ---
 
@@ -652,7 +652,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `internal/route` 动态路由表（非回环目标被拒；`DeleteInstance` 有归属栅栏）
 - [x] `internal/portpool` 端口池（真 bind 探测、并发安全、`Reserve` 供 reconcile）
 - [x] **`Reconcile`**：重启后收养仍活着的实例（重新占端口 + 重发路由），把记录与真实状态对齐
-- [x] **`Reaper`**：`maxLifetime` / `idleTTL`；有开放 WebSocket 时不算空闲；SGE 上默认不做空闲回收（ADR-015）
+- [x] **`Reaper`**：`maxLifetime` / `idleTTL`；有开放 WebSocket 时不算空闲；SGE 上默认不做空闲回收（ADR-015）。
+      2026-09-22 补：`Reaper.LastActive` 让调用方（网关）提供「最近一次流量」，
+      `idleTTL` 才真的是"没人用"而不是"启动久"；网关侧每次扫描 tick 自动回收
 - [x] **降级模式的停止与探测**（2026-09-22 修）：无 user systemd 时把「SRCOS 直接启动的子进程」
       的 `pid` + `/proc/<pid>/stat` 的 `starttime` 记进实例记录，`StopUnit`/`UnitAlive` 用它停止/判断
       存活（发信号前校验 starttime，防 pid 复用）。降级模式下 `svc stop` / `svc reap` / `Reconcile`
@@ -662,9 +664,16 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `qsub` 参数翻译（`cpu`→`-pe smp`、内存→**按 slot 均分** `h_vmem`、`walltime`→`h_rt`）、
       `qstat -xml` 解析（**区分挂起 `s` 与真死**）、rendezvous 共享文件当控制通道、
       `ssh -L` 本地转发当数据通道、作业脚本内做端口冲突回退与就绪探活
-- [ ] 「启动中」进度页（HTTP 侧，Phase 3 与管理端一起）
+- [x] **「启动中」进度页**（2026-09-22）：未就绪实例在浏览器里给出 503 + `Retry-After` +
+      自动刷新的进度页（含日志末尾），失败/已停止给出 502 + 原因与日志 + 重启命令；
+      程序客户端只拿状态码（按 `Accept: text/html` 区分）
 - [ ] `/api/paths` + `srcos-path-picker` 原语控件（provider 已就绪，缺 HTTP 面）
-- [ ] 端口/路由的持久化审计与 `srcos svc reap` 的定时调度
+- [x] **`svc reap` 定时调度 + 启动 reconcile**（2026-09-22）：网关启动时 reconcile
+      （收养活着的、标记死掉的），每次扫描 tick（10s）执行一次回收；
+      `idleTTL` 改为按**流量**判定（代理写 `data/service-activity.yaml`，`Reaper.LastActive` 读），
+      并接了真实的 WebSocket 计数（`proxy.ActiveConns`）—— 修掉了「记录里只有启动时间，
+      所以 idleTTL 实际是"启动多久"」这个会误杀在用的服务的缺陷
+- [ ] 端口/路由的持久化审计
 - [ ] prlimit 路径下的 RSS 看门狗（RLIMIT 无法表达"每单元进程数"，见 ADR-014 新增说明）
 
 ### Phase 3：注册、授权与管理端（**进行中**）
@@ -789,3 +798,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **修降级模式的「停不掉」**：`StartService` 成功后丢掉活跃 Handle（`StopService` 只能按名停），无 user systemd 时服务停不了、却被标 stopped —— 表现是 `go test ./internal/runtime/` 每轮泄漏 5 个 python3（连跑 4 次耗尽测试端口池）。改为在实例记录里持久化子进程 `pid` + `starttime`，`Local.StopUnit/UnitAlive` 在降级模式用它（信号前校验 starttime 防 pid 复用）；顺带让 `Reconcile` 在降级模式也能区分活着/已死 |
 | 2026-09-22 | **Phase 3.5 完成：MCP Server（read-only）** —— `internal/mcp`（Streamable HTTP 无状态端点 /mcp、协议版本协商、JSON-RPC 错误分层、审计日志）+ `internal/inspect`（只读答案的唯一实现，REST API / HTML 页面 / MCP 三前端共用）+ `tool.Interface.JSONSchema()`（ADR-018 的第一处派生）+ 9 个只读工具（`srcos_` 前缀）；用官方 Python MCP SDK 客户端端到端验证；README 增补 MCP 章节与保留路径 |
 | 2026-09-22 | **代理层接入动态路由表** —— 网关从实例记录重建路由表（启动同步 / 扫描同步 / 按需读记录），`/proxy/<user>/<tool>/` 可达；实例优先于静态卡片；`route.ParseTarget` 把「端点必须回环」变成单一入口（记录被手改也进不了表）；拨号失败即丢弃路由（`svc stop` 在另一进程执行时表现为 502 后 404）；裸路径 / Referer / 路由 cookie 三处解析统一走 `matchRouteForUser` |
+| 2026-09-22 | **冷启动体验 + 自动回收**：`internal/activity`（write-behind 时间戳日志，agenttoken.Usage 改为它的薄封装）+ `Reaper.LastActive` + 网关写 `data/service-activity.yaml`（修掉 idleTTL 只看启动时间的缺陷，否则会回收正在使用的服务）+ `proxy.ActiveConns`（真实 WebSocket 计数）+ 网关启动 reconcile / 扫描 tick 自动 reap + 「启动中」进度页与失败说明页 |

@@ -549,9 +549,22 @@ func runServer(opts options) {
 		}
 	}
 
+	// The gateway is also the supervisor of service instances: it re-adopts the
+	// ones still alive after a restart and reclaims the expired ones. It does
+	// not start units (that is the CLI's job, or the admin API in Phase 3), so
+	// the runner is built without a user — package runtime refuses to start a
+	// unit without one rather than inventing a workspace for nobody.
+	toolsDir := resolveToolsDir(opts.toolsDir, configDir)
+	supervisor, routes, err := buildRunner(configDir, toolsDir, "")
+	if err != nil {
+		log.Fatalf("supervisor: %v", err)
+	}
+
 	srv := server.NewWithOptions(state, configDir, server.Options{
-		ToolsDir: opts.toolsDir,
-		Version:  version,
+		ToolsDir:   opts.toolsDir,
+		Version:    version,
+		Supervisor: supervisor,
+		Routes:     routes,
 	})
 
 	httpServer := &http.Server{

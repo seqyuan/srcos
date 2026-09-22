@@ -107,6 +107,18 @@ func (s *Server) getAs(t *testing.T, user, path, cookie string) *httptest.Respon
 	return rec
 }
 
+// getAsBrowser is getAs for a browser navigation: it asks for HTML, which is
+// what makes the gateway answer with a page instead of a status line.
+func (s *Server) getAsBrowser(t *testing.T, user, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", path, nil)
+	req.Header.Set("Cookie", sessionCookie(user))
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 动态路由：实例成为可达
 // ─────────────────────────────────────────────────────────────────────────
@@ -445,9 +457,15 @@ func TestADeadRouteIsDroppedAfterAFailedDial(t *testing.T) {
 	if _, ok := srv.routes.Get("alice", "web"); ok {
 		t.Fatal("the dead route must be dropped, not dialed again")
 	}
-	// From then on the record is the answer: not running, not routed.
-	if rec := srv.getAs(t, "alice", "/proxy/alice/web/", ""); rec.Code == http.StatusBadGateway {
-		t.Fatal("the gateway must stop dialing a dropped route")
+	// From then on the record is the answer: not running, not routed — and,
+	// since no card can serve the path either, the gateway explains the state
+	// instead of dialing anything again.
+	second := srv.getAsBrowser(t, "alice", "/proxy/alice/web/")
+	if strings.Contains(second.Body.String(), "backend not responding") {
+		t.Fatalf("the gateway dialed the dropped route again: %s", second.Body)
+	}
+	if second.Code != http.StatusBadGateway || !strings.Contains(second.Body.String(), "服务未在运行") {
+		t.Fatalf("expected the status page, got %d %s", second.Code, second.Body)
 	}
 }
 
@@ -546,5 +564,127 @@ func TestProxiedTrafficRecordsActivity(t *testing.T) {
 	}
 	if _, ok := srv.routes.Get("alice", "jupyter"); ok {
 		t.Fatalf("a card must not enter the dynamic table: %+v", srv.routes.List())
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 「启动中」进度页 / 失败说明
+// ─────────────────────────────────────────────────────────────────────────
+
+// A browser that lands on a starting instance gets a self-refreshing progress
+// page with the log tail, not a 404 — and a program gets the status code.
+func TestStartingInstanceShowsAProgressPage(t *testing.T) {
+	srv, configDir := proxyGateway(t)
+	inst := saveService(t, configDir, "alice", "web", "127.0.0.1:20010", func(i *runtime.Instance) {
+		i.State = runtime.StateStarting
+	})
+	if err := os.MkdirAll(filepath.Dir(inst.LogPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inst.LogPath, []byte("loading reference index...\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.syncRoutes()
+
+	rec := srv.getAsBrowser(t, "alice", "/proxy/alice/web/")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a starting service", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After = %q", got)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"服务启动中", "loading reference index", `http-equiv="refresh"`, "/proxy/alice/web/"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("progress page is missing %q", want)
+		}
+	}
+
+	// A program asking for data gets a status line, not a page.
+	prog := srv.getAs(t, "alice", "/proxy/alice/web/", "")
+	if prog.Code != http.StatusServiceUnavailable || strings.Contains(prog.Body.String(), "<html") {
+		t.Fatalf("a non-HTML client must get a status line: %d %q", prog.Code, prog.Body)
+	}
+}
+
+// A dead instance explains itself (state + error + log) instead of a bare 502.
+func TestFailedInstanceShowsTheReason(t *testing.T) {
+	srv, configDir := proxyGateway(t)
+	inst := saveService(t, configDir, "alice", "web", "127.0.0.1:20011", func(i *runtime.Instance) {
+		i.State = runtime.StateFailed
+		i.Error = "healthcheck: not ready after 20s"
+	})
+	if err := os.MkdirAll(filepath.Dir(inst.LogPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inst.LogPath, []byte("Traceback: no module named x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.syncRoutes()
+
+	rec := srv.getAsBrowser(t, "alice", "/proxy/alice/web/anything")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"服务未在运行", "healthcheck", "no module named x", "srcos svc start --tool web"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("failure page is missing %q\n%s", want, body)
+		}
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Fatal("a dead instance must not ask the browser to retry")
+	}
+}
+
+// The status page only answers where nothing else can: an unknown tool is still
+// a 404, and a running-but-unroutable instance is a bug, not a page.
+func TestStatusPageDoesNotShadowOtherAnswers(t *testing.T) {
+	srv, configDir := proxyGateway(t)
+
+	// No record at all.
+	if rec := srv.getAsBrowser(t, "alice", "/proxy/alice/nothing/"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown tool = %d", rec.Code)
+	}
+
+	// Running, but with no usable endpoint: the route table refused it, so the
+	// honest answer is 404 rather than a progress page.
+	saveService(t, configDir, "alice", "web", "10.0.0.5:80", nil)
+	srv.syncRoutes()
+	if rec := srv.getAsBrowser(t, "alice", "/proxy/alice/web/"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unroutable running instance = %d", rec.Code)
+	}
+
+	// A stopped instance does not shadow a working card on the same path.
+	sink := newProxySink(t)
+	writeCard(t, configDir, "/web", sink.endpoint(), true)
+	srv.registry.Reload()
+	if err := runtime.SaveInstance(runtime.InstancePath(configDir, runtime.InstanceID("alice", "web", "")),
+		&runtime.Instance{
+			ID: "alice-web-svc", User: "alice", Tool: "web", Kind: "service",
+			State: runtime.StateStopped, Endpoint: "127.0.0.1:20012",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	srv.syncRoutes()
+	rec := srv.getAsBrowser(t, "alice", "/proxy/alice/web/x")
+	if rec.Code != 200 || rec.Body.String() != "backend:/x" {
+		t.Fatalf("the card must win over a stopped instance: %d %q", rec.Code, rec.Body)
+	}
+}
+
+// Cross-user: the status page must not tell one user about another's instance.
+func TestStatusPageIsScopedToTheSessionUser(t *testing.T) {
+	srv, configDir := proxyGateway(t)
+	saveService(t, configDir, "bob", "web", "127.0.0.1:20013", func(i *runtime.Instance) {
+		i.State = runtime.StateStarting
+	})
+	srv.syncRoutes()
+
+	if rec := srv.getAsBrowser(t, "alice", "/proxy/bob/web/"); rec.Code != http.StatusNotFound {
+		t.Fatalf("another user's starting instance = %d", rec.Code)
+	}
+	if rec := srv.getAsBrowser(t, "bob", "/proxy/bob/web/"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("the owner must see the progress page: %d", rec.Code)
 	}
 }
