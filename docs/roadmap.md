@@ -74,6 +74,17 @@
 - [x] 调研 deepseek-harness 的插件装配边界，定下 dsh 三层集成策略（ADR-016）
 - [x] 定下「一份 interface 三个前端」「能力即 provider」「OS 用户 ≠ SRCOS 用户」三条架构原则
       （ADR-018 / ADR-020 / ADR-021）
+- [x] 新增 `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（探测记录）
+- [x] **node01 环境探测完成**（2026-09-22）—— 关键结论：
+      - `bwrap` 当前**不可用**（Ubuntu 24.04 的 `apparmor_restrict_unprivileged_userns=1`），
+        但免密 sudo 可用，一行命令（AppArmor profile）即可修好
+      - `systemd-run --user --scope` **完全可用**（CPUQuota/MemoryMax/TasksMax 均接受）+ Linger=yes
+        → ADR-014 的**首选**资源限制通道成立，无需降级
+      - 数据盘全是 **ext4（非 XFS）** → 配额方案要改（不能用 XFS project quota）
+      - **node01 不是 SGE 登录节点**（无 qsub/qstat）→ `backend: sge` 环境待探测
+      - **node01 上已在跑 dsh(3080) / shiny-server(3838) / RStudio(8787)**
+        → SRCOS 想接管的三个目标工具已在运行，第一个真实用例可直接用现状验证
+      - 免密 sudo + docker 组 → 「不用 root」是**架构偏好**而非环境限制（ADR-014 前提待确认）
 
 ### 2.2 进行中
 
@@ -647,10 +658,14 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 3 | 集群的 `ssh 登录节点 → 计算节点` 是否免密可用？共享盘挂载点是哪个？ | 决定隧道方案与 rendezvous/镜像路径 |
 | 4 | 登录节点是否允许长驻进程 / `systemd --user` 是否可用？ | 决定 `local` 驱动默认是否禁用、资源限制走 cgroup 还是 prlimit |
 | 5 | `Flow` 的 `expose` 是否需要"多比较组"模式（对齐 annopi 的 `${cmp.*}`）？ | 首版不做，只做样本维度 |
-| 6 | `storages.yaml` 的 `rw` 是否允许写共享盘？配额怎么做（XFS project quota / 单独卷 / 目录计数）？ | 倾向：home 与项目目录 rw，公共参考数据强制 ro；rw 必须配配额（ADR-020） |
+| 6 | `storages.yaml` 的 `rw` 是否允许写共享盘？配额怎么做（XFS project quota / 单独卷 / 目录计数）？ | **数据盘是 ext4 不是 XFS → XFS project quota 排除**；倾向单独卷 + 目录计数（见 `docs/environments.md`） |
 | 7 | `task` 的 `doneWhen` 探针是否需要内置常见类型（`file_exists` / `dir_nonempty` / `exit_code`）？ | 是，先内置这三个，其余留给工具自己写 |
 | 8 | dsh 集成的 Phase 5.5 何时做？集群/登录节点 Node 可用性如何？ | 取决于实际部署环境，路 B 可先于路 A |
 | 9 | MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？ | 倾向按工具 + 按用户双维度授权 |
+| 10 | **「不用 root」是架构偏好还是环境限制？** node01 上免密 sudo + docker 组均可用 | 若是偏好 → docker backend 可作候选；若是环境限制 → `sandbox: bwrap` 必须先修 AppArmor |
+| 11 | **是否执行 bwrap 修复**（AppArmor profile，需一次 root）？ node01 上已验证根因 | 建议执行；不执行则降级为 `sandbox: none` |
+| 12 | **真正的 SGE 登录节点在哪？** 需要在它上面也跑一次 `scripts/probe-env.sh` | 阻塞 `backend: sge` 的全部实现细节 |
+| 13 | `runc 1.2.4` + `/etc/apparmor.d/runc` 已存在 → 是否能做无 root 容器化（ADR-014 的进阶方案）？ | 值得实测：`rootlesskit` + `runc` |
 
 ---
 
@@ -660,3 +675,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 |---|---|
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
 | 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
+| 2026-09-22 | 新增 `scripts/probe-env.sh` 与 `docs/environments.md`；完成 node01 探测（bwrap 被 AppArmor 拦、systemd-run --user 可用、数据盘是 ext4、node01 非 SGE 登录节点、shiny/RStudio/dsh 已在跑）；待决策扩到 13 项 |
