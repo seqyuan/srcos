@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // BwrapOptions is everything the materializer needs beyond the mount table.
@@ -133,8 +134,14 @@ func BwrapArgv(spec *Spec, o BwrapOptions) []string {
 // only be learned by trying.
 //
 // The result is cached because the probe costs a process spawn.
+//
+// sync.Once, not a `done bool`: the first callers can run concurrently (a flow
+// with two nodes, two jobs of one node), and a plain flag would let the second
+// caller observe the *empty* result — which reads as "no bwrap, and no reason
+// why", i.e. a failure with no message. Once makes the second caller wait for
+// the real answer.
 var bwrapProbe struct {
-	done bool
+	once sync.Once
 	ok   bool
 	path string
 	why  string
@@ -142,17 +149,18 @@ var bwrapProbe struct {
 
 // BwrapProbe returns the cached probe outcome.
 func BwrapProbe() (path string, ok bool, why string) {
-	if bwrapProbe.done {
-		return bwrapProbe.path, bwrapProbe.ok, bwrapProbe.why
-	}
-	bwrapProbe.done = true
+	bwrapProbe.once.Do(func() {
+		bwrapProbe.path, bwrapProbe.ok, bwrapProbe.why = probeBwrap()
+	})
+	return bwrapProbe.path, bwrapProbe.ok, bwrapProbe.why
+}
 
+// probeBwrap runs the one-shot probe.
+func probeBwrap() (path string, ok bool, why string) {
 	p, err := exec.LookPath("bwrap")
 	if err != nil {
-		bwrapProbe.why = "bwrap not found on PATH (install bubblewrap, or use sandbox: none)"
-		return "", false, bwrapProbe.why
+		return "", false, "bwrap not found on PATH (install bubblewrap, or use sandbox: none)"
 	}
-	bwrapProbe.path = p
 
 	// The probe is the cheapest possible sandbox: builtin system dirs only,
 	// cwd at the namespace root, run /bin/true. If this fails, nothing works.
@@ -166,9 +174,9 @@ func BwrapProbe() (path string, ok bool, why string) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		bwrapProbe.why = "bwrap cannot start a sandbox: " + msg
+		why = "bwrap cannot start a sandbox: " + msg
 		if strings.Contains(string(out), "uid map") {
-			bwrapProbe.why += "\n  hint: unprivileged user namespaces are blocked. On Ubuntu 24.04+ grant\n" +
+			why += "\n  hint: unprivileged user namespaces are blocked. On Ubuntu 24.04+ grant\n" +
 				"  `userns` to bwrap via an AppArmor profile instead of disabling the sysctl globally:\n" +
 				"    sudo tee /etc/apparmor.d/bwrap >/dev/null <<'P'\n" +
 				"    abi <abi/4.0>,\n" +
@@ -180,9 +188,8 @@ func BwrapProbe() (path string, ok bool, why string) {
 				"    P\n" +
 				"    sudo apparmor_parser -r /etc/apparmor.d/bwrap"
 		}
-		return p, false, bwrapProbe.why
+		return p, false, why
 	}
-	bwrapProbe.ok = true
 	return p, true, ""
 }
 

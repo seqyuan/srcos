@@ -37,20 +37,51 @@ const (
 	RunRunning   = "running"
 	RunSucceeded = "succeeded"
 	RunFailed    = "failed"
+	RunCancelled = "cancelled"
 )
+
+// CancelName is the flag file that asks a running flow to stop scheduling.
+//
+// A file rather than a signal or an API call: the process running a flow may be
+// a CLI invocation in someone's terminal, and `flow cancel` runs in another
+// process entirely. A flag file is the same "filesystem is the database" idiom
+// the rest of SRCOS uses, and it is inspectable ("is this run being cancelled?"
+// is `ls`).
+const CancelName = "cancel"
 
 // NodeState is one node's progress in a run.
 type NodeState struct {
 	ID    string `yaml:"id"`
 	State string `yaml:"state"`
-	// JobIDs are the submitted jobs for this node, one per sample row.
+	// JobIDs are the submitted jobs for this node, in submission order: a
+	// retried unit appends another id, so the node's history is the list.
 	JobIDs []string `yaml:"job_ids,omitempty"`
+	// Units is how many attempts each sample unit has had (keyed by the sample
+	// segment). It is persisted so a resumed run does not restart a retry
+	// budget from zero.
+	Units map[string]int `yaml:"units,omitempty"`
 	// Attempts counts how many times this node was submitted (a resumed run
 	// increments it), so a retry loop is visible rather than mysterious.
 	Attempts  int       `yaml:"attempts,omitempty"`
 	Error     string    `yaml:"error,omitempty"`
 	StartedAt time.Time `yaml:"started_at,omitempty"`
 	EndedAt   time.Time `yaml:"ended_at,omitempty"`
+}
+
+// AddUnitAttempt records one attempt of one sample unit.
+func (n *NodeState) AddUnitAttempt(segment string) {
+	if n.Units == nil {
+		n.Units = map[string]int{}
+	}
+	n.Units[segment]++
+}
+
+// UnitAttempts returns how many attempts a sample unit has had.
+func (n *NodeState) UnitAttempts(segment string) int {
+	if n == nil {
+		return 0
+	}
+	return n.Units[segment]
 }
 
 // Run is the persisted state of one flow run.
@@ -120,6 +151,29 @@ func LoadRun(path string) (*Run, error) {
 func IsSigned(signPath string) bool {
 	info, err := os.Stat(signPath)
 	return err == nil && !info.IsDir()
+}
+
+// CancelPath is the flag file a `flow cancel` writes.
+func CancelPath(dataDir, user, runID string) string {
+	return filepath.Join(RunDir(dataDir, user, runID), CancelName)
+}
+
+// IsCancelled reports whether a run has been asked to stop scheduling.
+func IsCancelled(cancelPath string) bool {
+	info, err := os.Stat(cancelPath)
+	return err == nil && !info.IsDir()
+}
+
+// RequestCancel writes the cancel flag (creating the run directory if needed).
+func RequestCancel(cancelPath string) error {
+	if err := os.MkdirAll(filepath.Dir(cancelPath), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(cancelPath)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // Sign writes the node's completion marker.

@@ -33,6 +33,12 @@ func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, arg
 	case tool.SandboxBwrap, "":
 		bwrapPath, ok, why := sandbox.BwrapProbe()
 		if !ok {
+			if strings.TrimSpace(why) == "" {
+				// A probe that says "no" without saying why is a bug of its own;
+				// failing with an empty message would hide it from whoever is
+				// staring at the instance list.
+				why = "bubblewrap is not usable on this host (the probe returned no reason)"
+			}
 			return nil, errors.New(why)
 		}
 		args := sandbox.BwrapArgv(spec, sandbox.BwrapOptions{Cwd: cwd, Env: env, Argv: argv})
@@ -288,7 +294,23 @@ type processHandle struct {
 	stopOnce sync.Once
 }
 
-func (h *processHandle) Ref() string                    { return h.ref }
+func (h *processHandle) Ref() string { return h.ref }
+
+// ChildPID reports the task process SRCOS started directly.
+//
+// A task needs this for the same reason a service does: without a user systemd
+// the recorded pid is the only way to stop it later, and *with* one the scope
+// systemd created for us has a generated name we cannot stop by reference — so
+// the pid is the handle that actually works. `flow cancel` and the admin
+// console's force-stop both depend on it.
+func (h *processHandle) ChildPID() (int, uint64) {
+	if h.cmd == nil || h.cmd.Process == nil {
+		return 0, 0
+	}
+	pid := h.cmd.Process.Pid
+	start, _ := pidStartTime(pid)
+	return pid, start
+}
 func (h *processHandle) Command() []string              { return h.command }
 func (h *processHandle) Limiter() string                { return h.limiter }
 func (h *processHandle) Endpoint() (route.Target, bool) { return route.Target{}, false }

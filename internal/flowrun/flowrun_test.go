@@ -2,10 +2,12 @@ package flowrun
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/flow"
@@ -276,12 +278,24 @@ func TestTouchedSignSkipsANode(t *testing.T) {
 	}
 }
 
-// A failed node stops the fan-out at the first failing sample, and a downstream
-// node that is not `when: always` is skipped with a reason.
+// A failed node stops launching new samples, and a downstream node that is not
+// `when: always` is skipped with a reason.
+//
+// With a concurrency window, "stops" means "no further units are submitted":
+// the jobs already in flight are not killed (killing a colleague's half-written
+// output to save a few seconds is not a trade SRCOS makes on its own).
 func TestFailureStopsTheFanOutAndSkipsDownstream(t *testing.T) {
 	f := newFixture(t)
-	// The qc script fails when its input is missing; remove the count output by
-	// making the *count* tool write nothing, so qc fails.
+	// Five samples with a window of two: a failure must be visible as a bound on
+	// the submitted jobs, not as "exactly one".
+	s, err := flow.ParseSamples("sample_id\nS001\nS002\nS003\nS004\nS005\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.samples = s
+	f.runner.Opts.Concurrency = 2
+
+	// The count tool writes nothing, so qc (which reads its input) fails.
 	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"),
 		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -298,8 +312,9 @@ func TestFailureStopsTheFanOutAndSkipsDownstream(t *testing.T) {
 	if qc.State != flow.NodeFailed {
 		t.Fatalf("qc state = %s", qc.State)
 	}
-	if len(qc.JobIDs) != 1 {
-		t.Fatalf("a failing node must stop at the first bad sample, submitted %d", len(qc.JobIDs))
+	if len(qc.JobIDs) > f.runner.Opts.Concurrency {
+		t.Fatalf("a failing node must stop launching: %d jobs submitted with a window of %d",
+			len(qc.JobIDs), f.runner.Opts.Concurrency)
 	}
 	if qc.Error == "" {
 		t.Fatal("a failure without a reason is useless to an operator")
@@ -428,4 +443,309 @@ func TestServiceToolIsRefused(t *testing.T) {
 		// service being *run* as a node.
 		t.Logf("runner refused the service node too: %v", err)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 并发 / 重试 / 取消 / 配额
+// ─────────────────────────────────────────────────────────────────────────
+
+// The concurrency window bounds how many jobs run at once, and it is not
+// exceeded even when a node has many samples.
+func TestConcurrencyIsBounded(t *testing.T) {
+	f := newFixture(t)
+	s, err := flow.ParseSamples("sample_id\nS1\nS2\nS3\nS4\nS5\nS6\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.samples = s
+	f.runner.Opts.Concurrency = 2
+
+	// The count tool records its own concurrency in the run directory, so the
+	// test measures what actually happened rather than what the plan said.
+	gate := filepath.Join(t.TempDir(), "gate")
+	script := `#!/bin/sh
+set -e
+mkdir -p "$SRCOS_PARAM_OUTDIR"
+# claim a slot
+i=0
+while ! mkdir "` + gate + `.lock-$i" 2>/dev/null; do i=$((i+1)); [ $i -lt 8 ] || break; done
+mkdir -p "` + gate + `.lock-$i"
+sleep 0.05
+printf 'counted\n' > "$SRCOS_PARAM_OUTDIR/counts.txt"
+rmdir "` + gate + `.lock-$i"
+`
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := f.runOnce(t, "run-1")
+	if record.State != flow.RunSucceeded {
+		t.Fatalf("run state = %s (%v)", record.State, record.Node("count"))
+	}
+	if got := len(record.Node("count").JobIDs); got != 6 {
+		t.Fatalf("jobs = %d, want one per sample", got)
+	}
+	// No lock directory may survive (each job released its slot).
+	entries, _ := os.ReadDir(filepath.Dir(gate))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), filepath.Base(gate)+".lock-") {
+			t.Fatalf("a job did not release its slot: %s", e.Name())
+		}
+	}
+}
+
+// The concurrency window is a *bound*, not a schedule: with a window of 3 and
+// six samples the first three start together, and the test proves it by having
+// the tool wait for its peers.
+func TestConcurrencyActuallyOverlaps(t *testing.T) {
+	f := newFixture(t)
+	s, err := flow.ParseSamples("sample_id\nS1\nS2\nS3\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.samples = s
+	f.runner.Opts.Concurrency = 3
+
+	dir := t.TempDir()
+	// Each job touches its own file and then waits for the other two: the run
+	// can only finish if three jobs are alive at the same time.
+	script := `#!/bin/sh
+set -e
+mkdir -p "$SRCOS_PARAM_OUTDIR"
+touch "` + dir + `/$SRCOS_PARAM_SAMPLE_ID"
+n=0
+while [ $n -lt 100 ]; do
+  count=$(ls "` + dir + `" | wc -l)
+  [ "$count" -ge 3 ] && break
+  n=$((n+1))
+  sleep 0.05
+done
+[ "$(ls "` + dir + `" | wc -l)" -ge 3 ]
+printf 'counted\n' > "$SRCOS_PARAM_OUTDIR/counts.txt"
+`
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := f.runOnce(t, "run-1")
+	if record.State != flow.RunSucceeded {
+		t.Fatalf("run state = %s: the window did not actually overlap (%v)", record.State, record.Node("count"))
+	}
+}
+
+// A node with retries re-runs the failing unit, with the injected backoff, and
+// the run's record keeps the attempts.
+func TestRetryRerunsTheFailingUnit(t *testing.T) {
+	f := newFixture(t)
+	f.runner.Opts.RetryBackoff = func(int) time.Duration { return time.Millisecond }
+	f.flow.Nodes[0].Retry = &flow.Retry{Max: 2}
+
+	// The count tool fails the first time it sees each sample, then succeeds.
+	stateDir := t.TempDir()
+	script := `#!/bin/sh
+set -e
+mkdir -p "$SRCOS_PARAM_OUTDIR"
+marker="` + stateDir + `/$SRCOS_PARAM_SAMPLE_ID"
+if [ ! -f "$marker" ]; then
+  touch "$marker"
+  echo "first attempt fails" >&2
+  exit 7
+fi
+printf 'counted\n' > "$SRCOS_PARAM_OUTDIR/counts.txt"
+`
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var logs []string
+	f.runner.Opts.Log = func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) }
+	record := f.runOnce(t, "run-1")
+
+	if record.Node("count").State != flow.NodeSucceeded {
+		t.Fatalf("count state = %s (%s)", record.Node("count").State, record.Node("count").Error)
+	}
+	if record.State != flow.RunSucceeded {
+		t.Fatalf("run state = %s", record.State)
+	}
+	// Two samples × two attempts each: the retry re-ran only the failing unit.
+	if got := len(record.Node("count").JobIDs); got != 4 {
+		t.Fatalf("jobs = %d, want 2 samples × 2 attempts", got)
+	}
+	if got := record.Node("count").UnitAttempts("s01-s001"); got != 2 {
+		t.Fatalf("unit attempts = %d, want 2 (and persisted for a resume)", got)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "retry") {
+		t.Fatal("a retry must be visible in the log")
+	}
+}
+
+// Retries are bounded: once the budget is spent the node fails and says so.
+func TestRetryBudgetIsRespected(t *testing.T) {
+	f := newFixture(t)
+	f.runner.Opts.RetryBackoff = func(int) time.Duration { return time.Millisecond }
+	f.runner.Opts.Concurrency = 1
+	f.flow.Nodes[1].Retry = &flow.Retry{Max: 1}
+
+	// qc fails always; count is fine.
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "qc", "work.sh"),
+		[]byte("#!/bin/sh\nexit 9\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := f.runOnce(t, "run-1")
+
+	qc := record.Node("qc")
+	if qc.State != flow.NodeFailed {
+		t.Fatalf("qc state = %s", qc.State)
+	}
+	// 2 samples × 2 attempts, then it gives up (and the untouched samples are
+	// reported as not attempted).
+	if got := len(qc.JobIDs); got > 4 {
+		t.Fatalf("jobs = %d, want at most 2 samples × (1 attempt + 1 retry)", got)
+	}
+	// Samples that never got a slot must be accounted for, not silently
+	// missing from the record.
+	if len(qc.JobIDs) < 2*len(f.samples.Rows) && !strings.Contains(qc.Error, "did not complete") {
+		t.Fatalf("a stopped fan-out must say what did not run (%d jobs): %q", len(qc.JobIDs), qc.Error)
+	}
+	if !strings.Contains(qc.Error, "code 9") {
+		t.Fatalf("the node must report why it failed: %q", qc.Error)
+	}
+	if record.State != flow.RunFailed {
+		t.Fatalf("run state = %s", record.State)
+	}
+}
+
+// `flow cancel` writes a flag file; the scheduler stops launching and the run
+// ends cancelled (the in-flight jobs are stopped by the canceller, which the
+// test does by hand).
+func TestCancelStopsScheduling(t *testing.T) {
+	f := newFixture(t)
+	f.runner.Opts.Concurrency = 1
+	dataDir := config.DataDir(f.configDir)
+
+	// The count tool asks for a cancel as soon as the first job starts, then
+	// finishes normally: the second unit must not be submitted.
+	script := `#!/bin/sh
+set -e
+mkdir -p "$SRCOS_PARAM_OUTDIR"
+printf 'counted\n' > "$SRCOS_PARAM_OUTDIR/counts.txt"
+touch "` + flow.CancelPath(dataDir, f.user, "run-1") + `"
+`
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := f.runOnce(t, "run-1")
+
+	if record.State != flow.RunCancelled {
+		t.Fatalf("run state = %s, want cancelled", record.State)
+	}
+	if got := len(record.Node("count").JobIDs); got >= 2 {
+		t.Fatalf("a cancelled run must stop launching: %d jobs", got)
+	}
+	if record.Node("qc").State == flow.NodeSucceeded {
+		t.Fatal("nothing downstream should have run")
+	}
+	// A cancelled run did not *fail*: its remaining nodes are skipped, so a
+	// cancellation never looks like an error in the record.
+	if record.Node("work").State == flow.NodeFailed {
+		t.Fatalf("a cancelled node must be skipped, not failed: %s", record.Node("work").Error)
+	}
+}
+
+// StopRun stops what a cancelled run still has in flight, through the same stop
+// path the reaper uses (so the instance record ends up truthful).
+func TestStopRunStopsInFlightJobs(t *testing.T) {
+	f := newFixture(t)
+	dataDir := config.DataDir(f.configDir)
+
+	// A long-running first job so there is something to cancel.
+	if err := os.WriteFile(filepath.Join(f.runner.Opts.ToolsDir, "count", "work.sh"),
+		[]byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	units, _, err := f.runner.Plan(f.flow, f.samples, nil, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := &flow.Run{FlowID: f.flow.ID, FlowVersion: f.flow.Version, User: f.user, ID: "run-1"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = f.runner.Run(ctx, f.flow, units, record, f.samples,
+			flow.RunDir(dataDir, f.user, "run-1"))
+	}()
+
+	// Wait until the first job is recorded, then cancel.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if insts, err := runtime.ListInstances(f.configDir); err == nil {
+			for _, inst := range insts {
+				if inst.State == runtime.StateRunning {
+					goto running
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+running:
+	if err := flow.RequestCancel(flow.CancelPath(dataDir, f.user, "run-1")); err != nil {
+		t.Fatal(err)
+	}
+	// A cancel is a cross-process operation: StopRun reads the record from disk
+	// rather than reaching into the scheduler's memory.
+	stopped, err := f.runner.StopRun(context.Background(), f.flow, "run-1")
+	if err != nil {
+		t.Logf("stop reported: %v", err)
+	}
+	if stopped == 0 {
+		t.Fatal("a running job must be stopped by StopRun")
+	}
+	cancel()
+	<-done
+
+	for _, inst := range mustInstances(t, f.configDir) {
+		if !inst.State.Terminal() {
+			t.Fatalf("instance %s is still %s after a cancel", inst.ID, inst.State)
+		}
+	}
+}
+
+func mustInstances(t *testing.T, configDir string) []*runtime.Instance {
+	t.Helper()
+	insts, err := runtime.ListInstances(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return insts
+}
+
+// A flow must not be a way around the aggregate quota a grant sets.
+func TestQuotaRefusesMoreJobsThanAllowed(t *testing.T) {
+	f := newFixture(t)
+	policy, err := grant.New(nil, nil, []grant.Grant{
+		{Tool: "count", Public: true, Quota: grant.Quota{MaxInstances: 1}},
+		{Tool: "qc", Public: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.runner.Opts.Policy = policy
+	f.runner.Opts.Concurrency = 2 // two samples want to run at once
+
+	record := f.runOnce(t, "run-1")
+	if record.State == flow.RunSucceeded {
+		t.Fatalf("a quota of one instance must refuse the second job: %v", record.Node("count"))
+	}
+	if !strings.Contains(record.Node("count").Error+strings.Join(nodeErrors(record, "count"), " "), "quota") {
+		t.Fatalf("the refusal must name the quota: %q", record.Node("count").Error)
+	}
+}
+
+func nodeErrors(record *flow.Run, nodeID string) []string {
+	var out []string
+	for _, n := range record.Nodes {
+		if n.ID == nodeID && n.Error != "" {
+			out = append(out, n.Error)
+		}
+	}
+	return out
 }

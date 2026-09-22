@@ -88,7 +88,7 @@
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 23 个包 / 约 3.5 万行 / 约 530 个测试用例 / 46 个测试文件，`go vet` + `go test` 全绿
+- 23 个包 / 约 3.6 万行 / 约 560 个测试用例 / 46 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
@@ -104,8 +104,8 @@
 ### 2.3 下一步
 
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端都已完成。
-下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 4 收尾**（并发上限、自动重试+退避、
-`flow cancel`）或 **MCP 第二期**（`submit` scope）/ **管理端画布**。
+下一步见 §6 与 [`handoff.md`](handoff.md) §3：**MCP 第二期**（`submit` scope，需先定粒度）或
+**管理端画布**（Phase 5）。
 
 ---
 
@@ -727,9 +727,13 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       所以边不需要模板语法也能解析，`expose.from: output.<名>` 是同一机制的另一端
 - [x] **断点续跑**（2026-09-22）：`.sign` 是人类逃生口（手工 `touch` 即视为完成），成功时自动写；
       样本表随运行留档，`flow resume <run-id>` 不需要再给
-- [ ] 每流程并发上限（默认 4，当前顺序执行）与 `retry.max` 的自动重试+退避
-- [ ] `flow cancel`（取消未开始的节点）
-- [ ] 流程级配额与审计（目前只校验 grant 可见性）
+- [x] **流程级并发上限**（2026-09-22）：`--concurrency`（默认 4）限制整个运行的同时在跑任务数；
+      节点级失败即停（不再投递该节点新样本，在跑的不打断）
+- [x] **`retry.max` 自动重试 + 退避**（2026-09-22）：粒度是**任务**不是节点（重跑整个节点会白做已成功的样本），
+      退避 30s/2m/5m/10m/20m，尝试次数持久化在运行记录里（`resume` 不重置预算）
+- [x] **`flow cancel`**（2026-09-22）：跨进程标志文件 + 停掉在跑的 job（复用回收器的停止路径）
+- [x] **流程级配额**（2026-09-22）：按 grant 的聚合配额（含本次运行中在跑的任务，所以并发也拦得住）
+- [ ] 流程级审计（目前只有实例记录与 `flowrun.yaml`）
 - [ ] 把 `annopi` 注册为普通工具模块（逃生口）
 
 ### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer
@@ -822,3 +826,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **管理端**：`grant.Policy` 线程安全 + `ReplaceWith`（授权热加载）；`runtime.UnitUsage`/`UnitSampler`（systemd cgroup 或 /proc 的资源快照）+ `inspect.AdminInstances/AdminTools`（管理视图与只读模型共用）；`/api/admin/*`（实例总览/强制停止/日志/工具授权/组/管理员，仅管理员 + Origin 校验）；`/admin` 控制台（服务端渲染 + 少量 JS 动作）+ 仪表盘入口 |
 | 2026-09-22 | **Phase 4 起步：流程契约 + 注册期校验** —— `docs/flow-spec.md`（schema / 类型兼容表 / 14 条校验 / 执行语义（规划）/ 与 annopi 对照 / 明确不做）+ `internal/flow`（DAG 拓扑序与环检测、连线类型兼容、必填输入闭环校验、`id@version` 精确匹配、节点必须 kind: task）+ `srcos flow list|validate` |
 | 2026-09-22 | **Phase 4 主体：流程跑起来了** —— `internal/flow` 补 planner（样本表解析、`expose`×表×连线 → 每个 (节点×样本) 的 job、类型强制转换、`--param` 与 `output.<名>` 两种来源）+ 运行记录/布局（`/flow` 内建挂载、run id、样本段）+ `internal/flowrun`（拓扑序、AND、`when: always`、失败即停、`.sign` 续跑、样本表留档）+ `srcos flow run\|resume\|status --dry-run` |
+| 2026-09-22 | **Phase 4 收尾**：流程级并发（`--concurrency`，默认 4，job 粒度）、`retry.max` 自动重试+退避（任务粒度）、`flow cancel`（跨进程标志文件 + 停掉在跑 job）、流程级配额；并发首次把运行时放到「两个 unit 同时开工」，因此修掉两个真 bug：**`BwrapProbe` 的缓存没有同步**（第二个调用者看到空的失败，报成无消息的 failed）与**任务不记录 pid**（`systemd-run --scope` 的名字由 systemd 生成，按引用停不掉） |

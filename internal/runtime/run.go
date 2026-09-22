@@ -248,6 +248,13 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 		return fail("%v", err), nil
 	}
 	inst.BackendRef = h.Ref()
+	if pr, ok := h.(PidReporter); ok {
+		// A task needs the same treatment a service gets: without a user
+		// systemd, the recorded pid (with the start time that pins the
+		// incarnation) is the only way to stop it later — which is what
+		// `flow cancel` and the admin console need.
+		inst.PID, inst.PIDStart = pr.ChildPID()
+	}
 	inst.Command = h.Command()
 	inst.Limiter = h.Limiter()
 	inst.Mounts = renderMounts(prep.spec)

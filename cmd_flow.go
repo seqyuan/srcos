@@ -38,6 +38,9 @@ func runFlowCmd(args []string) {
 	case "status":
 		runFlowStatus(args)
 		return
+	case "cancel":
+		runFlowCancel(args)
+		return
 	}
 
 	fs := newFlagSet("flow")
@@ -53,6 +56,7 @@ func runFlowCmd(args []string) {
 		fmt.Fprintln(os.Stderr, "  run <flow-id> --samples <file> [--param k=v] [--dry-run]")
 		fmt.Fprintln(os.Stderr, "  resume <run-id>          continue a run (skips signed/succeeded nodes)")
 		fmt.Fprintln(os.Stderr, "  status [run-id]          show this user's flow runs")
+		fmt.Fprintln(os.Stderr, "  cancel <run-id>          stop scheduling and stop the jobs in flight")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Contract: docs/flow-spec.md")
 	}
@@ -122,14 +126,15 @@ func runFlowCmd(args []string) {
 
 // flowRunnerArgs are the flags the three executing subcommands share.
 type flowRunnerArgs struct {
-	configDir *string
-	flowsDir  *string
-	toolsDir  *string
-	user      *string
-	params    *kvList
-	samples   *string
-	dryRun    *bool
-	runID     *string
+	configDir   *string
+	flowsDir    *string
+	toolsDir    *string
+	user        *string
+	params      *kvList
+	samples     *string
+	dryRun      *bool
+	runID       *string
+	concurrency *int
 }
 
 func registerFlowRunnerFlags(fs *flag.FlagSet) *flowRunnerArgs {
@@ -143,6 +148,8 @@ func registerFlowRunnerFlags(fs *flag.FlagSet) *flowRunnerArgs {
 	a.samples = fs.String("samples", "", "sample table (CSV/TSV with a header row)")
 	a.dryRun = fs.Bool("dry-run", false, "print what would run and submit nothing")
 	a.runID = fs.String("run", "", "run id (default: generated)")
+	a.concurrency = fs.Int("concurrency", flowrun.DefaultConcurrency,
+		"how many jobs may run at once, across the whole run")
 	return a
 }
 
@@ -157,15 +164,23 @@ func buildFlowRunner(a *flowRunnerArgs) (*flowrun.Runner, string, string) {
 		fatalf("%v", err)
 	}
 	policy := grantPolicy(*a.configDir)
+	if a.concurrency != nil && *a.concurrency < 1 {
+		fatalf("--concurrency must be at least 1")
+	}
+	concurrency := flowrun.DefaultConcurrency
+	if a.concurrency != nil {
+		concurrency = *a.concurrency
+	}
 	return flowrun.New(flowrun.Options{
-		ConfigDir: *a.configDir,
-		DataDir:   config.DataDir(*a.configDir),
-		ToolsDir:  toolsRoot,
-		FlowsDir:  flowsRoot,
-		User:      user,
-		Runner:    runner,
-		Policy:    policy,
-		Log:       func(format string, args ...any) { fmt.Printf(format+"\n", args...) },
+		ConfigDir:   *a.configDir,
+		DataDir:     config.DataDir(*a.configDir),
+		ToolsDir:    toolsRoot,
+		FlowsDir:    flowsRoot,
+		User:        user,
+		Runner:      runner,
+		Policy:      policy,
+		Concurrency: concurrency,
+		Log:         func(format string, args ...any) { fmt.Printf(format+"\n", args...) },
 	}), flowsRoot, user
 }
 
@@ -350,6 +365,60 @@ func runFlowStatus(args []string) {
 		}
 		fmt.Printf("%-34s %-18s %-10s %d/%d done\n", rec.ID, rec.FlowID, rec.State, done, len(rec.Nodes))
 	}
+}
+
+// runFlowCancel stops a run: it asks the scheduler to stop launching, stops the
+// jobs already in flight, and marks the record cancelled.
+//
+// Order matters. The flag goes first (so the scheduler cannot launch another
+// unit between the read and the stop), then the in-flight jobs are stopped, then
+// the record is marked — so a crash halfway leaves the run marked "running" but
+// with its flag present, which a resume would immediately honour.
+func runFlowCancel(args []string) {
+	fs := newFlagSet("flow cancel")
+	a := registerFlowRunnerFlags(fs)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: srcos flow cancel <run-id>")
+		fs.PrintDefaults()
+	}
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+	if len(positional) == 0 {
+		printFlowRunUsage()
+		os.Exit(1)
+	}
+	runID := positional[0]
+
+	ex, flowsRoot, user := buildFlowRunner(a)
+	dataDir := config.DataDir(*a.configDir)
+	record, err := flowrun.LoadRunRecord(dataDir, user, runID)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	f, err := flow.Find(flowsRoot, record.FlowID)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	// 1. The flag: the running scheduler notices it between jobs.
+	if err := flow.RequestCancel(flow.CancelPath(dataDir, user, runID)); err != nil {
+		fatalf("could not write the cancel flag: %v", err)
+	}
+	// 2. The jobs already in flight (read from disk by StopRun: the scheduler
+	// may be another process).
+	stopped, serr := ex.StopRun(context.Background(), f, runID)
+	if serr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", serr)
+	}
+	// 3. The record, if nothing else will mark it.
+	if record.State == flow.RunRunning {
+		record.State = flow.RunCancelled
+		record.EndedAt = time.Now().UTC()
+		if err := flow.SaveRun(flow.RecordPath(dataDir, user, runID), record); err != nil {
+			fatalf("%v", err)
+		}
+	}
+	fmt.Printf("cancelled %s (%d job(s) stopped); no new jobs will be submitted\n", runID, stopped)
 }
 
 // renderParams prints a unit's params on one line, stably ordered.

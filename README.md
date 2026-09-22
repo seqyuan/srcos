@@ -848,6 +848,7 @@ srcos flow run --flows-dir srcos-flows --tools-dir srcos-tools \
 
 srcos flow status                  # 本用户的流程运行
 srcos flow resume <run-id>         # 续跑：跳过已完成/已签名的节点
+srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑的
 ```
 
 - 样本表（CSV/TSV，带表头）的列由 `expose.from: sample.<列>` 指定；`--param k=v` 填 `from: user` 的参数。
@@ -856,7 +857,14 @@ srcos flow resume <run-id>         # 续跑：跳过已完成/已签名的节点
   `expose.from: output.<名>` 用同一机制告诉工具往哪写。
 - 展开出来的就是**普通任务**：同样的沙箱、配额、实例记录与审计，`job list` 里带 `flow/run/node/sample` 标签。
 - `nodes/<节点>/.sign` 是「这一步做完了」的权威：成功时自动写，也可以手工 `touch` 跳过（annopi 同款逃生口）。
-- 当前是**顺序执行**、失败即停（第一个坏样本就不再往下投）；并发上限与 `retry.max` 自动重试是下一步。
+- **并发上限**：`--concurrency`（默认 4）限制整个运行同时跑几个任务；样本级并行仍归工具自己（`ata`）。
+- **自动重试**：节点写 `retry: {max: N}` 后，失败的任务自动重试，退避 30s / 2m / 5m / 10m / 20s。
+  重试的粒度是**任务**（一个样本的一次工作），不是整个节点。
+- **失败即停**：一个节点有样本失败后不再投递该节点的新样本（已经在跑的不打断）；
+  `when: always` 的下游仍会跑，其它下游标 `skipped`。
+- **取消**：`flow cancel <run-id>` 写一个标志文件让调度器停止投递，并停掉该运行中还在跑的任务
+  （跨进程可用）。
+- **配额照旧**：流程不是绕过 `grant` 聚合配额的路子，并发启动也一样被拦。
 
 ### 工具开发者
 

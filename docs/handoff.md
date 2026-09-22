@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 基本完成，**Phase 4 主体可用**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/调度）完成）
+> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 基本完成，**Phase 4 完成**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/并发调度/重试/取消/续跑）完成）
 
 ---
 
@@ -19,7 +19,7 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，23 个包，约 3.5 万行，约 530 个测试用例；46 个测试文件），
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，23 个包，约 3.6 万行，约 560 个测试用例；46 个测试文件），
 在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了**工具平台**四层：
 工具契约、实例化运行时、存储 provider、授权模型。认证面现在有两扇门：
 浏览器的 session cookie，与程序（agent / MCP 客户端）的 agent token（`Authorization: Bearer`）。
@@ -40,7 +40,10 @@
 按依赖顺序投递，节点产物落在平台推导的 `/flow/runs/<run>/...` 下（所以连线不需要任何模板语法），
 `flow resume` 跳过已完成/已签名的节点。
 
-下一步：**Phase 4 收尾**（并发上限、`retry.max` 自动重试+退避、`flow cancel`）或 **MCP 第二期**（`submit` scope）。
+流程还学会了**自己收敛**：并发上限（`--concurrency`，默认 4）、失败自动重试（`retry.max`，任务粒度、30s→20m 退避）、
+`flow cancel`（跨进程）、按 grant 配额拦（并发也拦得住）。
+
+下一步：**MCP 第二期**（`submit` / `run_flow` / `cancel`，需先定 `submit` scope 粒度）或 **管理端画布**。
 
 ---
 
@@ -98,7 +101,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 代理层接入动态路由表：/proxy/<user>/<tool>/ 可达 · 实例优先于卡片   │
 │ ✅ 网关自查：启动 reconcile · 按 tick 回收 · 启动中/失败给页面而非 404 │
 │ ✅ 管理端：/admin 控制台 + /api/admin/*（实例总览/强制停止/授权，仅管理员）│
-│ ✅ 流程：契约/校验/样本展开/顺序调度/续跑（flow run|resume|status）· ⛔ 并发/重试│
+│ ✅ 流程：契约/校验/展开/并发调度/重试/取消/续跑（flow run|resume|status|cancel）│
 └─────────────────────────────────────────────────────────────────────┘
 ┌─ 运行层 ────────────────────────────────────────────────────────────┐
 │ ✅ local（bwrap 沙箱 + systemd-run --user 限额，prlimit 兜底）       │
@@ -131,6 +134,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **配额** | 工具允许 4 核但配额给 2 核 → `cpu 4` 被配额拦（消息说明用了多少、上限多少）；实例满额后拦新实例；转终态后放行 |
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
+| **流程的并发/重试/取消/配额** | `--concurrency 2` + 6 样本 × `sleep 3` → **9.4s**（顺序 18s），时间线显示恰好 2 个重叠；`retry: {max: 2}` + 故意失败一次的任务 → 日志 `retry … in 30s (attempt 1/2)` → 最终 succeeded，记录里 `units: {s01-x: 2}`；`flow cancel`（另一进程）→ 运行 `cancelled`、实例 `stopped`、`sleep 120` 被杀、调度器自行收敛、节点标 `skipped`；`--max-instances 1` + 并发 2 → 第二个任务被拒：`instance quota reached: you have 1 of 1 allowed for this tool; stop one first` |
 | **流程跑起来** | `srcos flow run --samples samples.csv scrna` → 2 节点 × 2 样本 = **4 个普通任务**（`job list` 里带 flow/run/node/sample 标签），按依赖顺序执行；下游 `qc` **真的读到了**上游 `count` 的产物（`clean.txt` = `counts.txt` 的内容，路径 `/flow/runs/<run>/nodes/count/s01-s001/outs`）；`nodes/*/.sign` 自动写好；`flow status` 列出运行；`flow resume` 两节点全 `skip (already done, signed)`；`flow run --dry-run` 打印每个 job 的参数与产物路径。失败路径：下游工具 `exit 3` → 该节点 `failed`（只提交了 1 个样本就停）、`when: always` 的 report 节点仍跑、普通下游 `strict` 标 `skipped`、退出码 1 |
 | **流程契约与校验** | `srcos flow list` 显示 3 节点 / 3 层 / 样本列 `fastq_dir,sample_id`；`flow validate` 对合法流程给出拓扑序（`count → qc → report(when=always)`）；对坏流程**一次报出 8 个问题**（含环 `a → c → b → a`、未知输出、非法 `from`、4 个未满足的必填输入）；`count@9.9.9` 版本不匹配与 `kind: service` 当节点各自被点名；退出码 1 |
 | **管理端（控制台 + API）** | `/admin` 渲染出全部用户的实例（含 `usage`：python 服务 RSS 71.6 MiB / CPU 0.013s，样本来自 systemd cgroup）、端点、限额与沙箱、授权矩阵（`组:bio`）与「强制停止」；非管理员 `/admin` → 302 回仪表盘、`/api/admin/tools` → 403；管理员 PUT 授权 → `grants.yaml` 落盘且**同一进程内 alice 立刻从 `/api/tools` 消失**（无需重启）；`POST /api/admin/instances/<id>/stop` → 记录 `stopped` 且 unit 变 inactive；仪表盘只对管理员显示「管理」入口 |
@@ -141,8 +145,9 @@ UI 造起来便宜了 → UI 不再是护城河
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
-- ⛔ **流程的并发与自动重试** —— Phase 4 收尾：现在是顺序执行、失败即停（`retry.max` 未实现、
-  `flow cancel` 未实现、流程级配额未接）；契约见 `flow-spec.md` §5 的「规划」小节
+- ⛔ **流程级审计** —— 现在只有实例记录 + `flowrun.yaml`（谁在何时跑了哪个流程、用了哪个版本、
+  什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
+- ⛔ **管理端画布** —— Phase 5；DAG 校验（`internal/flow`）与运行记录已就绪，剩下纯前端
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **网关侧起停服务**（`svc start` 仍只在 CLI；管理端能停、不能起）—— admin API 的下一步
 - ⛔ **storage 声明的管理端编辑**（`storages.yaml` 目前只有 CLI/手写）
@@ -167,7 +172,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~4~~ | ~~**启动中进度页 + `svc reap` 定时调度**~~：✅ **已完成**（网关启动 reconcile、按 tick 回收、`idle_ttl` 按流量判定、未就绪给页面） | 冷启动体验与自动回收都到位了 |
 | ~~5~~ | ~~**管理端页面**~~：✅ **已完成**（`/admin` + `/api/admin/*`：实例总览含 CPU/内存快照、跨用户强制停止、工具/组/授权编辑；顺带完成授权热加载） | 非 CLI 用户能运维了；管理 API 也把「实例运维」从 CLI 搬进了网关 |
 | ~~6~~ | ~~**Flow 调度器**~~：✅ **主体已完成**（样本展开 + 顺序调度 + `.sign` 续跑 + `flow run\|resume\|status`） | 契约、校验、展开、调度、续跑都通了；剩余收尾见下 |
-| **7** | **Phase 4 收尾**：流程级并发上限（默认 4）、`retry.max` 自动重试+退避、`flow cancel`、流程级配额 | 都已写进 `flow-spec.md` §5 的「规划」，实现即可 |
+| ~~7~~ | ~~**Phase 4 收尾**~~：✅ **已完成**（并发、重试、取消、配额） | Phase 4 收工 |
 | **8** | **MCP 第二期**（`submit` / `cancel` / `run_flow`，需先定 `submit` scope 的粒度：roadmap §8 #9） | 让 agent 真的能"执行用 SRCOS"，而不只是看 |
 | **9** | 管理端画布（`/admin/flows/:id`，只在该页加载 React —— ADR-012） | 有了 DAG 校验与运行记录，画布是纯前端工作 |
 
@@ -215,6 +220,8 @@ UI 造起来便宜了 → UI 不再是护城河
 
 | **`sandbox: none`（降级）+ `type: path` 参数不相容** | 参数值是**沙箱路径**（如 `/data/ref`），而降级模式没有 mount namespace，宿主上没有这个路径 —— 工具直接报 `ls: cannot access '/data/ref'`。工作区/home 在降级时会换成宿主路径（`PathView`），但 storage 路径没有这条映射。**要么用 `sandbox: bwrap` 跑带 storage 的工具，要么先修 `PathView.Env` 把 storage 参数也翻成宿主路径**（2026-09-22 用 MCP 端到端验证时发现，未修） |
 | **MCP 端点上 session cookie 不是凭据**（别把浏览器那套搬过来） | `/mcp` 只认 `Authorization: Bearer <agent token>`：程序没有浏览器，混用会让「谁在调用」变得不可审计；工具自建的 UI 想用只读数据，就签发自己的 token（`srcos_read_file` 那套范围是现成的只读后端） |
+
+| **并发第一次上线就暴露了两个真 bug**（2026-09-22，流程并发） | ① `sandbox.BwrapProbe` 的缓存是裸 `done bool`：第二个并发调用者看到 `done=true` 但结果还没写，于是拿到 **空 path + 空 why** → `BuildInner` 造出 `errors.New("")` → 实例记录成 `failed`、error 为空（"state failed"），完全查不出原因。修法：`sync.Once` + 失败时绝不允许空消息（`why` 为空也要给一句）。**教训：空消息的错误是最坏的失败模式** ② 任务用 `systemd-run --user --scope` 启动，**scope 的名字是 systemd 生成的**，`systemctl --user stop <我们记的 ref>` 永远 "not loaded"（还被当成成功！），而降级模式下 `processHandle` 又不报 pid → 任务根本停不掉（`flow cancel` 会假装停成功）。修法：`processHandle` 也实现 `PidReporter`，任务记录 pid + starttime，停止统一走「按引用 → 回退到记录里的 pid（校验 starttime）」 |
 
 ### 4.3 契约与幂等
 
@@ -451,7 +458,7 @@ internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检�
   ├ plan.go                 样本表解析 + 展开成 (节点×样本) 的 job（参数四种来源）
   ├ layout.go               run 目录布局（/flow 内建挂载；路径由 run id 推导，无模板）
   └ record.go               运行记录（flowrun.yaml）+ .sign 逃生口
-internal/flowrun/           流程执行器：拓扑序、AND 依赖、when: always、失败即停、续跑
+internal/flowrun/           流程执行器：并发窗口、AND 依赖、when: always、重试+退避、取消、配额、续跑
 internal/activity/          write-behind 时间戳日志（token 使用时间 / 服务活跃时间共用）
 internal/runtime/usage.go   资源快照（systemd cgroup / /proc）—— UnitSampler 后端接口
 internal/rate/              令牌桶限速（登录 + 带宽）
@@ -497,13 +504,13 @@ scripts/probe-env.sh        无 root 环境探测
 ## 10. 重开会话时的第一句话建议
 
 ```
-读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 7 项
-（Phase 4 收尾：并发上限、自动重试+退避、flow cancel）或第 8 项（MCP 第二期 submit scope）开始。
+读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 8 项
+（MCP 第二期：submit / run_flow / cancel，需先定 submit scope 粒度）或第 9 项（管理端画布）开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。
 如果要**换方向**，先说清要改哪一条不变式（`AGENTS.md`）或哪一条 ADR，
 因为按仓库约定，架构回退必须先改文档再改代码。
 
-> 上一轮（Phase 4 主体：流程跑起来）的收尾：`make vet && go test ./... -race` 全绿；
-> 端到端验证见 §2.2 的「流程跑起来」行。
+> 上一轮（Phase 4 收尾：并发/重试/取消/配额）的收尾：`make vet && go test ./... -race` 全绿；
+> 端到端验证见 §2.2 的「流程的并发/重试/取消/配额」行。
