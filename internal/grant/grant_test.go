@@ -398,3 +398,33 @@ func TestSnapshotIsIndependent(t *testing.T) {
 		t.Fatalf("live policy = %v", got)
 	}
 }
+
+// A reload must land on the policy every holder already has: the API handlers,
+// the page renderer and the read model all keep the same pointer.
+func TestReplaceWithKeepsThePointerStable(t *testing.T) {
+	live, err := New(nil, []string{"root"}, []Grant{{Tool: "demo", Public: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := live // whatever else captured it at startup
+
+	fresh, err := New(map[string][]string{"bio": {"alice"}}, []string{"root", "ops"},
+		[]Grant{{Tool: "demo", Groups: []string{"bio"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.ReplaceWith(fresh)
+
+	if !holder.Allowed("alice", "demo") {
+		t.Fatal("the old holder must see the new policy")
+	}
+	if holder.Allowed("stranger", "demo") {
+		t.Fatal("public must have been dropped")
+	}
+	if !holder.IsAdmin("ops") {
+		t.Fatal("admins must have been replaced")
+	}
+	if len(holder.GroupsOf("alice")) != 1 {
+		t.Fatalf("groups = %v", holder.GroupNames())
+	}
+}

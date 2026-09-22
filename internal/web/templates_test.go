@@ -59,7 +59,7 @@ func TestDashboardCardLetterUsesFirstRune(t *testing.T) {
 		{ID: "s1", Name: "阿凡达", Host: "127.0.0.1", Port: 1, Path: "/s1"},
 		{ID: "s2", Name: "Jupyter", Host: "127.0.0.1", Port: 1, Path: "/s2"},
 	}
-	page := DashboardPage("SRCOS", "alice", svcs, true, false)
+	page := DashboardPage("SRCOS", "alice", svcs, true, false, false)
 
 	if !utf8.ValidString(page) {
 		t.Fatal("dashboard page contains invalid UTF-8")
@@ -79,7 +79,7 @@ func TestDashboardCardLetterUsesFirstRune(t *testing.T) {
 // browser tab title, and must be HTML-escaped against injection.
 func TestDashboardPageCustomTitle(t *testing.T) {
 	svcs := []config.ServiceConfig{{ID: "s1", Name: "App", Host: "127.0.0.1", Port: 1, Path: "/app"}}
-	page := DashboardPage("🧬 生信分析平台", "alice", svcs, true, false)
+	page := DashboardPage("🧬 生信分析平台", "alice", svcs, true, false, false)
 
 	if !strings.Contains(page, "<h1>🧬 生信分析平台</h1>") {
 		t.Fatal("custom title missing from dashboard header")
@@ -89,7 +89,7 @@ func TestDashboardPageCustomTitle(t *testing.T) {
 	}
 
 	// Hostile titles must be escaped, not injected into the DOM.
-	page = DashboardPage(`x</h1><script>alert(1)</script>`, "alice", svcs, true, false)
+	page = DashboardPage(`x</h1><script>alert(1)</script>`, "alice", svcs, true, false, false)
 	if strings.Contains(page, "</h1><script>") {
 		t.Fatal("title not HTML-escaped")
 	}
@@ -101,7 +101,7 @@ func TestDashboardPageRateBadge(t *testing.T) {
 	svcs := []config.ServiceConfig{
 		{ID: "s1", Name: "App", Host: "127.0.0.1", Port: 1, Path: "/app", BWLimit: 10 << 20},
 	}
-	page := DashboardPage("SRCOS", "alice", svcs, true, false)
+	page := DashboardPage("SRCOS", "alice", svcs, true, false, false)
 	if !strings.Contains(page, `class="badge rate"`) || !strings.Contains(page, "限速 10.0 MB/s") {
 		t.Fatal("rate badge missing from server-rendered card")
 	}
@@ -114,7 +114,7 @@ func TestDashboardCardFaviconCandidates(t *testing.T) {
 	svcs := []config.ServiceConfig{
 		{ID: "s1", Name: "App", Host: "127.0.0.1", Port: 1, Path: "/app"},
 	}
-	page := DashboardPage("SRCOS", "alice", svcs, true, false)
+	page := DashboardPage("SRCOS", "alice", svcs, true, false, false)
 
 	for _, want := range []string{
 		"/proxy/alice/app/favicon.ico",

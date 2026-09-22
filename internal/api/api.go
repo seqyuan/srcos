@@ -13,6 +13,7 @@ import (
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
+	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -53,6 +54,16 @@ type Options struct {
 	// (agents, MCP clients) rather than browsers (ADR-019). Nil means token
 	// authentication is not wired and only session cookies are accepted.
 	AgentTokens *agenttoken.Store
+	// Policy is the authorization policy. Nil disables the management surface
+	// (/api/admin/*): an admin is someone the policy says is one, so without a
+	// policy there is no one to authorize.
+	Policy *grant.Policy
+	// PolicyPath is where the policy is persisted when the management surface
+	// edits it. Empty means "edit in memory only", which is what a test wants.
+	PolicyPath string
+	// Runner is the supervisor, used by the management surface to stop any
+	// user's instance and to sample what it is using.
+	Runner *runtime.Runner
 }
 
 // Handler handles REST API requests for service management.
@@ -81,6 +92,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	path := r.URL.Path
 
 	// Only handle known API routes
+	// The management surface is handled first: it is admin-only, and its routes
+	// would otherwise be claimed by the generic /api/jobs-style dispatch below.
+	if strings.HasPrefix(path, "/api/admin/") || path == "/api/admin" {
+		// CSRF guard for cookie-authenticated writes happens below with every
+		// other API route (the check is shared, not repeated per surface).
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !auth.SameOriginRequest(r) &&
+			!agenttoken.HasBearerCredentials(r) {
+			writeJSON(w, 403, map[string]string{"error": "cross-origin request rejected"})
+			return true
+		}
+		return h.adminHandler(w, r)
+	}
+
 	isAPI := path == "/api/services" ||
 		path == "/api/services/layout" ||
 		strings.HasPrefix(path, "/api/services/") ||

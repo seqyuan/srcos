@@ -4,11 +4,13 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -46,6 +48,40 @@ func (s *Server) reconcile() {
 		}
 	}
 	s.syncRoutes()
+}
+
+// reloadPolicyIfChanged re-reads grants.yaml when its modification time moved.
+//
+// It exists so the two ways an operator edits authorization behave the same:
+// through the console (mutated in place, effective immediately) and by hand
+// (`vim config/grants.yaml`, which used to need a restart). The reload replaces
+// the live policy's contents in place, so every holder keeps working.
+func (s *Server) reloadPolicyIfChanged() {
+	policy, ok := s.grants.(*grant.Policy)
+	if !ok || s.grantsPath == "" {
+		return
+	}
+	info, err := os.Stat(s.grantsPath)
+	if err != nil {
+		return
+	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if !info.ModTime().After(s.policyMtime) {
+		return
+	}
+	fresh, err := grant.Load(s.grantsPath)
+	if err != nil {
+		log.Printf("[srcos] grants.yaml: %v (keeping the policy in memory)", err)
+		// Remember the attempt so a broken file is reported once, not on every
+		// scan tick.
+		s.policyMtime = info.ModTime()
+		return
+	}
+	s.policyMtime = info.ModTime()
+	policy.ReplaceWith(fresh)
+	log.Printf("[srcos] authorization policy reloaded from %s (admins %v, %d grant(s))",
+		s.grantsPath, fresh.Admins, len(fresh.Grants))
 }
 
 // reapServices enforces the lifecycle ceilings once and reports what it stopped

@@ -419,6 +419,8 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
 | `/api/jobs` | 任务提交与状态列表 |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
+| `/admin` | **管理控制台**（仅管理员：实例总览 / 强制停止 / 授权管理） |
+| `/api/admin`、`/api/admin/*` | 管理 API（仅管理员；控制台调用它，也可脚本化） |
 | `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
 | `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单 |
 | `/proxy/*` | 服务代理前缀（静态卡片与服务实例路由共用；见「服务实例的动态路由」） |
@@ -781,6 +783,33 @@ PY
   已声明 storage 的沙箱路径。路径穿越、symlink 逃逸、宿主路径、`/tool/...` 一律拒绝。
 - **每次调用写一行审计日志**（用户 / token / 方法 / 工具名），撤销 token 后立即失效。
 - 第二期（`submit` / `cancel` / `run_flow`）需要独立签发的 `submit` scope —— 现在明确不可签发。
+
+## 管理控制台（`/admin`，仅管理员）
+
+管理员在仪表盘右上角会看到一个「管理」入口，打开 `/admin`：
+
+- **实例总览（全部用户）**：状态、端点/路由、启动时间、声明产物、限额与沙箱，以及**资源占用快照**
+  （systemd cgroup 的 CPU/内存计数；无 user systemd 时读 `/proc`），日志可展开。
+- **强制停止**：任何用户的实例都可以停（实例所有者不会收到确认请求），用的是与回收器同一个
+  `StopService`，所以记录与用户看到的状态保持一致。
+- **工具与授权**：每个工具当前「谁能用」、配额，并提供内联编辑器（用户 / 组 / public / 配额）；
+  「删除授权」等于**下架**（默认拒绝 → 只有管理员还能看到）。
+- **用户与组**：组是授权的最小单位；管理员列表可增删（不允许清空到 0：那等于把自己锁在外面）。
+
+授权改动**立即生效**（在运行中的网关上原地改写策略，不重启）；手工 `vim config/grants.yaml`
+也会在下一个扫描周期（10 秒）内生效 —— 坏文件只会被记进日志，内存里的策略不变（不会突然全放行或全拒绝）。
+
+对应的管理 API（同样只认管理员，会校验 `Origin`）：
+
+```bash
+curl -b cj http://gw:30152/api/admin/instances                 # 全部实例 + 资源快照
+curl -b cj http://gw:30152/api/admin/tools                     # 工具 + 授权状态
+curl -b cj -X PUT -H 'Content-Type: application/json' \
+  -d '{"groups":["bio-team"],"maxCpu":16,"maxMemory":"64Gi"}' \
+  http://gw:30152/api/admin/grants/cellranger                   # 等价于 srcos grant set
+curl -b cj -X POST http://gw:30152/api/admin/instances/<id>/stop # 等价于 srcos svc stop（可跨用户）
+curl -b cj http://gw:30152/api/admin/instances/<id>/logs?tail=200
+```
 
 ### 工具开发者
 

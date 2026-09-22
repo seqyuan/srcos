@@ -86,6 +86,37 @@ func (p *Policy) Snapshot() *Policy {
 	return out
 }
 
+// ReplaceWith copies another policy's contents into this one, in place.
+//
+// In place, because the pointers already handed out must keep working: the API
+// handlers, the page renderer and the read model all hold *this* policy, and a
+// swap elsewhere would leave them answering from the old one. It is how a
+// hand-edited grants.yaml takes effect without a restart.
+func (p *Policy) ReplaceWith(other *Policy) {
+	if p == nil || other == nil || p == other {
+		return
+	}
+	other.mu.RLock()
+	groups := make(map[string][]string, len(other.Groups))
+	for name, members := range other.Groups {
+		groups[name] = append([]string(nil), members...)
+	}
+	admins := append([]string(nil), other.Admins...)
+	grants := make([]Grant, 0, len(other.Grants))
+	for _, g := range other.Grants {
+		grants = append(grants, g.clone())
+	}
+	defaultAllow := other.DefaultAllow
+	other.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Groups = groups
+	p.Admins = admins
+	p.Grants = grants
+	p.DefaultAllow = defaultAllow
+}
+
 // clone copies a grant, so a snapshot never shares a slice with the live policy.
 func (g Grant) clone() Grant {
 	out := g
@@ -95,21 +126,25 @@ func (g Grant) clone() Grant {
 }
 
 // Grant is one positive access statement.
+//
+// The json tags mirror the yaml ones in camelCase: the management API serves
+// this structure, and a wire format that leaked Go field names (`MaxCPU`) would
+// be a second, accidental contract.
 type Grant struct {
 	// Tool is a tool id. A single "*" entry applies to every tool that no more
 	// specific grant mentions, which is the escape hatch for "this deployment
 	// publishes its tools to all staff".
-	Tool string `yaml:"tool"`
+	Tool string `yaml:"tool" json:"tool"`
 
-	Users  []string `yaml:"users,omitempty"`
-	Groups []string `yaml:"groups,omitempty"`
+	Users  []string `yaml:"users,omitempty" json:"users,omitempty"`
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 	// Public grants access to every authenticated user.
-	Public bool `yaml:"public,omitempty"`
+	Public bool `yaml:"public,omitempty" json:"public,omitempty"`
 
 	// Quota is this grant's own ceiling. It is applied *in addition to* the
 	// tool's declared resources, so a user can never exceed what the tool is
 	// willing to run with, and may be given less.
-	Quota Quota `yaml:"quota,omitempty"`
+	Quota Quota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
 // Quota is a ceiling on one user's use of one tool.
@@ -118,9 +153,9 @@ type Grant struct {
 // from filling the machine by starting many instances of a small tool; the
 // per-instance limits live in the tool's own `resources`.
 type Quota struct {
-	MaxCPU       int    `yaml:"max_cpu,omitempty"`
-	MaxMemory    string `yaml:"max_memory,omitempty"`
-	MaxInstances int    `yaml:"max_instances,omitempty"`
+	MaxCPU       int    `yaml:"max_cpu,omitempty" json:"maxCpu,omitempty"`
+	MaxMemory    string `yaml:"max_memory,omitempty" json:"maxMemory,omitempty"`
+	MaxInstances int    `yaml:"max_instances,omitempty" json:"maxInstances,omitempty"`
 }
 
 // IsZero reports whether the quota constrains nothing.

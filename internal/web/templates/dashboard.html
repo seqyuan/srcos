@@ -28,6 +28,19 @@
     min-width: 0;
   }
   .header-actions { display: flex; gap: 8px; align-items: center; }
+  .admin-link {
+    height: 40px;
+    padding: 0 16px;
+    border-radius: var(--r-pill);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 550;
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+  }
+  .admin-link:hover { background: var(--hover); text-decoration: none; }
   .logout-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -305,6 +318,7 @@
 <header class="header">
   <h1>%s</h1>
   <div class="header-actions">
+    %s
     <button type="button" class="add-btn" id="fab-add" title="添加服务">+</button>
     <button type="button" class="theme-btn" id="theme-toggle" onclick="toggleTheme()">🌙</button>
     <a href="/logout" class="logout-btn">退出</a>

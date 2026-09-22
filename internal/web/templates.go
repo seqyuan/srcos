@@ -32,6 +32,9 @@ var twofaSetupTpl string
 //go:embed templates/service_status.html
 var serviceStatusTpl string
 
+//go:embed templates/admin.html
+var adminTpl string
+
 //go:embed templates/script.js
 var dashboardScript string
 
@@ -97,7 +100,7 @@ func LoginPage(siteTitle, errorMsg, next string) string {
 	return PageShell(siteTitle, "登录", body)
 }
 
-func DashboardPage(siteTitle, username string, services []config.ServiceConfig, writable, twoFAEnabled bool) string {
+func DashboardPage(siteTitle, username string, services []config.ServiceConfig, writable, twoFAEnabled, admin bool) string {
 	grouped := config.GroupServicesByCategory(services)
 	bootJSON := marshalScriptJSON(dashboardBoot{
 		Username: username,
@@ -126,8 +129,16 @@ func DashboardPage(siteTitle, username string, services []config.ServiceConfig, 
 		hintText += ` 两步验证未开启 · <a href="/2fa/setup">开启</a>`
 	}
 
+	// The console link is rendered only for admins: the page itself redirects
+	// non-admins, but a link nobody can follow is just noise.
+	adminLink := ""
+	if admin {
+		adminLink = `<a class="admin-link" href="/admin">管理</a>`
+	}
+
 	body := fmt.Sprintf(dashboardTpl,
 		esc(siteTitle),
+		adminLink,
 		readOnlyClass,
 		hintText,
 		categoriesHTML,

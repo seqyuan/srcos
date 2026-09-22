@@ -87,13 +87,12 @@
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 21 个包 / 约 2.9 万行 / 约 440 个测试用例 / 40 个测试文件，`go vet` + `go test` 全绿
+- 21 个包 / 约 3.1 万行 / 约 460 个测试用例 / 43 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
 - 流程编排（`Flow` / `FlowRun`）—— Phase 4
 - ~~MCP Server（`/mcp`，read-only）~~ —— ✅ 完成（Phase 3.5）
-- 管理端页面（上架 / 授权 / 实例总览 / 强制停止）
 - ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - 授权变更热加载（改 `grants.yaml` 需重启）
@@ -103,8 +102,8 @@
 
 ### 2.3 下一步
 
-Phase 3.5（MCP）、代理层的动态路由、冷启动体验与自动回收都已完成。
-下一步见 §6 与 [`handoff.md`](handoff.md) §3：**管理端页面**（上架/授权/实例总览/强制停止）。
+Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端都已完成。
+下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Flow 编排**（Phase 4，需先写 `docs/flow-spec.md`）。
 
 ---
 
@@ -673,6 +672,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `idleTTL` 改为按**流量**判定（代理写 `data/service-activity.yaml`，`Reaper.LastActive` 读），
       并接了真实的 WebSocket 计数（`proxy.ActiveConns`）—— 修掉了「记录里只有启动时间，
       所以 idleTTL 实际是"启动多久"」这个会误杀在用的服务的缺陷
+- [ ] storage 声明的管理端编辑（目前 `storages.yaml` 只有 CLI/手写；只读展示已在 MCP `srcos_list_storages`）
 - [ ] 端口/路由的持久化审计
 - [ ] prlimit 路径下的 RSS 看门狗（RLIMIT 无法表达"每单元进程数"，见 ADR-014 新增说明）
 
@@ -687,8 +687,12 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）：
       `internal/agenttoken`（创建/校验/撤销/失败关闭 + 使用时间）+ `srcos token create|list|revoke` +
       HTTP 面 `Authorization: Bearer`（第一期只读：写接口需预留的 `submit` scope，现不可签发）+ 审计日志行
-- [ ] 管理端页面：工具上架/下架/授权、storage 声明、实例总览（CPU/内存实时采样、日志、强制停止）
-- [ ] 授权变更的热加载（现在改 `grants.yaml` 需重启）
+- [x] **管理端页面**（2026-09-22）：`/admin` —— 实例总览（全部用户 + CPU/内存快照 + 日志）、
+      强制停止（走 `StopService`）、工具/授权内联编辑（增删用户/组/public/配额，"删除授权" = 下架）、
+      组与管理员管理；配套 `/api/admin/*`（仅管理员 + Origin 校验）
+- [x] **授权变更的热加载**（2026-09-22）：`grant.Policy` 线程安全并支持原地 `ReplaceWith` ——
+      管理端/API 的改动立即生效；手工 `vim grants.yaml` 在下一个扫描周期（10s）内生效，
+      坏文件只记日志、内存策略不变
 - [ ] 审计日志（含 agent token 调用）
 - [ ] `storages.yaml` 的 rw 配额
 
@@ -799,3 +803,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **Phase 3.5 完成：MCP Server（read-only）** —— `internal/mcp`（Streamable HTTP 无状态端点 /mcp、协议版本协商、JSON-RPC 错误分层、审计日志）+ `internal/inspect`（只读答案的唯一实现，REST API / HTML 页面 / MCP 三前端共用）+ `tool.Interface.JSONSchema()`（ADR-018 的第一处派生）+ 9 个只读工具（`srcos_` 前缀）；用官方 Python MCP SDK 客户端端到端验证；README 增补 MCP 章节与保留路径 |
 | 2026-09-22 | **代理层接入动态路由表** —— 网关从实例记录重建路由表（启动同步 / 扫描同步 / 按需读记录），`/proxy/<user>/<tool>/` 可达；实例优先于静态卡片；`route.ParseTarget` 把「端点必须回环」变成单一入口（记录被手改也进不了表）；拨号失败即丢弃路由（`svc stop` 在另一进程执行时表现为 502 后 404）；裸路径 / Referer / 路由 cookie 三处解析统一走 `matchRouteForUser` |
 | 2026-09-22 | **冷启动体验 + 自动回收**：`internal/activity`（write-behind 时间戳日志，agenttoken.Usage 改为它的薄封装）+ `Reaper.LastActive` + 网关写 `data/service-activity.yaml`（修掉 idleTTL 只看启动时间的缺陷，否则会回收正在使用的服务）+ `proxy.ActiveConns`（真实 WebSocket 计数）+ 网关启动 reconcile / 扫描 tick 自动 reap + 「启动中」进度页与失败说明页 |
+| 2026-09-22 | **管理端**：`grant.Policy` 线程安全 + `ReplaceWith`（授权热加载）；`runtime.UnitUsage`/`UnitSampler`（systemd cgroup 或 /proc 的资源快照）+ `inspect.AdminInstances/AdminTools`（管理视图与只读模型共用）；`/api/admin/*`（实例总览/强制停止/日志/工具授权/组/管理员，仅管理员 + Origin 校验）；`/admin` 控制台（服务端渲染 + 少量 JS 动作）+ 仪表盘入口 |

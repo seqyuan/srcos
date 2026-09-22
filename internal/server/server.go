@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -67,6 +68,11 @@ type Server struct {
 	// reclaims the ones whose lifetime is over. Nil means this process only
 	// serves (a read-only or single-purpose deployment).
 	runner *runtime.Runner
+	// grantsPath is where the authorization policy lives, watched for hand
+	// edits; policyMtime is the last version read (guarded by policyMu).
+	grantsPath  string
+	policyMtime time.Time
+	policyMu    sync.Mutex
 	// reaper enforces the tool's lifecycle ceilings via the same runner.
 	reaper *runtime.Reaper
 }
@@ -208,12 +214,20 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		log.Printf("[srcos] %d agent token(s) loaded (Authorization: Bearer)", n)
 	}
 
+	// The management surface needs the *concrete* policy (it mutates it) and the
+	// supervisor (it stops instances); a substituted GrantChecker leaves it
+	// disabled rather than half-working.
+	policy, _ := grants.(*grant.Policy)
+
 	apiOpts := api.Options{
 		ConfigDir:   configDir,
 		ToolsDir:    toolsDir,
 		Storages:    storages,
 		Grants:      grants,
 		AgentTokens: agentTokens,
+		Policy:      policy,
+		PolicyPath:  config.GrantsPath(configDir),
+		Runner:      opts.Supervisor,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},
@@ -245,6 +259,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 			MaxIdleConnsPerHost:   10,
 		},
 		routes:          routes,
+		grantsPath:      config.GrantsPath(configDir),
 		serviceActivity: serviceActivity,
 		activeConns:     proxy.NewActiveConns(),
 		runner:          opts.Supervisor,
@@ -441,7 +456,7 @@ func (s *Server) Handler() http.Handler {
 	// Tool/storage API. Registered as exact paths, like /api/services, so a
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
 	// These four are now reserved gateway paths (README「保留路径」).
-	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs"} {
+	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/admin", "/api/admin/"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
 			if s.apiHandler.ServeHTTP(w, r) {
 				return
@@ -457,6 +472,10 @@ func (s *Server) Handler() http.Handler {
 	// Tool catalogue and the generated fallback form (ADR-017).
 	mux.HandleFunc("/tools", s.handleToolsPage)
 	mux.HandleFunc("/tools/", s.handleToolFormPage)
+
+	// The management console (admins only; non-admins are redirected, not shown
+	// a bare 403, because the page is not a secret).
+	mux.HandleFunc("/admin", s.handleAdminPage)
 
 	// Root route (dashboard/login page)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -626,7 +645,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			writable = config.IsWritable(user.ConfigPath)
 			twoFAEnabled = user.Config.Auth.TOTPSecret != ""
 		}
-		sendHTML(w, 200, web.DashboardPage(s.siteTitle, session.UserID, services, writable, twoFAEnabled))
+		admin := false
+		if policy, ok := s.grants.(*grant.Policy); ok {
+			admin = policy.IsAdmin(session.UserID)
+		}
+		sendHTML(w, 200, web.DashboardPage(s.siteTitle, session.UserID, services, writable, twoFAEnabled, admin))
 	} else {
 		sendHTML(w, 200, web.LoginPage(s.siteTitle, "", ""))
 	}
@@ -1239,6 +1262,8 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// service started or stopped by the CLI (another process) becomes
 			// reachable or unreachable within one tick.
 			s.syncRoutes()
+			// A hand-edited grants.yaml takes effect here, without a restart.
+			s.reloadPolicyIfChanged()
 			// Enforce the lifecycle ceilings (idleTTL / maxLifetime). Idle
 			// means "no traffic", which is why the reaper is given the proxy's
 			// observations rather than the record's start time.
@@ -1289,6 +1314,50 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleAdminPage renders the management console.
+//
+// The page's data comes from the same read model the API serves (inspect), so
+// the console and the API cannot disagree — and the console works with
+// JavaScript disabled, because the tables are rendered here.
+func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/admin" && r.URL.Path != "/admin/" {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	policy, _ := s.grants.(*grant.Policy)
+	if policy == nil || !policy.IsAdmin(username) {
+		// Not a secret, just not theirs: the dashboard is the honest answer.
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	var sampler inspect.UsageSampler
+	if s.runner != nil {
+		sampler = s.runner
+	}
+	instances, err := s.reader().AdminInstances(r.Context(), sampler)
+	if err != nil {
+		log.Printf("[srcos] admin: %v", err)
+	}
+	tools, terr := s.reader().AdminTools(policy)
+	if terr != nil {
+		log.Printf("[srcos] admin: %v", terr)
+	}
+	snapshot := policy.Snapshot()
+
+	sendHTML(w, 200, web.AdminPage(s.siteTitle, username, web.AdminData{
+		Instances:    instances,
+		Tools:        tools,
+		Admins:       snapshot.Admins,
+		Groups:       snapshot.Groups,
+		DefaultAllow: snapshot.DefaultAllow,
+	}))
 }
 
 // mcpHandler is the gateway's MCP endpoint: the read-only platform surface an
