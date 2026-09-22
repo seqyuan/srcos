@@ -54,49 +54,57 @@
 
 ## 2. 现状
 
+> **重开会话先读 [`handoff.md`](handoff.md)** —— 它是会话交接简报（目标 / 已验证事实 / 下一步 /
+> 已踩的坑 / 代码地图 / 环境事实）。本节只记"做到哪了"，不重复那份简报。
+
 ### 2.1 已完成
 
-- [x] **多用户认证反向代理网关**（继承自 goprox，功能完整）
-  - 多用户共享端口，路径前缀隔离：`/proxy/<用户>/<服务路径>/`
-  - bcrypt 密码 + 可选 TOTP 两步验证 + 登录限速
-  - 轻量 SSO（身份头 + HMAC-SHA256 签名）
-  - 原生 TLS（自签或自有证书）/ 可信反代 / Cloudflare 隧道
-  - HTML `<base>` 注入、`crypto.randomUUID` polyfill、`Location` 改写
-  - WebSocket/SSE 透传、per-service 带宽限制（`bwlimit`）
-  - `backend_path` 三种映射形态、`default_service` 根路径托管、Referer/路由 cookie 兜底转发
-  - 管理 API 的 CSRF（Origin）校验、`SafeDialContext` 防 SSRF/自环
-- [x] **重命名为 srcos**（2026-09-22）：`go.mod` → `github.com/seqyuan/srcos`，CLI/日志/配置文件名/cookie 名/SSO 前缀全部改名
-- [x] **删除 `site/` 静态文档站**；其中 `tunnel` 与 `dsh-demo` 两篇正文已转为 `docs/tunnel.md`、`docs/dsh-demo.md`
-- [x] **建立 git 仓库**，首次提交
-- [x] 基线校验：`go build` / `go vet` / `go test ./...` 全绿（8 个包）
-- [x] 建立 `AGENTS.md`（不变式与定位）
-- [x] 确定产品定位：AI 平台的确定性执行后端（ADR-017）
-- [x] 调研 deepseek-harness 的插件装配边界，定下 dsh 三层集成策略（ADR-016）
-- [x] 定下「一份 interface 三个前端」「能力即 provider」「OS 用户 ≠ SRCOS 用户」三条架构原则
-      （ADR-018 / ADR-020 / ADR-021）
-- [x] 新增 `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（探测记录）
-- [x] **node01 环境探测完成**（2026-09-22）—— 关键结论：
-      - `bwrap` 当前**不可用**（Ubuntu 24.04 的 `apparmor_restrict_unprivileged_userns=1`），
-        但免密 sudo 可用，一行命令（AppArmor profile）即可修好
-      - `systemd-run --user --scope` **完全可用**（CPUQuota/MemoryMax/TasksMax 均接受）+ Linger=yes
-        → ADR-014 的**首选**资源限制通道成立，无需降级
-      - 数据盘全是 **ext4（非 XFS）** → 配额方案要改（不能用 XFS project quota）
-      - **node01 不是 SGE 登录节点**（无 qsub/qstat）→ `backend: sge` 环境待探测
-      - **node01 上已在跑 dsh(3080) / shiny-server(3838) / RStudio(8787)**
-        → SRCOS 想接管的三个目标工具已在运行，第一个真实用例可直接用现状验证
-      - 免密 sudo + docker 组 → 「不用 root」是**架构偏好**而非环境限制（ADR-014 前提待确认）
+**网关层**（继承自 goprox，功能完整）
 
-### 2.2 进行中
+- 多用户共享端口、路径前缀隔离 `/proxy/<用户>/<服务路径>/`
+- bcrypt 密码 + 可选 TOTP + 登录限速；轻量 SSO（身份头 + HMAC 签名）
+- 原生 TLS / 可信反代 / Cloudflare 隧道；HTML `<base>` 注入 + `crypto.randomUUID` polyfill
+- WebSocket/SSE 透传、per-service 带宽限制、`backend_path` 三种映射、`default_service` 根路径托管
+- 管理 API 的 CSRF 校验、`SafeDialContext` 防 SSRF/自环
 
-- [ ] 无
+**平台层**（本次新增，见 §6 的 Phase 进度）
 
-### 2.3 下一步（Phase 1）
+- 工具契约：`tool.yaml` + 13 类注册期校验 + **机器可读 `interface`**（ADR-008/018）
+- 任务契约：`job.json` + **目录即队列** + 对工具的校验（参数子集、资源只能降、`doneWhen`）
+- 运行时：`Backend`/`Handle` 抽象；`local`（bwrap 沙箱 + `systemd-run --user` 限额，`prlimit` 兜底）
+  与 `sge`（qsub 翻译 / `qstat -xml` 解析 / rendezvous / `ssh -L`）两个 backend
+- 生命周期：`RunTask` / `StartService` / `StopService` / `Reconcile` / `Reaper`
+- 存储：`StorageProvider`（ADR-020 闭环：path 范围 == 已挂载 storage == `requires_storages`）
+- 路由与端口：动态路由表（非回环拒绝、归属栅栏）+ loopback 端口池（真 bind 探测）
+- 授权：`Grant`（**默认拒绝**、只有「允许」没有 deny、组/用户/public/通配、**聚合配额**）
+- HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`、`/tools`、`/tools/<id>`、`/assets/*`
+- 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
+- CLI：`tool` / `job` / `svc` / `grant` / `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
 
-见 §6。已确认的三项方向决策：
+**工程基线**
 
-1. **先做 B（`srcos://` 协议 + REST/SSE + dsh 插件），再做 A（iframe 嵌入 dsh 实例）** —— B 是 A 的前置
-2. **MCP Server 排在 Phase 3.5** —— 早于云流程，因为它只依赖 `interface` 与 API，是「现代化」的招牌
-3. **OS 用户与 SRCOS 注册用户是两个概念** —— 注册用户需要构造虚拟 home 与虚拟 workspace（ADR-021）
+- 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
+- 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
+- `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
+- 17 个包 / 约 2.1 万行 / 250 个测试用例 / 26 个测试文件，`go vet` + `go test` 全绿
+
+### 2.2 尚未实现（**不要误以为有**）
+
+- 流程编排（`Flow` / `FlowRun`）—— Phase 4
+- MCP Server 与 agent token —— Phase 3.5
+- 管理端页面（上架 / 授权 / 实例总览 / 强制停止）
+- **代理层接入动态路由表** —— 路由表已就绪且已测，但 `handleProxy` 仍只读静态卡片，
+  所以 service 实例目前只能直连 endpoint，还不能通过网关访问
+- 授权变更热加载（改 `grants.yaml` 需重启）
+- 审计日志；`storages` 的 rw 配额
+- `apptainer` sandbox；`webui/` Vite 前端包；dsh 集成（ADR-016 一步未做）
+- SGE 只在 fake runner 上测过，**从未在真登录节点运行**
+
+### 2.3 下一步
+
+见 §6 的 Phase 3.5 —— **agent token → MCP Server（read-only）**，
+其全部前置件（机器可读 `interface`、`/api/paths`、`/api/jobs`）已就绪。
+详细排序与理由见 [`handoff.md`](handoff.md) §3。
 
 ---
 
@@ -726,6 +734,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | 建立 roadmap；完成 Phase 0（重命名 srcos、删 `site/`、`git init`）；定稿 ADR-001 ~ ADR-015 |
 | 2026-09-22 | 定位固化（ADR-017）；补 ADR-011 的决定性证据；新增 ADR-016（dsh 三层集成）、ADR-018（一份 interface 三个前端）、ADR-019（MCP Server）、ADR-020（存储与路径）、ADR-021（OS 用户 vs 注册用户）；新建 `AGENTS.md`；Phase 重排（新增 3.5 MCP、5.5 dsh） |
 | 2026-09-22 | 新增 `scripts/probe-env.sh` 与 `docs/environments.md`；完成 node01 探测（bwrap 被 AppArmor 拦、systemd-run --user 可用、数据盘是 ext4、node01 非 SGE 登录节点、shiny/RStudio/dsh 已在跑）；待决策扩到 13 项 |
+| 2026-09-22 | **新增 `docs/handoff.md`（会话交接简报）** —— 目标 / 已验证事实 / 下一步 / **已踩的坑清单** / 代码地图 / 环境事实 / 验证脚本；roadmap §2 重写为准确状态并指向它；AGENTS.md 文档分工表加入 handoff 与 environments；README 增补「工具平台」章节（命令 / 配置 / 网页入口 / 工具开发者入口） |
 | 2026-09-22 | **Phase 3 主体启动**：`Grant` 授权模型（默认拒绝 / 只有允许 / 组+用户+public / 通配 / 管理员绕过 / 聚合配额）+ `srcos grant` CLI；HTTP 面补齐（工具目录、机器可读 interface、路径浏览、提交、实例列表）+ 生成式表单 + `srcos-path-picker` 原语控件；`serve --tools-dir`；修掉 `parseFlagsLoose` 的假交错解析（Go flag 遇位置参数即停止） |
 | 2026-09-22 | **Phase 2 主体完成**：`Backend`/`Handle` 抽象、`kind: service` 全链路、`StorageProvider`（`/Volumes/data`）、动态路由表、端口池、`Reconcile`、`Reaper`、`doneWhen` 探针、**SGE backend 架构**（qsub 翻译 / qstat -xml 解析含挂起区分 / rendezvous 控制通道 / ssh -L 数据通道）；新增 `internal/{storage,portpool,route}` 与 `internal/runtime/sge`；修掉 RLIMIT_NPROC 的语义错误（按 real UID 全系统计数，会连 bwrap 的 namespace 一起挡掉） |
 | 2026-09-22 | **Phase 1 完成**：`tool-spec` 契约冻结、`hello-fanout` 示例、最小运行时（tool/job/sandbox/runtime 四包 + CLI）、node01 上 `local`+`bwrap` 端到端跑通；修掉实现期暴露的四个真问题（幂等粒度、xargs 转义、工具级 default 未生效、降级模式路径与 DBUS） |

@@ -582,6 +582,74 @@ services:
 
 > **怎么判断要不要填 `backend_path`**：先留空，直接访问看能否打开；若 404 或资源路径不对，说明后端不是挂在根路径，再把它的实际前缀/入口文件填进 `backend_path`。
 
+## 工具平台（Phase 1–3）
+
+SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授权给用户，按需实例化，
+每个实例带独立 workspace、CPU/内存限额与生命周期。
+
+> **定位**：SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。
+> 设计思想与全部决策见 [`docs/roadmap.md`](docs/roadmap.md)；
+> 工具开发者要遵守的契约见 [`docs/tool-spec.md`](docs/tool-spec.md)；
+> 重开会话或接手项目先读 [`docs/handoff.md`](docs/handoff.md)。
+
+### 命令
+
+```bash
+# 工具：校验与列出（会顺带报告声明的沙箱在本机是否真的可用）
+./srcos tool validate --tools-dir srcos-tools
+./srcos tool list     --tools-dir srcos-tools
+
+# 任务：提交（写 job.json 到投递目录）→ 执行 → 查看
+./srcos job submit -d /opt/srcos/config --tools-dir srcos-tools \
+  -n "hello demo" --tool hello-fanout \
+  --param samples=S001,S002,S003 --output /workspace/out
+./srcos job run  -d /opt/srcos/config --tools-dir srcos-tools --tool hello-fanout
+./srcos job list -d /opt/srcos/config
+./srcos job logs -d /opt/srcos/config <instance-id>
+
+# 服务：长驻实例（端口池自动分配，探活通过后发布路由）
+./srcos svc start -d /opt/srcos/config --tools-dir srcos-tools --tool <service-tool>
+./srcos svc list  -d /opt/srcos/config
+./srcos svc stop  -d /opt/srcos/config --tools-dir srcos-tools --tool <service-tool>
+./srcos svc reconcile -d /opt/srcos/config   # 重启后收养仍活着的实例
+./srcos svc reap      -d /opt/srcos/config   # 按 idleTTL / maxLifetime 回收
+
+# 授权（默认拒绝：未被 grant 提到的工具对非管理员不可见）
+./srcos grant group bio-team -d /opt/srcos/config --user alice --user bob
+./srcos grant set cellranger -d /opt/srcos/config --group bio-team \
+  --max-cpu 16 --max-memory 64Gi --max-instances 3
+./srcos grant list -d /opt/srcos/config
+
+# 网关（新增 --tools-dir）
+./srcos serve -d /opt/srcos/config --tools-dir srcos-tools --port 30152
+```
+
+### 配置
+
+除原有的 `config/users/` 与 `config/state.yaml`，新增两份**管理员声明**：
+
+| 文件 | 作用 | 示例 |
+|---|---|---|
+| `config/storages.yaml` | 共享数据根（工具通过 `type: path` 参数从中选择） | [`config/storages.example.yaml`](config/storages.example.yaml) |
+| `config/grants.yaml` | 授权策略（谁可以用哪个工具、聚合配额多少） | [`config/grants.example.yaml`](config/grants.example.yaml) |
+
+### 网页入口
+
+| 路径 | 作用 |
+|---|---|
+| `/tools` | 工具目录（只列出对你授权的工具） |
+| `/tools/<工具>` | **从 `interface` 自动生成的参数表单**；路径参数用 `srcos-path-picker` 原语控件 |
+| `/assets/srcos-path-picker.js` | 原语控件本体；工具自建 UI 一行标签即可复用 |
+
+### 工具开发者
+
+工具 = **一个 `work.sh`（函数体）+ 一份 `interface`（类型签名）+ 一份 `tool.yaml`（执行约束）**。
+SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构。最小示例见
+[`srcos-tools/hello-fanout/`](srcos-tools/hello-fanout)，完整契约见 [`docs/tool-spec.md`](docs/tool-spec.md)。
+
+只交付 `work.sh` + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
+想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。
+
 ## License
 
 MIT
