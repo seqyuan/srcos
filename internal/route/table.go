@@ -32,6 +32,28 @@ type Target struct {
 // String renders host:port for dialing.
 func (t Target) String() string { return net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) }
 
+// ParseTarget reads a stored endpoint ("127.0.0.1:20000") into a Target.
+//
+// It exists so a caller never parses an endpoint by hand. A stored endpoint is a
+// value read back from a file on disk (the instance record), and a hand-edited
+// one must not be able to point a route at a public address: the loopback rule
+// is checked here and again in Put, because this is the one place the value can
+// enter the table.
+func ParseTarget(endpoint string) (Target, error) {
+	host, portStr, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return Target{}, fmt.Errorf("endpoint %q is not host:port: %w", endpoint, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return Target{}, fmt.Errorf("endpoint %q has an invalid port", endpoint)
+	}
+	if !isLoopback(host) {
+		return Target{}, fmt.Errorf("endpoint %q is not a loopback address: service instances listen on 127.0.0.1 only", endpoint)
+	}
+	return Target{Host: host, Port: port}, nil
+}
+
 // Entry is one dynamic route.
 type Entry struct {
 	User       string

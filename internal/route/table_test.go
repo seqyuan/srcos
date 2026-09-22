@@ -232,3 +232,41 @@ func TestConcurrentPutGetDelete(t *testing.T) {
 	}
 	<-done
 }
+
+// A stored endpoint is read back from a file (the instance record), so parsing
+// it is a security boundary: a hand-edited record must not be able to point a
+// route at a public address or at a cloud metadata service.
+func TestParseTarget(t *testing.T) {
+	cases := map[string]struct {
+		wantHost string
+		wantPort int
+		ok       bool
+	}{
+		"127.0.0.1:20000":    {"127.0.0.1", 20000, true},
+		"localhost:8080":     {"localhost", 8080, true},
+		"[::1]:9000":         {"::1", 9000, true},
+		"10.0.0.5:80":        {"", 0, false},
+		"169.254.169.254:80": {"", 0, false},
+		"example.com:80":     {"", 0, false},
+		"127.0.0.1:0":        {"", 0, false},
+		"127.0.0.1:99999":    {"", 0, false},
+		"127.0.0.1":          {"", 0, false},
+		"":                   {"", 0, false},
+	}
+	for endpoint, want := range cases {
+		got, err := ParseTarget(endpoint)
+		if want.ok {
+			if err != nil {
+				t.Errorf("%s: %v", endpoint, err)
+				continue
+			}
+			if got.Host != want.wantHost || got.Port != want.wantPort {
+				t.Errorf("%s: got %s", endpoint, got)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s: must be refused, got %v", endpoint, got)
+		}
+	}
+}

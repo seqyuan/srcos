@@ -20,6 +20,7 @@ import (
 	"github.com/seqyuan/srcos/internal/mcp"
 	"github.com/seqyuan/srcos/internal/proxy"
 	"github.com/seqyuan/srcos/internal/rate"
+	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -49,6 +50,11 @@ type Server struct {
 	agentTokens *agenttoken.Store
 	// mcpVersion is the build version reported in MCP's initialize.
 	mcpVersion string
+	// routes is the dynamic routing table: the only coupling point between the
+	// orchestration layer (which publishes service endpoints) and this proxy
+	// layer (ADR-003). It is a cache of "what is reachable right now", rebuilt
+	// from the instance records at startup and on every scan tick.
+	routes *route.Table
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -182,7 +188,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		},
 	}
 
-	return &Server{
+	srv := &Server{
 		state:         state,
 		registry:      registry,
 		sessionSecret: state.Auth.SessionSecret,
@@ -207,7 +213,13 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 		},
+		routes: route.NewTable(),
 	}
+	// Publish the services that were already running when this process started
+	// (they were started by the CLI, in another process), so a gateway restart
+	// does not take every service instance offline.
+	srv.syncRoutes()
+	return srv
 }
 
 // currentSessionRev returns the per-account session revision derived from the
@@ -523,21 +535,6 @@ func (s *Server) findBackendService(r *http.Request, username string) *config.Se
 		return nil
 	}
 	return s.matchRouteForUser(route, username)
-}
-
-func (s *Server) matchRouteForUser(route, username string) *config.ServiceMatch {
-	match := s.registry.FindService(route)
-	if match == nil {
-		match = s.registry.FindLegacyService(route, username)
-	}
-	if match == nil {
-		return nil
-	}
-	pathUser := config.UsernameFromProxyPath(route)
-	if pathUser != "" && pathUser != username {
-		return nil
-	}
-	return match
 }
 
 func (s *Server) handleProxyEscape(w http.ResponseWriter, r *http.Request) bool {
@@ -879,6 +876,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 
+	// Instance-backed services first: a live instance beats a static card,
+	// because the card is a hand-written pointer that may be stale (package
+	// route documents the same precedence).
+	if match := s.instanceMatch(path, session.UserID); match != nil {
+		s.proxyRequest(w, r, match)
+		return
+	}
+
 	// Try multi-user path: /proxy/{user}/{service}/...
 	multiMatch := s.registry.FindService(path)
 	if multiMatch != nil {
@@ -961,6 +966,10 @@ func (s *Server) forwardToBackend(w http.ResponseWriter, r *http.Request, svc *c
 		log.Printf("[srcos] proxy error: service=%s, path=%s, error=%v", svc.ID, r.URL.Path, err)
 		switch {
 		case strings.Contains(err.Error(), "connection refused"):
+			// The instance may have been stopped by another process (the CLI);
+			// nothing tells this one except the record, so re-check before the
+			// next request rather than dialing a dead port for a whole tick.
+			s.dropDeadRoute(fc.Username, svc)
 			http.Error(w, "Service unavailable: backend not responding", http.StatusBadGateway)
 		case strings.Contains(err.Error(), "timeout"):
 			http.Error(w, "Service timeout: backend took too long to respond", http.StatusGatewayTimeout)
@@ -995,17 +1004,8 @@ func (s *Server) handleRefererProxy(w http.ResponseWriter, r *http.Request) bool
 		refPath = u.Path
 	}
 
-	match := s.registry.FindService(refPath)
+	match := s.matchRouteForUser(refPath, session.UserID)
 	if match == nil {
-		match = s.registry.FindLegacyService(refPath, session.UserID)
-	}
-	if match == nil {
-		return false
-	}
-
-	// Verify user matches
-	pathUser := config.UsernameFromProxyPath(refPath)
-	if pathUser != "" && pathUser != session.UserID {
 		return false
 	}
 
@@ -1036,16 +1036,8 @@ func (s *Server) handleRouteCookieProxy(w http.ResponseWriter, r *http.Request) 
 		w.Header().Add("Set-Cookie", cookie)
 	}
 
-	match := s.registry.FindService(route)
+	match := s.matchRouteForUser(route, session.UserID)
 	if match == nil {
-		match = s.registry.FindLegacyService(route, session.UserID)
-	}
-	if match == nil {
-		return false
-	}
-
-	pathUser := config.UsernameFromProxyPath(route)
-	if pathUser != "" && pathUser != session.UserID {
 		return false
 	}
 
@@ -1128,12 +1120,24 @@ func barePathIsPage(p string) bool {
 }
 
 func (s *Server) redirectBareService(w http.ResponseWriter, r *http.Request, username string) bool {
+	path := r.URL.Path
+	query := ""
+	if r.URL.RawQuery != "" {
+		query = "?" + r.URL.RawQuery
+	}
+
+	// Service instances first: they are live, and the same short URL should work
+	// for both kinds of service.
+	if target, ok := s.barePathRoute(path, username); ok {
+		http.Redirect(w, r, target+query, http.StatusFound)
+		return true
+	}
+
 	user := s.registry.GetUser(username)
 	if user == nil {
 		return false
 	}
 
-	path := r.URL.Path
 	var bestSvc *config.ServiceConfig
 	bestLen := -1
 	for i := range user.Config.Services {
@@ -1150,10 +1154,6 @@ func (s *Server) redirectBareService(w http.ResponseWriter, r *http.Request, use
 	}
 
 	rest := path[len(bestSvc.Path):]
-	query := ""
-	if r.URL.RawQuery != "" {
-		query = "?" + r.URL.RawQuery
-	}
 	http.Redirect(w, r, "/proxy/"+username+bestSvc.Path+rest+query, http.StatusFound)
 	return true
 }
@@ -1173,6 +1173,10 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			if after != before {
 				log.Printf("[srcos] user registry changed: %d -> %d user(s)", before, after)
 			}
+			// Keep the routing table in step with the instance records: a
+			// service started or stopped by the CLI (another process) becomes
+			// reachable or unreachable within one tick.
+			s.syncRoutes()
 		case <-stop:
 			return
 		}

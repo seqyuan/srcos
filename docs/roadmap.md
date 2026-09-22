@@ -87,15 +87,15 @@
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
 - 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 20 个包 / 约 2.7 万行 / 约 400 个测试用例 / 36 个测试文件，`go vet` + `go test` 全绿
+- 20 个包 / 约 2.8 万行 / 约 420 个测试用例 / 37 个测试文件，`go vet` + `go test` 全绿
 
 ### 2.2 尚未实现（**不要误以为有**）
 
 - 流程编排（`Flow` / `FlowRun`）—— Phase 4
 - ~~MCP Server（`/mcp`，read-only）~~ —— ✅ 完成（Phase 3.5）
 - 管理端页面（上架 / 授权 / 实例总览 / 强制停止）
-- **代理层接入动态路由表** —— 路由表已就绪且已测，但 `handleProxy` 仍只读静态卡片，
-  所以 service 实例目前只能直连 endpoint，还不能通过网关访问
+- ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
+  `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - 授权变更热加载（改 `grants.yaml` 需重启）
 - 审计日志；`storages` 的 rw 配额
 - `apptainer` sandbox；`webui/` Vite 前端包；dsh 集成（ADR-016 一步未做）
@@ -103,8 +103,8 @@
 
 ### 2.3 下一步
 
-Phase 3.5（MCP）已完成。下一步见 §6 与 [`handoff.md`](handoff.md) §3：
-**代理层接入动态路由表**（service 实例目前还不能通过网关访问）。
+Phase 3.5（MCP）与代理层的动态路由都已完成。下一步见 §6 与 [`handoff.md`](handoff.md) §3：
+**「启动中」进度页 + `svc reap` 的定时调度**（顺带把 `svc reconcile` 也纳入启动/定时流程）。
 
 ---
 
@@ -643,6 +643,11 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `Backend` / `Handle` 抽象 —— 一个原语两个 flavor（task 用 systemd scope，service 用 systemd 瞬时 unit）
 - [x] `local` backend，含 cgroup（`systemd-run --user`）与 prlimit 降级路径
 - [x] **`kind: service` 全链路**：端口池 → 物化 → 启动 → 探活 → 发布路由
+- [x] **代理层接入动态路由表**（2026-09-22）：网关从 `data/instances/` 重建路由表
+      （启动同步 + 每次扫描 + 查不到时按需读记录），`/proxy/<user>/<tool>/` 可达；
+      实例优先于静态卡片；端点必须是回环地址（记录被手改也不能指向公网）；
+      停止后第一个请求 502、随即丢弃路由（下次 404）；裸路径 / Referer / 路由 cookie 也回投到实例；
+      裸短链接 `/<tool>/...` 与静态卡片一样 302 到 `/proxy/<user>/<tool>/...`
 - [x] `StorageProvider`（ADR-020）：`storages.yaml` + Jail 复用 + `type: path` 闭环
 - [x] `internal/route` 动态路由表（非回环目标被拒；`DeleteInstance` 有归属栅栏）
 - [x] `internal/portpool` 端口池（真 bind 探测、并发安全、`Reserve` 供 reconcile）
@@ -783,3 +788,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **agent token 认证面完成（Phase 3.5 前置）** —— `internal/agenttoken`（只存 SHA-256、每次校验重读文件、失败关闭、使用时间落 `data/`）+ `srcos token create\|list\|revoke`（默认 90 天、`never`）+ `/api/*` 的 `Authorization: Bearer`（第一期只读，写接口需预留的 `submit`）+ 审计日志行 + `srcos del` 连带撤销；ADR-019 补「实现契约」小节 |
 | 2026-09-22 | **修降级模式的「停不掉」**：`StartService` 成功后丢掉活跃 Handle（`StopService` 只能按名停），无 user systemd 时服务停不了、却被标 stopped —— 表现是 `go test ./internal/runtime/` 每轮泄漏 5 个 python3（连跑 4 次耗尽测试端口池）。改为在实例记录里持久化子进程 `pid` + `starttime`，`Local.StopUnit/UnitAlive` 在降级模式用它（信号前校验 starttime 防 pid 复用）；顺带让 `Reconcile` 在降级模式也能区分活着/已死 |
 | 2026-09-22 | **Phase 3.5 完成：MCP Server（read-only）** —— `internal/mcp`（Streamable HTTP 无状态端点 /mcp、协议版本协商、JSON-RPC 错误分层、审计日志）+ `internal/inspect`（只读答案的唯一实现，REST API / HTML 页面 / MCP 三前端共用）+ `tool.Interface.JSONSchema()`（ADR-018 的第一处派生）+ 9 个只读工具（`srcos_` 前缀）；用官方 Python MCP SDK 客户端端到端验证；README 增补 MCP 章节与保留路径 |
+| 2026-09-22 | **代理层接入动态路由表** —— 网关从实例记录重建路由表（启动同步 / 扫描同步 / 按需读记录），`/proxy/<user>/<tool>/` 可达；实例优先于静态卡片；`route.ParseTarget` 把「端点必须回环」变成单一入口（记录被手改也进不了表）；拨号失败即丢弃路由（`svc stop` 在另一进程执行时表现为 502 后 404）；裸路径 / Referer / 路由 cookie 三处解析统一走 `matchRouteForUser` |
