@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -878,4 +879,132 @@ func writeFile(path string, tokens []Token) error {
 		return err
 	}
 	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// expiry
+// ─────────────────────────────────────────────────────────────────────────
+
+// ParseExpiry reads the expiry a caller typed: "never", "<n>d" / "<n>h", a bare
+// number of days, or a date / RFC3339 timestamp.
+//
+// A bare number means days because that is how people say it out loud
+// ("expires in 90"). It lives here, not in the CLI, so the command line and the
+// self-service page cannot drift on what a token's lifetime means.
+func ParseExpiry(s string, now time.Time) (time.Time, error) {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "", "never", "none", "0":
+		return time.Time{}, nil
+	}
+	if strings.HasSuffix(v, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("cannot parse expiry %q (want e.g. 90d or never)", s)
+		}
+		return now.AddDate(0, 0, n), nil
+	}
+	if strings.HasSuffix(v, "h") {
+		n, err := strconv.Atoi(strings.TrimSuffix(v, "h"))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("cannot parse expiry %q (want e.g. 12h or never)", s)
+		}
+		return now.Add(time.Duration(n) * time.Hour), nil
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return now.AddDate(0, 0, n), nil
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04", time.RFC3339} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse expiry %q (want 90d, 12h, 2026-12-21, or never)", s)
+}
+
+// View is one token as a caller sees it: the record, minus the hash, plus the
+// things a person actually asks about (when it expires, when it was last used,
+// whether it still works).
+//
+// It lives here rather than in a front-end because both of them — the CLI's
+// table, the self-service page and the REST API — must agree on what "active"
+// means; a second definition would be a second truth.
+type View struct {
+	ID     string   `json:"id"`
+	Label  string   `json:"label,omitempty"`
+	Scopes []string `json:"scopes"`
+	Tools  []string `json:"tools,omitempty"`
+	// The times are pointers so an unset one is *absent* from JSON rather than
+	// the year 1 — "never" and "the beginning of time" are not the same answer.
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	LastUsed  *time.Time `json:"lastUsed,omitempty"`
+	// Status is "active" or "expired".
+	Status string `json:"status"`
+}
+
+// View renders the token for a caller at an instant.
+func (t Token) View(now, lastUsed time.Time) View {
+	scopes := make([]string, 0, len(t.Scopes))
+	for _, s := range t.Scopes {
+		scopes = append(scopes, string(s))
+	}
+	v := View{
+		ID:     t.ID,
+		Label:  t.Label,
+		Scopes: scopes,
+		Tools:  t.SubmitTools,
+		Status: t.Status(now),
+	}
+	if !t.CreatedAt.IsZero() {
+		at := t.CreatedAt
+		v.CreatedAt = &at
+	}
+	if !t.ExpiresAt.IsZero() {
+		at := t.ExpiresAt
+		v.ExpiresAt = &at
+	}
+	if !lastUsed.IsZero() {
+		at := lastUsed
+		v.LastUsed = &at
+	}
+	return v
+}
+
+// ViewsFor renders one user's tokens, newest first.
+//
+// It exists so the REST API and the HTML page cannot disagree about what a
+// token's status or last-use is — the same reason package inspect exists for
+// tools and instances.
+func (s *Store) ViewsFor(user string, now time.Time) []View {
+	tokens := s.Tokens()
+	out := make([]View, 0, len(tokens))
+	// Newest first: the one someone looks for is usually the one just created.
+	for i := len(tokens) - 1; i >= 0; i-- {
+		t := tokens[i]
+		if t.User != user {
+			continue
+		}
+		out = append(out, t.View(now, s.LastUsed(t.ID)))
+	}
+	return out
+}
+
+// LastUsed reports when a token was last presented, or the zero time when the
+// store has no usage tracker attached (the CLI) or the token was never used.
+func (s *Store) LastUsed(id string) time.Time {
+	if s.usage == nil {
+		return time.Time{}
+	}
+	return s.usage.Last(id)
+}
+
+// KnownScopesNames lists the scopes as strings, for a front-end that renders a
+// chooser.
+func KnownScopesNames() []string {
+	out := make([]string, 0, len(KnownScopes))
+	for _, s := range KnownScopes {
+		out = append(out, string(s))
+	}
+	return out
 }

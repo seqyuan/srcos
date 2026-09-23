@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -98,7 +97,7 @@ func runTokenCreate(args []string) {
 		fatalf("user %s does not exist (create it with `srcos user %s`)", *user, *user)
 	}
 
-	expiresAt, err := parseTokenExpiry(*expires, time.Now())
+	expiresAt, err := agenttoken.ParseExpiry(*expires, time.Now())
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -263,41 +262,6 @@ func runTokenRevoke(args []string) {
 	}
 	fmt.Printf("revoked %s (%s, %s)\n", rec.ID, rec.User, dash(rec.Label))
 	fmt.Println("the gateway picks this up on its next request; no restart needed")
-}
-
-// parseTokenExpiry accepts "never", "<n>d" / "<n>h", a bare number of days, or
-// a date / RFC3339 timestamp. A bare number means days because that is how
-// people say it out loud ("expires in 90").
-func parseTokenExpiry(s string, now time.Time) (time.Time, error) {
-	v := strings.ToLower(strings.TrimSpace(s))
-	switch v {
-	case "", "never", "none", "0":
-		return time.Time{}, nil
-	}
-
-	if strings.HasSuffix(v, "d") {
-		n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
-		if err != nil {
-			return time.Time{}, fmt.Errorf("cannot parse expiry %q (want e.g. 90d or never)", s)
-		}
-		return now.AddDate(0, 0, n), nil
-	}
-	if strings.HasSuffix(v, "h") {
-		n, err := strconv.Atoi(strings.TrimSuffix(v, "h"))
-		if err != nil {
-			return time.Time{}, fmt.Errorf("cannot parse expiry %q (want e.g. 12h or never)", s)
-		}
-		return now.Add(time.Duration(n) * time.Hour), nil
-	}
-	if n, err := strconv.Atoi(v); err == nil {
-		return now.AddDate(0, 0, n), nil
-	}
-	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04", time.RFC3339} {
-		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cannot parse expiry %q (want 90d, 12h, 2026-12-21, or never)", s)
 }
 
 // humanUntil renders a coarse "in 89 days" for the creation output.

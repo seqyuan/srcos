@@ -121,6 +121,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 生成式表单 + srcos-path-picker 原语控件                          │
 │ ✅ agent token：Bearer 认证 · 只存哈希 · 只读 scope · 立即撤销       │
 │ ✅ MCP Server：/mcp · 9 个只读工具 + 3 个写工具（需 submit scope）   │
+│ ✅ agent token ＋ 自助页 /tokens ＋ /api/tokens（只认 session）      │
 │ ✅ 资源协议：srcos:// ＋ /api/resources ＋ /view（自带 viewer）      │
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
@@ -144,6 +145,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
+| **agent token 自助页** | Playwright：仪表盘有「令牌」入口 → `/tokens` 勾 `submit` + 工具 `ticker` → 生成 → 明文只显示一次且**不在 URL 里** → 刷新后列表（服务端渲染）显示 `有效` + `read,submit` + `ticker`，且页面里不再出现明文；用这枚 token 跑官方 Python MCP SDK → 12 个工具 → `srcos_submit_job` → 任务成功、日志可读；**撤销后**：行消失、该 token 立即被拒；**一枚活的 submit token** 打 `/api/tokens` 的 GET/POST/DELETE 全部 403「needs a browser session」，而同一个 token 打 `POST /api/jobs` 是 201 |
 | **任务 = systemd 瞬时 unit（判定文件）** | 任务 `succeeded` + 日志里**既有 stdout 也有 stderr**（此前 unit 的日志根本没被捕获）+ `<log>.verdict` = `0 success`；失败任务 `failed` + `exitCode=3` + 「tool exited with code 3」；**运行中重启** → `tasks reconcile: adopted 1` → 进程死后 `settled … as succeeded (exit 0)`（真实判定，不是「no verdict」）；取消 → `stopped` 且 unit `inactive`（判定文件写的是 `TERM success`）；`job run --force` 重跑同一实例正常（`reset-failed` + 旧判定被删）；无 systemd 的降级模式仍能跑并写日志 |
 | **任务队列（提交即自动执行）** | 网关起着：`POST /api/jobs`（带会话 cookie）→ 返回 `pending` + instanceId → **2.5s 后实例已 `succeeded`**（无人敲任何 CLI）；网关**停着**时用 `srcos job submit` 提交 → 启动网关 → `task queue: started 1 run(s) after startup` → 1s 内 `succeeded`；`--no-task-drainer` 时同一提交停 `pending` → `srcos job run` 手动跑成功；**运行中重启**：记录先被 `tasks reconcile: adopted 1`，进程死后下一 tick `settled`（state=stopped + 「no verdict」说明），**不重跑**；流程（`flow run`，2 样本）在队列运行时依然成功且每个 job 只出现一次（队列不偷流程节点）|
 | **MCP 第二期（submit / cancel / run_flow）** | 官方 Python MCP SDK：read token → 9 个工具（无写工具），调 `srcos_submit_job` → `isError`「需要 submit scope」；submit token（`--tool ticker`）→ 12 个工具（3 个 write，`readOnlyHint=false`）→ `srcos_submit_job` 返回 `jobId`+`instanceId` → `srcos_task_status` 轮询到 `succeeded` → `srcos_task_logs` 有 tick 1..3 → `srcos_list_artifacts` 给出 `srcos://file/workspace/out?tool=ticker` → `srcos_read_file` 读到产物；白名单外工具（sleeper）被拒「may not submit」；`srcos_cancel_instance` → `stopped`；`srcos_run_flow` → 1 job 且跑到成功；网关日志有 `audit submit/cancel/run_flow` 五行（含工具版本与 job/instance/run）|
@@ -163,8 +165,8 @@ UI 造起来便宜了 → UI 不再是护城河
   什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
 - ⛔ **画布的拖拽摆放与 `expose` 自动推导** —— 布局现在是拓扑推导（不写进契约），
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
-- ⛔ **Phase 5 其它前端件** —— agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
-  （`srcos://` 资源协议 / 自带 viewer / 任务列表与 SSE 日志流已于 2026-09-23 完成）
+- ⛔ **Phase 5 剩余** —— 画布的拖拽摆放与 `expose` 自动推导（`srcos://` 协议 / viewer / 任务列表 /
+  SSE 日志流 / agent token 自助页都已完成）
 - ⛔ **降级模式（无 user systemd）下的判定** —— 那种情况下任务是个普通子进程，进程与等待者一起
   消失时没有判定文件可读，`ReconcileTasks` 只能写 `stopped` + 说明（ADR-022 的兜底分支）
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
@@ -194,7 +196,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~7~~ | ~~**Phase 4 收尾**~~：✅ **已完成**（并发、重试、取消、配额） | Phase 4 收工 |
 | ~~8~~ | ~~**MCP 第二期**~~：✅ **已完成**（`submit` / `cancel` / `run_flow` + `submit` scope 与 `submit_tools` 白名单；`internal/execute` 是写入面唯一实现，REST 与 MCP 共用） | agent 真的能"执行用 SRCOS"了 |
 | ~~9~~ | ~~**管理端画布**~~：✅ **已完成**（`webui/` Vite+React，只在该页加载；服务端校验；校验通过才写回） | 顺带补了一条契约规则：连线即依赖 |
-| **10** | **Phase 5 其余前端件**：`srcos://` 资源协议 + 自带 viewer ✅ / 任务列表 + SSE 日志流 ✅；**剩** agent token 自助页、画布拖拽摆放与 `expose` 自动推导 | 不涉架构选择；viewer 是 dsh 路 B 的前置 |
+| **10** | **Phase 5 其余前端件**：`srcos://` 资源协议 + 自带 viewer ✅ / 任务列表 + SSE 日志流 ✅ / agent token 自助页 ✅；**剩** 画布拖拽摆放与 `expose` 自动推导 | 不涉架构选择；viewer 是 dsh 路 B 的前置 |
 | ~~11~~ | ~~**任务队列消费者**（ADR-022）~~：✅ **已完成**（提交即自动执行；启动冲刷 + 唤醒 + tick；认领互斥；队列跳过流程节点） | 「目录即队列」终于名副其实；剩下的是「重启后退出码」那条 backend 限制 |
 
 ### 3.2 需要用户提供信息才能做的
@@ -476,6 +478,7 @@ internal/api/               管理 API（services）+ 工具/存储/任务 API�
   ├ admin.go                /api/admin/*（仅管理员）：实例总览/强制停止/日志/授权/组/管理员
   ├ flows.go                /api/admin/flows*：画布的读/写/校验（校验复用 internal/flow）
   ├ resources.go            /api/resources｜raw｜html（srcos:// 的 HTTP 拼写；raw 永不 text/html）
+  ├ tokens.go               /api/tokens（自助凭据：只认 session、只给自己签、白名单只收窄）
   ├ logs.go                 /api/jobs/<id>/logs（默认纯文本尾部；?follow=1 为 SSE）
   └ execute.go              POST /api/jobs（run）｜/api/jobs/<id>/cancel｜/api/flows/<id>/run
 internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（生成式表单）
@@ -484,6 +487,7 @@ internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（
   ├ resourcepage.go         /view 的 viewer 页面（文本/Markdown/表格/图片/PDF/HTML/目录 + 根选择页）+ NoticePage
   ├ markdown.go             服务端 Markdown（子集：先转义再自行输出标签，无需额外清洗器）
   ├ tasks.go                /tasks 与 /tasks/<id>（状态/产物/日志面板 + EventSource 客户端）
+  ├ tokens.go               /tokens（列表服务端渲染；生成走 /api/tokens，明文只画进 DOM）
   └ templates/srcos-path-picker.js   原语控件（Web Component）
 
 internal/tool/              tool.yaml 类型 + 13 类注册期校验 + input 值校验

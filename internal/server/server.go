@@ -500,6 +500,7 @@ func (s *Server) Handler() http.Handler {
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
 	// Each of these is a reserved gateway path (README「保留路径」).
 	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/jobs/", "/api/flows/",
+		"/api/tokens", "/api/tokens/",
 		"/api/resources", "/api/resources/raw", "/api/resources/html",
 		"/api/admin", "/api/admin/"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
@@ -527,6 +528,10 @@ func (s *Server) Handler() http.Handler {
 	// from /api/jobs/<id>/logs?follow=1).
 	mux.HandleFunc("/tasks", s.handleTasksPage)
 	mux.HandleFunc("/tasks/", s.handleTaskPage)
+
+	// Self-service agent tokens (ADR-019): a user mints the credential their
+	// agent / MCP client carries, instead of asking an administrator.
+	mux.HandleFunc("/tokens", s.handleTokensPage)
 
 	// The management console (admins only; non-admins are redirected, not shown
 	// a bare 403, because the page is not a secret).
@@ -1646,6 +1651,70 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request) {
 		Viewers:   resource.Default().All(),
 	}))
 }
+
+// handleTokensPage renders the self-service agent-token page (ADR-019).
+//
+// The list is rendered here so credential management works without JavaScript;
+// only "create" needs a script, because the plaintext must never travel back
+// through a redirect or a query string.
+func (s *Server) handleTokensPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	ids := make([]string, 0, 8)
+	if tools, err := s.visibleTools(username); err == nil {
+		for _, t := range tools {
+			ids = append(ids, t.ID)
+		}
+	}
+	sendHTML(w, 200, web.TokenPage(s.siteTitle, username, s.tokenRows(username), ids, agenttoken.KnownScopesNames()))
+}
+
+// tokenRows renders one user's tokens for the page, from the one view builder
+// the API also uses (agenttoken.Store.ViewsFor).
+func (s *Server) tokenRows(user string) []web.TokenRow {
+	if s.agentTokens == nil {
+		return nil
+	}
+	views := s.agentTokens.ViewsFor(user, time.Now())
+	out := make([]web.TokenRow, 0, len(views))
+	for _, v := range views {
+		out = append(out, web.TokenRow{
+			ID:       v.ID,
+			Label:    v.Label,
+			Scopes:   strings.Join(v.Scopes, ","),
+			Tools:    strings.Join(v.Tools, ","),
+			Created:  localTime(v.CreatedAt),
+			Expires:  orNever(v.ExpiresAt),
+			LastUsed: orDashTime(v.LastUsed),
+			Status:   v.Status,
+			Expired:  v.Status == "expired",
+		})
+	}
+	return out
+}
+
+// localTime formats an instant for the page; the zero value prints as "—".
+func localTime(at *time.Time) string {
+	if at == nil || at.IsZero() {
+		return "—"
+	}
+	return at.Local().Format("2006-01-02 15:04")
+}
+
+func orNever(at *time.Time) string {
+	if at == nil || at.IsZero() {
+		return "never"
+	}
+	return at.Local().Format("2006-01-02 15:04")
+}
+
+func orDashTime(at *time.Time) string { return localTime(at) }
 
 // resourceScopeName finds the human title of the scope an address names, so the
 // viewer's heading says "集群共享盘" rather than "data".

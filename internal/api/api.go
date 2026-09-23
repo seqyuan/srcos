@@ -140,6 +140,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		path == "/api/jobs" ||
 		strings.HasPrefix(path, "/api/jobs/") ||
 		strings.HasPrefix(path, "/api/flows/") ||
+		path == "/api/tokens" ||
+		strings.HasPrefix(path, "/api/tokens/") ||
 		path == "/api/resources" ||
 		path == "/api/resources/raw" ||
 		path == "/api/resources/html"
@@ -228,6 +230,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		h.handleCancelInstance(w, r, ident, id)
+
+	// Credential management (ADR-019's self-service half). Session only: a
+	// program must not be able to mint or revoke credentials.
+	case path == "/api/tokens" && r.Method == "GET":
+		h.handleListTokens(w, ident)
+	case path == "/api/tokens" && r.Method == "POST":
+		h.handleCreateToken(w, r, ident)
+	case strings.HasPrefix(path, "/api/tokens/") && r.Method == "DELETE":
+		h.handleRevokeToken(w, ident, strings.TrimPrefix(path, "/api/tokens/"))
 
 	// Running a flow: the same write scope, checked per tool the flow uses.
 	case strings.HasPrefix(path, "/api/flows/") && r.Method == "POST":

@@ -827,7 +827,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       两步点连线、**服务端校验**（画布不重复实现类型规则）、检查器编辑取值来源/依赖/when/retry、
       校验通过才写回 `flow.yaml`；只有这一页加载 React（ADR-012）。
       **未做**：拖拽摆放（布局是推导的）、`expose` 的自动推导（现在是显式选择来源）
-- [ ] 用户自助生成 agent token 的页面
+- [x] **用户自助生成 agent token 的页面**（2026-09-24）：`/tokens`（生成 / 列表 / 撤销）+ `/api/tokens`；
+      列表服务端渲染（无 JS 也能看与撤），生成走 JSON API 以免明文进 URL；**只给自己签**、
+      白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
 
 ### Phase 5.5：dsh 集成（先 B 后 A）
 - [ ] **路 B**：SRCOS REST/SSE API 定型 + 发布 `@seqyuan/srcos-dsh` 插件
@@ -916,3 +918,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-24 | **MCP 第二期：submit / cancel / run_flow** —— `internal/execute`（写入面唯一实现：校验 + 配额 + 投递 + 启动） `submit` scope 可签发（`srcos token create --scope submit --tool X` 按工具收窄，蕴含 read） REST `POST /api/jobs`（新增 `run`）/`/api/jobs/<id>/cancel`/`/api/flows/<id>/run` MCP 写入三件套（只对有 submit scope 的 token 列出） 每次写入一行审计；修掉两个真问题：实例在 submit 返回前不可寻址、取消被等待者盖成 failed（见 handoff §4.2） |
 | 2026-09-24 | **任务队列消费者（ADR-022）** —— 「目录即队列」终于有了守护进程：`internal/execute/queue.go`（启动即时冲刷 + 提交唤醒 + 周期 tick；按 (用户,工具) 串行、`--task-workers` 全局上限）、`job.Claim`（O_EXCL 认领，网关/CLI/流程执行器互斥）、`pending` 不算资源占用（`State.ConsumesResources`）、队列跳过流程节点、`runtime.ReconcileTasks` 每 tick 结算失去等待者的任务；新增 `--task-workers` / `--no-task-drainer`；已知限制：重启后运行结束的运行拿不回退出码（scope 无 `ExecMainStatus`） |
 | 2026-09-24 | **任务改以 systemd 瞬时 unit 运行 + 判定文件**（ADR-022 收尾）—— `systemd-run --unit --wait`（退出码仍同步返回，unit 给出稳定名字与 `is-active`/`stop` 句柄）、`-p StandardOutput=append:<log>`（**修掉一个一直存在的 bug**：unit 的 stdout 不继承我们的 fd，服务日志此前是空的）、`-p ExecStopPost=...` 把 `$EXIT_STATUS $SERVICE_RESULT` 写进 `<log>.verdict`（`systemctl show` 不能依赖：瞬时 unit 退出后 ~1s 就被回收）、`ReconcileTasks` 读判定文件并用同一个 `applyExitStatus` 落库（**重启后再结束的运行现在有真实退出码**）；顺带修掉每次启动泄漏一个日志 fd（task + service 两条路径） |
+| 2026-09-24 | **agent token 自助页**（ADR-019 的自助那一半）—— `/tokens` 页面 + `/api/tokens`（GET 列表 / POST 新建 / DELETE 撤销）：列表服务端渲染，生成走 JSON 以免明文进 URL/历史；只给自己签、白名单只能收窄自己可见的工具、每次运行仍过 Grant 与配额；**管理凭据只认浏览器 session**（agent token 一律 403 —— 泄露的 submit token 不能给自己续期）；`ParseExpiry` 下沉到 `agenttoken` 供 CLI 与页面共用；每用户 token 上限 20 |

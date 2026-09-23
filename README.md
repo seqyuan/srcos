@@ -362,6 +362,9 @@ srcos 2fa-reset <用户名>
 浏览器用 session cookie，程序（agent、MCP 客户端、脚本）用 **agent token**：
 `Authorization: Bearer <token>`。它解决的是「agent 是程序，拿不到也不能用浏览器 cookie」。
 
+用户也可以**自己在网页上生成**（仪表盘右上角「令牌」→ `/tokens`）：勾选 scope（`read` / `submit`）、
+可选按工具收窄白名单、选有效期，明文只在生成时显示一次（不会进 URL、不会出现在列表里）。
+
 ```bash
 # 创建（明文只在这一次输出，之后只剩哈希，无法恢复）
 srcos token create -d /opt/srcos/config --user alice --label annovibe --expires 90d
@@ -381,6 +384,10 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 
 - **只存哈希**：`config/agent-tokens.yaml` 是 SHA-256 哈希 + 用户 + scope + 工具白名单 + 过期 + 标签，
   没有明文。因此这份文件（或它的备份）泄露不等于凭据泄露。
+- **自助但不可提权**：`/tokens` 只能给**自己**签发（没有"给谁签"这个字段）；白名单只能从**你自己
+  可见的工具**里勾，且每次真正运行时仍要过 Grant 与配额。**管理凭据只认浏览器 session** ——
+  agent token 不能自己造或撤 token（否则一个泄露的 submit token 可以给自己续一条长期凭据，
+  活得比撤销还久）。
 - **scope 只收窄不放宽**：token 以「所属用户」的身份行事，Grant 授权策略照常生效；
   scope 只能在其之上收窄。两个 scope：
   - `read`（默认）—— 目录、路径、状态、日志、产物；
@@ -427,6 +434,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
 | `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
 | `/api/flows/*` | `POST /api/flows/<id>/run` 用 CSV 样本表展开并启动一个流程 |
+| `/api/tokens`、`/api/tokens/*` | **agent token 自助管理**（列表 / 新建 / 撤销；只认浏览器 session，agent token 不能自己造 token） |
 | `/api/resources`、`/api/resources/raw`、`/api/resources/html` | **`srcos://` 资源协议**（元数据 / 字节 / sandbox 化的用户 HTML） |
 | `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
@@ -756,6 +764,7 @@ curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 | `/tools/<工具>` | **从 `interface` 自动生成的参数表单**；路径参数用 `srcos-path-picker` 原语控件 |
 | `/view` | **内置资源查看器**（见下节）；不带参数时列出你能看的根 |
 | `/tasks`、`/tasks/<id>` | **任务列表与实例详情**（状态、产物、实时日志） |
+| `/tokens` | **agent token 自助页**（生成 / 查看 / 撤销自己的程序凭据） |
 | `/admin` | 管理控制台（仅管理员） |
 | `/assets/srcos-path-picker.js` | 原语控件本体；工具自建 UI 一行标签即可复用 |
 

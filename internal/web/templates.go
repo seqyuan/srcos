@@ -139,7 +139,8 @@ func DashboardPage(siteTitle, username string, services []config.ServiceConfig, 
 	// a page no one can find is a page that does not exist. (The `admin-link`
 	// class is the header pill style, shared by all three.)
 	navLinks := `<a class="admin-link" href="/tasks">任务</a>` +
-		`<a class="admin-link" href="/view">资源</a>` + adminLink
+		`<a class="admin-link" href="/view">资源</a>` +
+		`<a class="admin-link" href="/tokens">令牌</a>` + adminLink
 
 	body := fmt.Sprintf(dashboardTpl,
 		esc(siteTitle),
