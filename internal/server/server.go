@@ -470,7 +470,7 @@ func (s *Server) Handler() http.Handler {
 	// Tool/storage API. Registered as exact paths, like /api/services, so a
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
 	// Each of these is a reserved gateway path (README「保留路径」).
-	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs",
+	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/jobs/",
 		"/api/resources", "/api/resources/raw", "/api/resources/html",
 		"/api/admin", "/api/admin/"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +493,11 @@ func (s *Server) Handler() http.Handler {
 	// ADR-011/016). A page, not JSON, because it is the platform's own fallback
 	// UI and must work with JavaScript disabled.
 	mux.HandleFunc("/view", s.handleView)
+
+	// The user's own instance list and one instance's log (the live tail comes
+	// from /api/jobs/<id>/logs?follow=1).
+	mux.HandleFunc("/tasks", s.handleTasksPage)
+	mux.HandleFunc("/tasks/", s.handleTaskPage)
 
 	// The management console (admins only; non-admins are redirected, not shown
 	// a bare 403, because the page is not a secret).
@@ -1596,6 +1601,83 @@ func (s *Server) resourceScopeName(username string, addr resource.Address) strin
 		}
 	}
 	return addr.Scope
+}
+
+// handleTasksPage lists the user's own instances (tasks and services).
+//
+// It reads through the same inspect reader as /api/jobs, so the page and the
+// API cannot disagree about what this user may see — and the page works with
+// JavaScript disabled, because the table is rendered here.
+func (s *Server) handleTasksPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	toolFilter := strings.TrimSpace(r.URL.Query().Get("tool"))
+	kindFilter := strings.TrimSpace(r.URL.Query().Get("kind"))
+
+	views, err := s.reader().Instances(username, toolFilter, kindFilter)
+	if err != nil {
+		sendHTML(w, api.ErrorStatus(err), web.NoticePage(s.siteTitle, "读不到任务列表", err.Error(), "/", "返回仪表盘"))
+		return
+	}
+	tools, err := s.visibleTools(username)
+	if err != nil {
+		log.Printf("[srcos] tasks: %v", err)
+		tools = nil
+	}
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.ID)
+	}
+	sendHTML(w, 200, web.TasksPage(s.siteTitle, views, names, toolFilter, kindFilter))
+}
+
+// handleTaskPage renders one instance: metadata, artifacts, and the log tail.
+//
+// The tail is rendered server-side so the page is readable without JavaScript;
+// the script in the page then streams new lines from
+// /api/jobs/<id>/logs?follow=1 and appends them.
+func (s *Server) handleTaskPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/tasks/")
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	reader := s.reader()
+	view, others, err := reader.Instance(username, id)
+	if err != nil {
+		msg := err.Error()
+		if len(others) > 0 {
+			msg += " 候选项：" + strings.Join(others, "、")
+		}
+		sendHTML(w, api.ErrorStatus(err), web.NoticePage(s.siteTitle, "找不到这个实例", msg, "/tasks", "返回任务列表"))
+		return
+	}
+	artifacts, err := reader.Artifacts(username, view.ID)
+	if err != nil {
+		sendHTML(w, api.ErrorStatus(err), web.NoticePage(s.siteTitle, "读不到产物", err.Error(), "/tasks", "返回任务列表"))
+		return
+	}
+	// A missing log is a normal state (a task that has not started); the page
+	// says so instead of failing.
+	tail, err := reader.Logs(username, view.ID, 200)
+	if err != nil {
+		tail = ""
+	}
+	sendHTML(w, 200, web.TaskPage(s.siteTitle, *view, artifacts, tail))
 }
 
 // reader is the read-only view of the platform, shared with the API and MCP

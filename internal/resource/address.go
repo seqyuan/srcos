@@ -191,13 +191,6 @@ func (a Address) String() string {
 	return b.String()
 }
 
-// Child returns the address of an entry inside this address's scope.
-func (a Address) Child(rel string) Address {
-	out := a
-	out.Path = joinPath(a.Path, rel)
-	return out
-}
-
 // Parent returns the enclosing directory within the scope, and false at the
 // scope root (where there is nothing above to show).
 func (a Address) Parent() (Address, bool) {
@@ -212,19 +205,6 @@ func (a Address) Parent() (Address, bool) {
 	}
 	out.Path = a.Path[:i]
 	return out, true
-}
-
-// joinPath joins the slash-separated relative pieces of an address path.
-func joinPath(base, rel string) string {
-	rel = strings.Trim(rel, "/")
-	switch {
-	case base == "":
-		return rel
-	case rel == "":
-		return base
-	default:
-		return base + "/" + rel
-	}
 }
 
 // escapePath percent-encodes each segment of a slash-separated path (escaping

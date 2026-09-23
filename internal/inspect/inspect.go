@@ -28,6 +28,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/resource"
@@ -82,6 +83,10 @@ type Reader struct {
 	// Viewers decides which viewer claims a srcos:// resource (ADR-016's
 	// registry). Nil uses the built-in first batch.
 	Viewers *resource.Registry
+	// FollowInterval overrides how often FollowLogs polls for new output. Zero
+	// uses the package default; it exists so tests do not wait a second per
+	// observation.
+	FollowInterval time.Duration
 }
 
 // StorageView is one declared data root, as a caller sees it.

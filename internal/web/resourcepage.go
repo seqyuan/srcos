@@ -183,16 +183,9 @@ func ResourcePage(d ResourcePageData) string {
 	return PageShell(d.SiteTitle, name, b.String())
 }
 
-// ResourceErrorPage explains why an address could not be opened, in the same
-// shell as the rest of the gateway's pages.
+// ResourceErrorPage explains why an address could not be opened.
 func ResourceErrorPage(siteTitle, msg string) string {
-	return PageShell(siteTitle, "资源", `<main class="wrap rv">`+resourceCSS+`
-<p class="crumb"><a href="/view">资源</a></p>
-<h1>打不开这个资源</h1>
-<p class="muted">`+esc(msg)+`</p>
-<p class="muted rv-note">地址形如 <code>srcos://file/&lt;scope&gt;/&lt;path&gt;</code>：
-<code>home</code>、<code>workspace</code>（需 <code>?tool=</code>）或一个 storage id。</p>
-</main>`)
+	return NoticePage(siteTitle, "打不开这个资源", msg, "/view", "返回资源浏览")
 }
 
 // ResourceScopesPage is the landing page: the roots this user may browse, so
@@ -298,7 +291,11 @@ func renderDirBody(d ResourcePageData) string {
 	}
 	registry := resource.Default()
 	for _, e := range v.Entries {
-		child := d.Addr.Child(e.Rel)
+		// The entry's Rel is relative to the *scope*, so it replaces the address's
+		// path rather than joining onto it — joining would double the directory
+		// (a bug the browser e2e caught, not the unit tests).
+		child := d.Addr
+		child.Path = e.Rel
 		icon := "·"
 		if e.IsDir {
 			icon = "📁"

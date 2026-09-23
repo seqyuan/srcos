@@ -115,6 +115,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		strings.HasPrefix(path, "/api/tools/") ||
 		path == "/api/paths" ||
 		path == "/api/jobs" ||
+		strings.HasPrefix(path, "/api/jobs/") ||
 		path == "/api/resources" ||
 		path == "/api/resources/raw" ||
 		path == "/api/resources/html"
@@ -183,6 +184,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		h.handleSubmitJob(w, r, username)
 	case path == "/api/jobs" && r.Method == "GET":
 		h.handleListJobs(w, r, username)
+
+	// One instance's log: a plain tail by default, an SSE stream with
+	// ?follow=1 (the page's live view).
+	case strings.HasPrefix(path, "/api/jobs/") && r.Method == "GET":
+		id, ok := jobLogID(path)
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "not found"})
+			return true
+		}
+		h.handleLogs(w, r, username, id)
 
 	// The srcos:// resource protocol (ADR-011/016): one metadata answer, the
 	// bytes, and the sandboxed HTML door kept separate.

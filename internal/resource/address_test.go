@@ -104,18 +104,19 @@ func TestStringEscapesPath(t *testing.T) {
 	}
 }
 
-func TestChildAndParent(t *testing.T) {
+func TestParent(t *testing.T) {
 	a, err := Parse("srcos://file/workspace/out/x.txt?tool=t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := a.Child("sub/y.txt")
-	if child.Path != "out/x.txt/sub/y.txt" || child.Tool != "t" {
-		t.Errorf("Child = %+v", child)
-	}
 	parent, ok := a.Parent()
 	if !ok || parent.Path != "out" {
 		t.Errorf("Parent = %+v, %v", parent, ok)
+	}
+	// The scope and the tool survive the walk up, so a breadcrumb link keeps
+	// addressing the same workspace.
+	if parent.Scope != "workspace" || parent.Tool != "t" {
+		t.Errorf("Parent lost its scope: %+v", parent)
 	}
 	root, _ := Parse("srcos://file/home")
 	if _, ok := root.Parent(); ok {

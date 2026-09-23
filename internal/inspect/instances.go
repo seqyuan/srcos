@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -209,6 +210,11 @@ type Artifact struct {
 	// Note explains an artifact that is not there, in the instance's own words
 	// ("missing", "unresolvable", "escapes its mount").
 	Note string `json:"note,omitempty"`
+	// Addr is the srcos:// address that opens this artifact in the viewer. It
+	// is empty when the path is outside every browsable scope (the tool package,
+	// a flow-run directory) — those are readable through read_file, not the
+	// viewer, and a link that always 403s is worse than no link.
+	Addr string `json:"addr,omitempty"`
 }
 
 // Artifacts resolves the outputs a task instance declared.
@@ -239,11 +245,14 @@ func (r *Reader) Artifacts(username, needle string) ([]Artifact, error) {
 			out = append(out, a)
 			continue
 		}
-		host, _, err := spec.Resolve(path)
+		host, mount, err := spec.Resolve(path)
 		if err != nil {
 			a.Note = firstNote(recorded, "unresolvable")
 			out = append(out, a)
 			continue
+		}
+		if addr, ok := addressForMount(mount, rec.User, rec.Tool, path); ok {
+			a.Addr = addr.String()
 		}
 		fi, err := os.Stat(host)
 		if err != nil {
@@ -255,6 +264,7 @@ func (r *Reader) Artifacts(username, needle string) ([]Artifact, error) {
 		// is reported but flagged rather than quietly attributed to the mount.
 		if _, err := spec.ResolveExisting(path); err != nil {
 			a.Note = "escapes its mount (symlink)"
+			a.Addr = ""
 			out = append(out, a)
 			continue
 		}
@@ -297,6 +307,32 @@ func (r *Reader) instanceSpec(rec *runtime.Instance) (*sandbox.Spec, string) {
 		return nil, "mount table unavailable: " + err.Error()
 	}
 	return spec, ""
+}
+
+// addressForMount maps a sandbox path to a srcos:// address, so an artifact can
+// be opened in the viewer.
+//
+// The mount's origin is what identifies the scope (ADR-020): the two builtin
+// scopes are home and workspace, and a storage mount carries its own id. A
+// builtin mount that is neither (the tool package, the flow-run directory) has
+// no scope, and the artifact gets no address rather than a link that cannot
+// work.
+func addressForMount(m sandbox.Mount, user, toolID, sandboxPath string) (resource.Address, bool) {
+	addr := resource.Address{Provider: resource.ProviderFile}
+	switch {
+	case m.Origin == "builtin" && m.SandboxPath == sandbox.PathWorkspace:
+		addr.Scope, addr.Tool = resource.ScopeWorkspace, toolID
+	case m.Origin == "builtin" && m.SandboxPath == sandbox.HomePath(user):
+		addr.Scope = resource.ScopeHome
+	default:
+		id, ok := strings.CutPrefix(m.Origin, "storage:")
+		if !ok {
+			return resource.Address{}, false
+		}
+		addr.Scope = id
+	}
+	addr.Path = strings.Trim(strings.TrimPrefix(sandboxPath, m.SandboxPath), "/")
+	return addr, true
 }
 
 // outputNotes are the annotations the runtime appends when it reports outputs.

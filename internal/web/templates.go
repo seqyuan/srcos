@@ -135,10 +135,15 @@ func DashboardPage(siteTitle, username string, services []config.ServiceConfig, 
 	if admin {
 		adminLink = `<a class="admin-link" href="/admin">管理</a>`
 	}
+	// Every user gets their tasks and their files: both are their own data, and
+	// a page no one can find is a page that does not exist. (The `admin-link`
+	// class is the header pill style, shared by all three.)
+	navLinks := `<a class="admin-link" href="/tasks">任务</a>` +
+		`<a class="admin-link" href="/view">资源</a>` + adminLink
 
 	body := fmt.Sprintf(dashboardTpl,
 		esc(siteTitle),
-		adminLink,
+		navLinks,
 		readOnlyClass,
 		hintText,
 		categoriesHTML,
@@ -151,6 +156,32 @@ func DashboardPage(siteTitle, username string, services []config.ServiceConfig, 
 func NotFoundPage(siteTitle string) string {
 	body := notFoundTpl
 	return PageShell(siteTitle, "404", body)
+}
+
+// NoticePage is a small explanation with a way back.
+//
+// It is what a page shows when a read is refused or fails while the user is
+// still allowed to be where they are: an unknown instance id, an ambiguous
+// suffix, a store that is not configured on this host. A bare status code would
+// be honest and useless.
+func NoticePage(siteTitle, title, message, backHref, backLabel string) string {
+	back := ""
+	if backHref != "" {
+		back = fmt.Sprintf(`<p><a href="%s">%s</a></p>`, esc(backHref), esc(backLabel))
+	}
+	body := fmt.Sprintf(`<main class="np">
+  <h1>%s</h1>
+  <p class="np-msg">%s</p>
+  %s
+</main>
+<style>
+.np { max-width: 560px; margin: 10vh auto; background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: var(--r-card); padding: 28px; box-shadow: var(--sh-card); }
+.np h1 { font-size: 18px; margin: 0 0 10px; }
+.np-msg { color: var(--text-muted); font-size: 14px; line-height: 1.7; word-break: break-word; }
+.np a { color: var(--accent); }
+</style>`, esc(title), esc(message), back)
+	return PageShell(siteTitle, title, body)
 }
 
 // ServiceStatus is what the gateway shows when a service instance is not (yet)

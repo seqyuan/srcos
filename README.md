@@ -417,7 +417,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/services`、`/api/services/*` | 卡片增删改、布局调整的 REST API |
 | `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
-| `/api/jobs` | 任务提交与状态列表 |
+| `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流） |
 | `/api/resources`、`/api/resources/raw`、`/api/resources/html` | **`srcos://` 资源协议**（元数据 / 字节 / sandbox 化的用户 HTML） |
 | `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
@@ -742,6 +742,7 @@ curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 | `/tools` | 工具目录（只列出对你授权的工具） |
 | `/tools/<工具>` | **从 `interface` 自动生成的参数表单**；路径参数用 `srcos-path-picker` 原语控件 |
 | `/view` | **内置资源查看器**（见下节）；不带参数时列出你能看的根 |
+| `/tasks`、`/tasks/<id>` | **任务列表与实例详情**（状态、产物、实时日志） |
 | `/admin` | 管理控制台（仅管理员） |
 | `/assets/srcos-path-picker.js` | 原语控件本体；工具自建 UI 一行标签即可复用 |
 
@@ -809,6 +810,39 @@ curl -b cj -o out.tsv \
 
 > 实测（headless Chromium）：从网关页面里读该 iframe 的 `contentDocument` 为 `null`
 > （跨源），框内 `document.cookie` 抛异常。
+
+### 任务与日志（`/tasks`）
+
+仪表盘右上角的「任务」进入 `/tasks`：**你自己**的实例列表（任务与常驻服务），按开始时间倒序。
+页面是服务端渲染的，禁用 JavaScript 也能看；筛选（工具 / 类型）就是一个普通 GET 表单，URL 可分享。
+
+`/tasks/<id>` 是单个实例的详情：状态、后端 / 沙箱 / 资源限制、标签、**产物**，以及**日志**。
+两个细节值得注意：
+
+- **产物直接链到查看器**：可在沙箱内寻址的产物（工作区 / home / 已声明 storage）都带一个
+  `srcos://` 地址，「预览」一键打开上一节的 viewer —— 「跑完了」到「看看产出了什么」中间不再需要 shell。
+  落在其他挂载点（如 `/tool`、`/flow`）的产物不给链接，只给路径：一个必然 403 的链接比没有链接更坏。
+- **日志先静态、再实时**：页面里渲染的是打开时的最后 200 行（无 JS 也能读），
+  随后 `EventSource` 连上 `/api/jobs/<id>/logs?follow=1` 追加新行；实例结束时流自行关闭、
+  状态徽章同步更新。
+
+```bash
+# 一次性尾部（默认，纯文本；curl 与 agent 用这个）
+curl -b cj 'http://<gateway>/api/jobs/<id>/logs?tail=200'
+# 实时流（Server-Sent Events；事件名 line / state / note / end）
+curl -N -b cj 'http://<gateway>/api/jobs/<id>/logs?follow=1'
+```
+
+实现约定（不是界面细节，而是契约）：
+
+- **跟踪的是 SRCOS 自己写的那份日志**（实例记录里的 `log_path`，在工作区之外），
+  所以工具改不到自己的历史 —— 与 `srcos_task_logs` / `read_file` 看的是同一份。
+- **日志尚未存在不是错误**：任务提交了但还没跑起来时，流会等（而不是立刻结束骗客户端说"没了"）。
+- **半行不当作一行**：没有换行的尾部要等到换行才发出（与 `tail -f` 一致）；
+  实例结束时才把最后那段没换行的输出补发出去。
+- **心跳**：静默 15 秒发一个 SSE 注释帧 —— 否则反向代理/隧道会以为没人说话而掉线。
+- **`/api/jobs/<id>/logs` 的形状是固定的**（必须精确到 `<id>/logs`）：`/api/jobs/<id>` 本身不是端点，
+  调用方不需要猜自己读到的是不是日志；带分隔符的 id 直接拒绝。
 
 ### MCP（给 agent 的只读接口）
 

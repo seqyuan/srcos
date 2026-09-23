@@ -115,6 +115,22 @@ func TestViewRendersPerViewer(t *testing.T) {
 	}
 }
 
+func TestViewDirChildLinksAreScopeRelative(t *testing.T) {
+	srv := viewGateway(t)
+	// A directory listing at a nested path must link to the child's path inside
+	// the scope, not join the child onto the directory again (which produced
+	// `home/sub/sub/x.txt` and a 404 — caught by the browser e2e).
+	rec := srv.getAsBrowser(t, "alice", viewURL("srcos://file/home/sub"))
+	body := rec.Body.String()
+	want := url.QueryEscape("srcos://file/home/sub/x.txt")
+	if !strings.Contains(body, want) {
+		t.Errorf("the child link is missing %s:\n%s", want, body)
+	}
+	if doubled := url.QueryEscape("srcos://file/home/sub/sub/x.txt"); strings.Contains(body, doubled) {
+		t.Errorf("the child link doubled the directory:\n%s", body)
+	}
+}
+
 func TestViewErrorsAndMethods(t *testing.T) {
 	srv := viewGateway(t)
 
