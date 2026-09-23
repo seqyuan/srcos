@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-24（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 = 画布 + `srcos://` 资源协议与自带 viewer + 任务列表与 SSE 日志流**，**MCP 第二期（submit / cancel / run_flow）**，**任务队列消费者（ADR-022：提交即自动执行）完成**；agent token + MCP（读 + 写）+ 动态路由 + 自动回收 + 管理端 + 流程 + 资源查看器 + 任务/日志 + 队列完成）
+> 最后更新：2026-09-24（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 = 画布 + `srcos://` 资源协议与自带 viewer + 任务列表与 SSE 日志流**，**MCP 第二期（submit / cancel / run_flow）**，**任务队列消费者 + 任务以 systemd unit 运行（ADR-022 收尾：重启后仍有真实退出码）完成**；agent token + MCP（读 + 写）+ 动态路由 + 自动回收 + 管理端 + 流程 + 资源查看器 + 任务/日志 + 队列完成）
 
 ---
 
@@ -144,6 +144,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
+| **任务 = systemd 瞬时 unit（判定文件）** | 任务 `succeeded` + 日志里**既有 stdout 也有 stderr**（此前 unit 的日志根本没被捕获）+ `<log>.verdict` = `0 success`；失败任务 `failed` + `exitCode=3` + 「tool exited with code 3」；**运行中重启** → `tasks reconcile: adopted 1` → 进程死后 `settled … as succeeded (exit 0)`（真实判定，不是「no verdict」）；取消 → `stopped` 且 unit `inactive`（判定文件写的是 `TERM success`）；`job run --force` 重跑同一实例正常（`reset-failed` + 旧判定被删）；无 systemd 的降级模式仍能跑并写日志 |
 | **任务队列（提交即自动执行）** | 网关起着：`POST /api/jobs`（带会话 cookie）→ 返回 `pending` + instanceId → **2.5s 后实例已 `succeeded`**（无人敲任何 CLI）；网关**停着**时用 `srcos job submit` 提交 → 启动网关 → `task queue: started 1 run(s) after startup` → 1s 内 `succeeded`；`--no-task-drainer` 时同一提交停 `pending` → `srcos job run` 手动跑成功；**运行中重启**：记录先被 `tasks reconcile: adopted 1`，进程死后下一 tick `settled`（state=stopped + 「no verdict」说明），**不重跑**；流程（`flow run`，2 样本）在队列运行时依然成功且每个 job 只出现一次（队列不偷流程节点）|
 | **MCP 第二期（submit / cancel / run_flow）** | 官方 Python MCP SDK：read token → 9 个工具（无写工具），调 `srcos_submit_job` → `isError`「需要 submit scope」；submit token（`--tool ticker`）→ 12 个工具（3 个 write，`readOnlyHint=false`）→ `srcos_submit_job` 返回 `jobId`+`instanceId` → `srcos_task_status` 轮询到 `succeeded` → `srcos_task_logs` 有 tick 1..3 → `srcos_list_artifacts` 给出 `srcos://file/workspace/out?tool=ticker` → `srcos_read_file` 读到产物；白名单外工具（sleeper）被拒「may not submit」；`srcos_cancel_instance` → `stopped`；`srcos_run_flow` → 1 job 且跑到成功；网关日志有 `audit submit/cancel/run_flow` 五行（含工具版本与 job/instance/run）|
 | **任务列表 + SSE 日志流** | `srcos job run` 一个每秒打印一行的任务 → `/tasks` 列表出现「运行中」；`/tasks/<id>` 页面**不重载**的情况下 `#log` 文本在 2.5s 内从 32 字长到 64 字（真流）；任务结束后 `state` 事件把徽章改成「成功」、指示器变「日志结束」、EventSource 自行 `close()`；产物的「预览」→ `/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fout%3Ftool%3Dticker`（目录）→ 点 `result.txt` → 文本 viewer 显示 `all ticks done`；`/api/jobs/<id>/logs` 默认纯文本尾部，`?follow=1` 返回 `text/event-stream` + `X-Accel-Buffering: no` 并以 `event: state` / `event: end` 收尾；未知 id、`<id>/other`、另一用户的实例全部 404（`-race` 全绿）|
@@ -164,9 +165,8 @@ UI 造起来便宜了 → UI 不再是护城河
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
 - ⛔ **Phase 5 其它前端件** —— agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
   （`srcos://` 资源协议 / 自带 viewer / 任务列表与 SSE 日志流已于 2026-09-23 完成）
-- ⛔ **重启后的退出码** —— 任务以 systemd **scope** 运行，scope 不提供 `ExecMainStatus`；
-  网关重启后再结束的运行只能诚实收尾为 `stopped` + 「no verdict」（ADR-022）。把任务改成瞬时
-  **unit** 才能保住判定，那是 backend 改动
+- ⛔ **降级模式（无 user systemd）下的判定** —— 那种情况下任务是个普通子进程，进程与等待者一起
+  消失时没有判定文件可读，`ReconcileTasks` 只能写 `stopped` + 说明（ADR-022 的兜底分支）
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **网关侧起停服务**（`svc start` 仍只在 CLI；管理端能停、不能起）—— admin API 的下一步
 - ⛔ **storage 声明的管理端编辑**（`storages.yaml` 目前只有 CLI/手写）
@@ -229,7 +229,8 @@ UI 造起来便宜了 → UI 不再是护城河
 | **`unshare --user` 失败不代表 bwrap 不能工作** | AppArmor 授权是按二进制给的 |
 | **`ResolveExisting` 会把「文件不存在」报成「symlink escape」**（2026-09-23，写 viewer 时发现） | 它靠「最深的存在祖先」做 symlink 校验：目标本身不存在时，那个祖先必然在 mount 之外 → 报成逃逸（例：用户的虚拟 home 还没创建时，`srcos://file/home` 得到误导性的 `symlink escapes mount /home/alice`）。修法：**先 `os.Lstat` 判存在**（不存在即 `ErrNotFound`），再交给 `ResolveExisting`。教训：错误消息会变成错误的诊断方向 |
 | **「目录即队列」的另一半是消费者**（2026-09-24，ADR-022） | 投递目录一直是队列，但**唯一消费者是人手敲 `srcos job run`** —— agent 与表单提交等于石沉大海。补上守护进程时暴露出三个必须一起定的规则：① **`pending` 不能算配额占用**（否则一条提交过不了它自己排队位置蕴含的那道检查：队列里排 10 个 ≠ 占 10 份资源）；② **认领必须是原子的**（O_EXCL 文件），否则网关队列与另一个进程的 `job run` 会把同一任务跑两遍；③ **流程节点不能被队列当普通项偷走**（`flowrun` 自己按依赖顺序调度并认领；队列还额外按 `Tags["run"]` 跳过，那个判断写在提交里、无窗口期）。教训：**一个「队列」如果没有消费者，它只是目录** |
-| **重启后再结束的任务：退出码无从得知**（2026-09-24，ADR-022） | 网关重启不会杀掉任务（systemd 拥有进程），但记录退出码的是那个死掉的进程；而 systemd 的 **scope 没有 `ExecMainStatus`**（实测 `exit 7` 之后 scope 仍 `inactive/dead` + `Result=success`）。更早的漏洞是 `Reconcile` **只处理 service**（`if inst.Kind != service { continue }`），于是任务记录会永远停在 `running` —— 既是谎话，又永久占着用户的配额。修法：`runtime.ReconcileTasks` 在每个 tick 上结算（活着就收养、死了就 `stopped` + 「no verdict」；只碰有进程的状态，不碰 `pending`/service）。要保住判定得把任务改成瞬时 unit |
+| **重启后再结束的任务：退出码无从得知**（2026-09-24，ADR-022） | 网关重启不会杀掉任务（systemd 拥有进程），但记录退出码的是那个死掉的进程。更早的漏洞是 `Reconcile` **只处理 service**（`if inst.Kind != service { continue }`），于是任务记录会永远停在 `running` —— 既是谎话，又永久占着用户的配额。修法分两层：`runtime.ReconcileTasks` 在每个 tick 上结算失去等待者的任务；判定本身由 **systemd 写文件**（见下一条） |
+| **「让 systemd 记判定」的三个坑**（2026-09-24，ADR-022 收尾） | ① **不能依赖 `systemctl show`**：瞬时 unit 退出后会被快速回收（实测 1.4s 后 `LoadState=not-found`），所以判定必须落成文件 —— 用 `ExecStopPost=-/bin/sh -c "echo $EXIT_STATUS $SERVICE_RESULT > <log>.verdict"`（前置 `-` 让写判定失败不影响运行结果）。② **unit 的 stdout 不继承我们的 fd**：`cmd.Stdout = file` 对 `systemd-run --unit`（非 scope）什么都抓不到，服务日志此前只有 systemd-run 自己那行；正解是 `-p StandardOutput=append:<log>`。③ **重跑同一实例会撞旧 unit 与旧判定**：先 `reset-failed` 再删旧 `.verdict`。顺带修掉 task/service 两条路径每次启动泄漏一个日志 fd |
 | **取消会被等待者盖成 `failed`**（2026-09-24，写 MCP cancel 时发现） | `Cancel` → `StopService` 在 A 处写 `stopped`，而 `RunTask` 的等待者在 B 处被进程退出唤醒后可写 `failed (signal: terminated)` —— 两个 goroutine 各自 `SaveInstance`，谁后写谁赢，于是**一次故意的取消可能被记成崩溃**。修法：`RunTask` 在 `Wait` 返回后**回读记录**，若已是 `stopped` 就直接返回它（故意停止是权威）。确定性回归测试见 `execute` 的 `TestWaiterDoesNotOverwriteADeliberateStop`（先写 stopped、再放行进程）—— 去掉守卫它必失败（实测：`state=succeeded`）。教训：**记录是两个进程之间的决策点，只能回读，不能假设** |
 | **提交返回的实例 id 一时查不到**（2026-09-24，MCP e2e 第一跑发现） | `submit` 先返回 `instanceId`、再由后台 goroutine 启动；而记录是启动时才写的 —— 于是 agent「刚提交就查」得到误导性的 `not found`。修法：`startTask` **先写 pending 记录再起 goroutine**。教训：一个立刻返回的 id 必须立刻可寻址 |
 | **`Address.Child` 的语义陷阱：目录导航路径翻倍**（2026-09-23，浏览器 e2e 发现） | 资源条目的 `Rel` 是**相对 scope 根**的，而 `Address.Child(rel)` 是「拼接到当前路径」的。在 `/view?src=…/home/sub` 里用 `Child(entry.Rel)` 得到 `home/sub/sub/x.txt` —— 单测只断言「页面里出现了文件名」所以全绿，Playwright 点一下才发现 404。修法：条目的地址直接 `child.Path = entry.Rel`，**删掉 `Child`**（一个只在一个地方用、语义又容易搞错的便捷方法比没有更危险），并把「子链接必须是 scope 相对的」写成断言。教训：**UI 是检验契约的探针**（与流程画布那次同源）|
@@ -248,7 +249,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **`sandbox: none`（降级）+ `type: path` 参数不相容** | 参数值是**沙箱路径**（如 `/data/ref`），而降级模式没有 mount namespace，宿主上没有这个路径 —— 工具直接报 `ls: cannot access '/data/ref'`。工作区/home 在降级时会换成宿主路径（`PathView`），但 storage 路径没有这条映射。**要么用 `sandbox: bwrap` 跑带 storage 的工具，要么先修 `PathView.Env` 把 storage 参数也翻成宿主路径**（2026-09-22 用 MCP 端到端验证时发现，未修） |
 | **MCP 端点上 session cookie 不是凭据**（别把浏览器那套搬过来） | `/mcp` 只认 `Authorization: Bearer <agent token>`：程序没有浏览器，混用会让「谁在调用」变得不可审计；工具自建的 UI 想用只读数据，就签发自己的 token（`srcos_read_file` 那套范围是现成的只读后端） |
 
-| **并发第一次上线就暴露了两个真 bug**（2026-09-22，流程并发） | ① `sandbox.BwrapProbe` 的缓存是裸 `done bool`：第二个并发调用者看到 `done=true` 但结果还没写，于是拿到 **空 path + 空 why** → `BuildInner` 造出 `errors.New("")` → 实例记录成 `failed`、error 为空（"state failed"），完全查不出原因。修法：`sync.Once` + 失败时绝不允许空消息（`why` 为空也要给一句）。**教训：空消息的错误是最坏的失败模式** ② 任务用 `systemd-run --user --scope` 启动，**scope 的名字是 systemd 生成的**，`systemctl --user stop <我们记的 ref>` 永远 "not loaded"（还被当成成功！），而降级模式下 `processHandle` 又不报 pid → 任务根本停不掉（`flow cancel` 会假装停成功）。修法：`processHandle` 也实现 `PidReporter`，任务记录 pid + starttime，停止统一走「按引用 → 回退到记录里的 pid（校验 starttime）」 |
+| **并发第一次上线就暴露了两个真 bug**（2026-09-22，流程并发） | ① `sandbox.BwrapProbe` 的缓存是裸 `done bool`：第二个并发调用者看到 `done=true` 但结果还没写，于是拿到 **空 path + 空 why** → `BuildInner` 造出 `errors.New("")` → 实例记录成 `failed`、error 为空（"state failed"），完全查不出原因。修法：`sync.Once` + 失败时绝不允许空消息（`why` 为空也要给一句）。**教训：空消息的错误是最坏的失败模式** ② 任务当时用 `systemd-run --user --scope` 启动，**scope 的名字是 systemd 生成的**，`systemctl --user stop <我们记的 ref>` 永远 "not loaded"（还被当成成功！），而降级模式下 `processHandle` 又不报 pid → 任务根本停不掉（`flow cancel` 会假装停成功）。修法：`processHandle` 也实现 `PidReporter`，任务记录 pid + starttime，停止统一走「按引用 → 回退到记录里的 pid（校验 starttime）」。**2026-09-24 后任务改用自命名的瞬时 unit（`--unit=<我们起的名字>`），「按名字停」才真正成立**，pid 只留给降级模式 |
 
 | **画布暴露的语义漏洞：连线不等于依赖**（2026-09-22） | 在画布上给一个没有 `depends_on` 的节点连线时，它仍然留在第 1 层 —— 调度器可以先跑它去读一个**还不存在**的上游产物路径。修法：契约加一条规则（`flow-spec` §2.4 规则 5）**连线即依赖**：下游必须直接或间接 `depends_on` 上游，注册期校验；画布在画线时**自动补上** `depends_on`。教训：**UI 是检验契约的探针** —— 手写 YAML 的人不会忘，鼠标连线的人会 |
 
@@ -300,7 +301,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 019 | MCP Server 内置网关，第一期 read-only（✅ **已完成**，见 roadmap「MCP 实现契约」）；agent token（✅）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
-| 022 | **任务队列的消费者在网关内**；一次提交自动执行一次（认领互斥、`pending` 不算占用、流程节点不走队列）；重启后退出码无从得知（scope 无 `ExecMainStatus`） |
+| 022 | **任务队列的消费者在网关内**；一次提交自动执行一次（认领互斥、`pending` 不算占用、流程节点不走队列）；任务以 systemd **瞬时 unit** 运行，判定由 `ExecStopPost` 写入 `<日志>.verdict`，所以重启后仍有真实退出码 |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
 
 ### 授权模型的两条原则（未进 ADR 编号，但与 ADR 同级重要）
@@ -465,6 +466,7 @@ internal/agenttoken/        agent token（程序凭据）：只存 SHA-256、每
 internal/execute/           写入面唯一实现：Submit / Cancel / RunFlow（校验 + 配额 + 投递）
   ├ execute.go              submit 授权 = scope × submit_tools × Grant；取消幂等；流程逐节点校验白名单
   └ queue.go                任务队列消费者：启动冲刷 / 提交唤醒 / tick；认领、(用户,工具) 串行、全局上限
+                            （任务在 runtime 侧跑在 systemd 瞬时 unit 里，判定见 local.go 的 verdict*）
 internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全部逻辑
   └ conns.go                ActiveConns：长连接（WebSocket）计数，供回收判断"在用"
 internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
@@ -525,7 +527,7 @@ scripts/probe-env.sh        无 root 环境探测
 
 - `Ubuntu 24.04` · `kernel 6.8.0-139` · `user seqyuan(uid=1000)` · **bash 工具就跑在这台机器上**
 - ✅ **bwrap 可用**（已用 AppArmor 按二进制授权修好）
-- ✅ **`systemd-run --user --scope` 完全可用**（`CPUQuota`/`MemoryMax`/`TasksMax` 均接受，`Linger=yes`）
+- ✅ **`systemd-run --user` 完全可用**（`--scope` 与 `--unit` 均可；`CPUQuota`/`MemoryMax`/`TasksMax` 均接受，`Linger=yes`）
 - ✅ `runc 1.2.4` / `rootlesskit` / `slirp4netns` 已装（未验证能否无 root 容器化）
 - ❌ **无 `apptainer`/`singularity`**（注意 `/usr/games/singularity` 是 pygame 同名游戏）
 - ❌ **node01 不是 SGE 登录节点**（无 `qsub`/`qstat`）

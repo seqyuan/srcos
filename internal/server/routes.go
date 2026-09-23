@@ -67,8 +67,19 @@ func (s *Server) reconcileTasks() {
 	if len(adopted) > 0 {
 		log.Printf("[srcos] tasks reconcile: %d still running %v", len(adopted), adopted)
 	}
+	// Report the state the record actually ended in: a backend that records its
+	// own verdict (systemd) settles with the real outcome, and saying "no
+	// verdict" for those would be its own small lie.
 	for _, id := range settled {
-		log.Printf("[srcos] tasks reconcile: settled %s (no verdict: its process is gone)", id)
+		rec, err := runtime.LoadInstance(runtime.InstancePath(config.DirOf(s.registry), id))
+		switch {
+		case err != nil:
+			log.Printf("[srcos] tasks reconcile: settled %s", id)
+		case rec.Error != "":
+			log.Printf("[srcos] tasks reconcile: settled %s as %s (%s)", id, rec.State, rec.Error)
+		default:
+			log.Printf("[srcos] tasks reconcile: settled %s as %s (exit %d)", id, rec.State, rec.ExitCode)
+		}
 	}
 }
 

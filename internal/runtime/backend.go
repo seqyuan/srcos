@@ -194,8 +194,6 @@ type Options struct {
 	Backends map[string]Backend
 	// Routes is the dynamic routing table services publish into.
 	Routes *route.Table
-	// LogSink, when set, receives a live copy of the log.
-	LogSink func(instanceID string, line []byte)
 }
 
 // Runner drives a unit through its lifecycle.

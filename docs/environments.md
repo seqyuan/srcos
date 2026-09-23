@@ -82,13 +82,13 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 
 | 通道 | 结果 |
 |---|---|
-| `systemd-run --user --scope` | ✅ **完全可用** —— `CPUQuota` / `MemoryMax` / `TasksMax` 三属性均被接受 |
+| `systemd-run --user`（`--scope` 与 `--unit`） | ✅ **完全可用** —— `CPUQuota` / `MemoryMax` / `TasksMax` 三属性均被接受；瞬时 unit 可用 `ExecStopPost` 记判定（`$EXIT_STATUS`/`$SERVICE_RESULT`），退出后 ~1s 被回收（`LoadState=not-found`），所以判定要落文件 |
 | `Linger` | ✅ `yes`（SSH 登出后 user manager 仍在） |
 | cgroup v2 | ✅ 全控制器 `cpuset cpu io memory hugetlb pids rdma misc` |
 | 直接写 `/sys/fs/cgroup` | ❌ 不行（预期内） |
 | `prlimit` | ✅ 可用；`RLIMIT_AS` 被子进程继承（`ulimit -v = 262144`） |
 
-**结论**：**首选 `systemd-run --user --scope`**（cgroup 限制真正生效），`prlimit` 作为兜底。
+**结论**：**首选 `systemd-run --user`**（cgroup 限制真正生效；2026-09-24 起任务与 service 都用瞬时 unit），`prlimit` 作为兜底。
 
 ### 存储
 

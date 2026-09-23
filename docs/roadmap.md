@@ -100,7 +100,6 @@
 - 审计日志；`storages` 的 rw 配额
 - `apptainer` sandbox；dsh 集成（ADR-016 一步未做）
 - **Phase 5 剩余**：agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
-- **任务以 systemd 瞬时 unit 运行**（保住重启后的退出码；现在 scope 拿不到 `ExecMainStatus`，见 ADR-022）
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
@@ -108,7 +107,7 @@
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
 **`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
 下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5 的剩余前端件**（agent token 自助页 / 画布拖拽与
-`expose` 自动推导）、**Phase 5.5（dsh 路 B）**，或把任务改成 systemd unit（ADR-022 的那条限制）。
+`expose` 自动推导）或 **Phase 5.5（dsh 路 B）**。
 
 ---
 
@@ -446,7 +445,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   会拦未带 setuid 的 bwrap；采用**按二进制单独授权**的 AppArmor profile 解决（与 Ubuntu 自带的
   `lxc-usernsexec` / `podman` / `runc` 同机制），**不全局关闭 sysctl**。node01 已修复并验证通过。
   重跑 `scripts/probe-env.sh` 可确认；探测记录见 [`environments.md`](environments.md)。
-- **资源限制降级路径**（ADR 的实现细节）：`systemd-run --user --scope`（可用时首选）→ `prlimit`
+- **资源限制降级路径**（ADR 的实现细节）：`systemd-run --user --unit`（可用时首选；2026-09-24 前任务用 `--scope`，见 ADR-022）→ `prlimit`
   （`RLIMIT_AS`/`RLIMIT_CPU`/`RLIMIT_NPROC`，子进程继承）+ 轮询 RSS 超限 kill 整个进程组。
   node01 上 `systemd-run --user` **完全可用**（`CPUQuota`/`MemoryMax`/`TasksMax` 均被接受，`Linger=yes`），
   所以首选路径成立，`prlimit` 只作保险。
@@ -651,13 +650,20 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - **流程节点不走队列**：`flowrun` 以依赖顺序调度自己的 job（并已认领），队列跳过带流程标签的提交。
     否则一个 DAG 会被当成一堆互不相干的队列项乱序执行 —— 这是实现这一条时差点踩进去的坑。
   - **队列跑过的任务一样有审计**：走的是同一条 `job.Validate` + 配额 + 实例记录 + 日志路径。
-- **代价（明确写出来）**：退出码的「记录者」是启动它的那个网关进程。重启**不会**杀掉正在跑的任务
-  （systemd 拥有它），但重启后再结束的运行**退出码无从得知**：systemd 的 scope 不提供
-  `ExecMainStatus`（node01 实测：`exit 7` 之后 scope 仍是 `inactive/dead` + `Result=success`）。
-  因此 `ReconcileTasks` 在**每个 tick** 上结算这类记录：进程还活着就继续收养，死了就写 `stopped`
-  + 「no verdict」说明（`runtime.ReconcileTasks`；只碰有进程的状态，不碰 `pending`，不碰 service）。
-  要彻底保住判定，需要把任务从 systemd **scope** 改成瞬时 **unit**（unit 有 `ExecMainStatus`）——
-  这是 backend 改动，列为后续。
+- **判定必须活得比等待者长（2026-09-24 补齐）**：重启**不会**杀掉正在跑的任务（systemd 拥有它），
+  但「谁记下退出码」曾是那个死掉的网关进程。修法是**让 systemd 自己记**，分三步：
+  1. 任务从 `systemd-run --scope` 改为**瞬时 unit**（`--unit=<name> --wait`）：`--wait` 仍把退出码
+     同步交给等待者，unit 则给了稳定的名字（`stop` / `is-active` 按名操作）。
+  2. **unit 自己写判定**：`-p ExecStopPost=-/bin/sh -c "echo $EXIT_STATUS $SERVICE_RESULT > <log>.verdict"`
+     —— 系统把一个运行怎么结束写进一个文件（日志旁边，工作区之外，工具改不到）。
+     **不能只靠 `systemctl show`**：瞬时 unit 退出后会被快速回收（实测 1.4s 后 `LoadState=not-found`），
+     而 `ExecStopPost` 写下的文件永远在。
+  3. `runtime.ReconcileTasks` 在**每个 tick** 上结算失去等待者的任务：进程还活着就收养，死了就
+     **读判定文件**、用与实时路径**同一个** `applyExitStatus` 落库（成功/失败 + 真实退出码）；
+     只有后端答不出判定时才写 `stopped` + 说明。只碰有进程的状态（不碰 `pending`、不碰 service）。
+  另外两处副作用（都修了）：**unit 的 stdout 不继承我们的 fd**（`cmd.Stdout` 抓不到东西 —— 服务的
+  日志一直是空的，现在用 `StandardOutput=append:<log>` 由 systemd 写）；**重跑同一个实例**要先
+  `reset-failed` 旧 unit 并删掉旧判定文件，否则名字冲突、判定串味。
 - **不做**：引入外部队列/消息中间件（与「文件系统即数据库」冲突）；把 `qstat` 子作业跟踪塞进队列
   （ADR-006 已排除）；为队列加优先级/公平调度（先按提交时间 FIFO，够用）。
 
@@ -738,7 +744,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] prlimit 路径下的 RSS 看门狗（RLIMIT 无法表达"每单元进程数"，见 ADR-014 新增说明）
 - [x] **任务队列的消费者**（2026-09-24，ADR-022）：网关启动/周期 tick 消费投递目录、提交唤醒队列、
       O_EXCL 认领标记（与 `job run`、流程执行器互斥）、`--task-workers` 全局上限、按 (用户,工具) 串行、
-      `runtime.ReconcileTasks` 每 tick 结算失去等待者的任务记录
+      `runtime.ReconcileTasks` 每 tick 结算失去等待者的任务记录；**任务改以 systemd 瞬时 unit 运行**，
+      判定由 `ExecStopPost` 写入文件，所以重启后再结束的运行也有真实退出码
 
 ### Phase 3：注册、授权与管理端（**进行中**）
 - [x] 工具注册：扫描工具目录（`--tools-dir` / `$SRCOS_TOOLS_DIR`）
@@ -902,9 +909,10 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **管理端**：`grant.Policy` 线程安全 + `ReplaceWith`（授权热加载）；`runtime.UnitUsage`/`UnitSampler`（systemd cgroup 或 /proc 的资源快照）+ `inspect.AdminInstances/AdminTools`（管理视图与只读模型共用）；`/api/admin/*`（实例总览/强制停止/日志/工具授权/组/管理员，仅管理员 + Origin 校验）；`/admin` 控制台（服务端渲染 + 少量 JS 动作）+ 仪表盘入口 |
 | 2026-09-22 | **Phase 4 起步：流程契约 + 注册期校验** —— `docs/flow-spec.md`（schema / 类型兼容表 / 14 条校验 / 执行语义（规划）/ 与 annopi 对照 / 明确不做）+ `internal/flow`（DAG 拓扑序与环检测、连线类型兼容、必填输入闭环校验、`id@version` 精确匹配、节点必须 kind: task）+ `srcos flow list|validate` |
 | 2026-09-22 | **Phase 4 主体：流程跑起来了** —— `internal/flow` 补 planner（样本表解析、`expose`×表×连线 → 每个 (节点×样本) 的 job、类型强制转换、`--param` 与 `output.<名>` 两种来源）+ 运行记录/布局（`/flow` 内建挂载、run id、样本段）+ `internal/flowrun`（拓扑序、AND、`when: always`、失败即停、`.sign` 续跑、样本表留档）+ `srcos flow run\|resume\|status --dry-run` |
-| 2026-09-22 | **Phase 4 收尾**：流程级并发（`--concurrency`，默认 4，job 粒度）、`retry.max` 自动重试+退避（任务粒度）、`flow cancel`（跨进程标志文件 + 停掉在跑 job）、流程级配额；并发首次把运行时放到「两个 unit 同时开工」，因此修掉两个真 bug：**`BwrapProbe` 的缓存没有同步**（第二个调用者看到空的失败，报成无消息的 failed）与**任务不记录 pid**（`systemd-run --scope` 的名字由 systemd 生成，按引用停不掉） |
+| 2026-09-22 | **Phase 4 收尾**：流程级并发（`--concurrency`，默认 4，job 粒度）、`retry.max` 自动重试+退避（任务粒度）、`flow cancel`（跨进程标志文件 + 停掉在跑 job）、流程级配额；并发首次把运行时放到「两个 unit 同时开工」，因此修掉两个真 bug：**`BwrapProbe` 的缓存没有同步**（第二个调用者看到空的失败，报成无消息的 failed）与**任务不记录 pid**（当时任务用 `systemd-run --scope`，scope 的名字由 systemd 生成，按引用停不掉；2026-09-24 起任务改为自命名的瞬时 unit，见 ADR-022） |
 | 2026-09-22 | **管理端流程画布**：`webui/`（Vite+React+TS，独立工程，产物 embed 进二进制，dist 全部 gitignore 只留 .gitkeep 所以无 Node 也能构建）+ `/admin/flows/<id>/edit` + `/api/admin/flows`（list/get/put/validate，仅管理员，路径由 id 推导）+ 拓扑分层自动布局 + 两步点连线（**服务端校验**，画布不重复实现类型规则）；顺带补一条契约规则：**连线即依赖**（画布自动补 depends_on，服务端拒绝手工删掉的情况） |
 | 2026-09-23 | **Phase 5：`srcos://` 资源协议 + 自带 viewer** —— `internal/resource`（地址语法 + `patterns` 认领注册表，纯解析，与 `dsh-resource://` 同构 = 路 D 保险）+ `internal/inspect`（唯一解析入口：复用 `sandbox.Spec`/Jail，scope 用户相对、地址里无用户名，storage scope 走 ADR-020 闭包）+ `/api/resources`（元数据）/`raw`（字节，**永不 text/html**）/`html`（CSP sandbox）/`/view`（Go 模板 viewer：文本行号、服务端 Markdown、表格、图片、PDF、**sandbox iframe 的 HTML**、目录）+ viewer 注册表首批（`internal/web`）；storage id 保留 `home`/`workspace`；修掉一个真问题：`ResolveExisting` 把「文件不存在」报成「symlink escape」（见 handoff §4.2） |
 | 2026-09-23 | **Phase 5：任务列表 + SSE 日志流** —— `internal/inspect/logstream.go`（`FollowLogs`：尾部回放 → 跟随 → 终态收尾；**半行不当作一行**、15s 心跳、日志未出现时等待）+ `GET /api/jobs/<id>/logs`（默认纯文本尾部，`?follow=1` 为 SSE）+ `/tasks`、`/tasks/<id>`（服务端渲染，无 JS 也能读；产物的 `srcos://` 地址一键进 viewer）；顺带修 `Address.Child` 造成的目录导航路径重复（浏览器 e2e 发现，见 handoff §4.6） |
 | 2026-09-24 | **MCP 第二期：submit / cancel / run_flow** —— `internal/execute`（写入面唯一实现：校验 + 配额 + 投递 + 启动） `submit` scope 可签发（`srcos token create --scope submit --tool X` 按工具收窄，蕴含 read） REST `POST /api/jobs`（新增 `run`）/`/api/jobs/<id>/cancel`/`/api/flows/<id>/run` MCP 写入三件套（只对有 submit scope 的 token 列出） 每次写入一行审计；修掉两个真问题：实例在 submit 返回前不可寻址、取消被等待者盖成 failed（见 handoff §4.2） |
 | 2026-09-24 | **任务队列消费者（ADR-022）** —— 「目录即队列」终于有了守护进程：`internal/execute/queue.go`（启动即时冲刷 + 提交唤醒 + 周期 tick；按 (用户,工具) 串行、`--task-workers` 全局上限）、`job.Claim`（O_EXCL 认领，网关/CLI/流程执行器互斥）、`pending` 不算资源占用（`State.ConsumesResources`）、队列跳过流程节点、`runtime.ReconcileTasks` 每 tick 结算失去等待者的任务；新增 `--task-workers` / `--no-task-drainer`；已知限制：重启后运行结束的运行拿不回退出码（scope 无 `ExecMainStatus`） |
+| 2026-09-24 | **任务改以 systemd 瞬时 unit 运行 + 判定文件**（ADR-022 收尾）—— `systemd-run --unit --wait`（退出码仍同步返回，unit 给出稳定名字与 `is-active`/`stop` 句柄）、`-p StandardOutput=append:<log>`（**修掉一个一直存在的 bug**：unit 的 stdout 不继承我们的 fd，服务日志此前是空的）、`-p ExecStopPost=...` 把 `$EXIT_STATUS $SERVICE_RESULT` 写进 `<log>.verdict`（`systemctl show` 不能依赖：瞬时 unit 退出后 ~1s 就被回收）、`ReconcileTasks` 读判定文件并用同一个 `applyExitStatus` 落库（**重启后再结束的运行现在有真实退出码**）；顺带修掉每次启动泄漏一个日志 fd（task + service 两条路径） |

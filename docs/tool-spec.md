@@ -761,7 +761,7 @@ srcos job logs   <instance-id|job-id>
 | `MountSpec` + 路径解析（含 symlink 逃逸防护） | ✅ |
 | `sandbox: bwrap` 物化（含 `--clearenv` 与 `/opt/srcos/bin`） | ✅ |
 | `sandbox: none` 降级（并在实例记录里标注） | ✅ |
-| 资源限制：`systemd-run --user --scope` 优先，`prlimit` 兜底 | ✅ |
+| 资源限制：systemd 瞬时 unit（`systemd-run --user --unit`）优先，`prlimit` 兜底 | ✅ |
 | 实例记录、日志分离、`--force`、松匹配 | ✅ |
 | 按任务分派的产物与 `.sign`（幂等粒度） | ✅ |
 | 数据 storage（`requires_storages`） | ⛔ Phase 2 —— 声明了会明确报错 |

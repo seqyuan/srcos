@@ -696,6 +696,7 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
 ./srcos tool list     --tools-dir srcos-tools
 
 # 任务：提交 = 写 job.json 到投递目录（目录即队列）；**网关的任务队列会自动执行**
+#      （任务跑在 systemd 瞬时 unit 里，日志与退出码都由 systemd 侧写下）
 ./srcos job submit -d /opt/srcos/config --tools-dir srcos-tools \
   -n "hello demo" --tool hello-fanout \
   --param samples=S001,S002,S003 --output /workspace/out
@@ -942,11 +943,14 @@ srcos serve -d /opt/srcos/config --task-workers 2
 srcos serve -d /opt/srcos/config --no-task-drainer
 ```
 
-> **已知限制（退出码）**：任务进程由 systemd 拥有，网关重启**不会**杀掉正在跑的任务；
-> 但「谁记下了它的退出码」是网关进程 —— 重启后再等它结束，退出码已经无从得知
-> （systemd 的 scope 不提供 `ExecMainStatus`，实测 `exit 7` 之后 scope 仍是 `Result=success`）。
-> 这种情况记录会诚实收尾为 `stopped` 并写明原因，而不是假装成功或失败；日志与产物都还在。
-> 要彻底保住判定，需要让任务以 systemd **瞬时 unit**（而非 scope）运行 —— 见 roadmap。
+> **退出码在重启后依然在**：任务跑在 systemd 瞬时 unit 里，unit 自己会把「怎么结束的」写进
+> `<日志>.verdict`（`ExecStopPost` + `$EXIT_STATUS $SERVICE_RESULT`）。网关重启后再结束的运行，
+> 由每 tick 的 `ReconcileTasks` 读这个文件，用与实时路径**同一段代码**落库 —— 所以记录是真实的
+> 成功/失败与退出码，而不是「不知道」。只有后端答不出判定时（例如没有 user systemd、
+> 等待者与进程同时消失）才会收尾为 `stopped` 并写明原因。
+>
+> systemd unit 的另一个副作用值得知道：**unit 的 stdout 不继承 SRCOS 的 fd**，
+> 所以日志由 systemd 写（`StandardOutput=append:`），而不是我们把管道接过去。
 
 ## 管理控制台（`/admin`，仅管理员）
 

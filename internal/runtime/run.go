@@ -279,20 +279,14 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 
 	inst.EndedAt = time.Now().UTC()
 	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
-	inst.ExitCode = status.Code
 
 	switch {
 	case ctx.Err() != nil:
+		inst.ExitCode = status.Code
 		inst.State = StateFailed
 		inst.Error = "cancelled: " + ctx.Err().Error()
-	case status.Code == 0:
-		inst.State = StateSucceeded
 	default:
-		inst.State = StateFailed
-		inst.Error = fmt.Sprintf("tool exited with code %d", status.Code)
-		if status.Err != nil && status.Code < 0 {
-			inst.Error = status.Err.Error()
-		}
+		applyExitStatus(inst, status)
 	}
 
 	// A doneWhen probe defers the real verdict: exit 0 then only means
@@ -799,12 +793,10 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 // It runs on the scan tick rather than only at startup, because the process
 // usually outlives the restart: the truth only becomes knowable when it dies.
 //
-// What it cannot do is recover the exit code. A task runs as a systemd *scope*,
-// and a scope carries no `ExecMainStatus` (measured on node01: after `exit 7`
-// the scope is `inactive/dead` with `Result=success`). So a run interrupted by a
-// restart is settled as `stopped` with an explanation, not guessed at. Making
-// tasks transient *units* instead of scopes is what would preserve the verdict
-// across a restart — that is a backend change, recorded in the roadmap.
+// The verdict itself is asked of the backend (TaskProber): a systemd unit
+// records its own exit status in a file on stop, so a run interrupted by a
+// restart is settled with its real outcome. Only a backend that cannot answer
+// leaves the record as `stopped` with an explanation — never as a guess.
 func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string, err error) {
 	insts, err := ListInstances(r.opts.ConfigDir)
 	if err != nil {
@@ -834,15 +826,30 @@ func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string,
 			continue
 		}
 
-		inst.State = StateStopped
 		inst.EndedAt = time.Now().UTC()
 		if !inst.StartedAt.IsZero() {
 			inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
 		}
-		if inst.Error == "" {
-			inst.Error = "no verdict: the process is gone, and the SRCOS process that started this run " +
-				"is no longer here to record its exit status (restart or crash). The log and any outputs " +
-				"are still there; re-run with `srcos job run --force` if you need a fresh verdict."
+
+		// Ask the backend for the run's own account of how it ended before
+		// concluding that there is none: a unit records its exit status itself
+		// (ADR-022), so the common case after a restart is a real verdict — not
+		// an apology.
+		verdict, haveVerdict := ExitStatus{}, false
+		if b, ok := r.opts.Backends[inst.Backend]; ok {
+			if prober, ok := b.(TaskProber); ok {
+				verdict, haveVerdict = prober.TaskExit(ctx, inst)
+			}
+		}
+		if haveVerdict {
+			applyExitStatus(inst, verdict)
+		} else {
+			inst.State = StateStopped
+			if inst.Error == "" {
+				inst.Error = "no verdict: the process is gone, and neither systemd nor a waiter recorded " +
+					"an exit status. The log and any outputs are still there; re-run with " +
+					"`srcos job run --force` if you need a fresh verdict."
+			}
 		}
 		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
 			err = serr
@@ -853,6 +860,39 @@ func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string,
 	sort.Strings(adopted)
 	sort.Strings(settled)
 	return adopted, settled, err
+}
+
+// applyExitStatus writes how a run ended onto its record.
+//
+// It is shared by the waiter (RunTask) and the reconciler (ReconcileTasks), so a
+// task settled after a restart is described exactly like one settled live — the
+// wording of a failure is part of what a user reads, and two spellings of it
+// would be two facts.
+func applyExitStatus(inst *Instance, status ExitStatus) {
+	inst.ExitCode = status.Code
+	if status.Code == 0 {
+		inst.State = StateSucceeded
+		inst.Error = ""
+		return
+	}
+	inst.State = StateFailed
+	inst.Error = fmt.Sprintf("tool exited with code %d", status.Code)
+	if status.Code < 0 && status.Err != nil {
+		inst.Error = status.Err.Error()
+	}
+}
+
+// TaskProber is implemented by backends that can report how a *finished* task
+// ended after the fact — when the process that started it is no longer around
+// to observe the exit.
+//
+// It is what turns "no verdict" into a real one after a SRCOS restart: the
+// local backend reads the file systemd's ExecStopPost wrote (ADR-022), which
+// survives both the restart and garbage collection of the unit.
+type TaskProber interface {
+	// TaskExit returns the run's exit status, or ok=false when no verdict was
+	// recorded (never a guess).
+	TaskExit(ctx context.Context, inst *Instance) (ExitStatus, bool)
 }
 
 // UnitProber is implemented by backends that can answer "is this unit still

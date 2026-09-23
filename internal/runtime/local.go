@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,21 +83,25 @@ func ResolveArgv(t *tool.Tool, view PathView, jobDir string) ([]string, error) {
 
 // Local runs units on this host.
 //
-// Tasks use a transient *scope* (`systemd-run --scope`), which blocks and
-// propagates the exit code — the natural fit for run-to-completion work.
+// Tasks and services both run as transient systemd *units*
+// (`systemd-run --user --unit=<name>`). A unit gives the cgroup limits, a
+// stable handle for `systemctl --user stop`/`is-active`, and — because
+// systemd keeps the unit's own account of how it ended — a verdict that
+// outlives the process that started it. Tasks pass `--wait`, so the caller
+// still gets the exit code immediately; services return as soon as the unit is
+// registered (the caller healthchecks).
 //
-// Services use a transient *unit* (`systemd-run --unit=<name>`), which returns
-// immediately and gives us what a long-running unit needs: cgroup limits,
-// restart policy, a stable handle for `systemctl --user stop`, and a lifecycle
-// systemd owns rather than SRCOS re-implementing.
+// The unit's output is captured with `StandardOutput=append:<log>`, i.e.
+// systemd writes it, not SRCOS: for a *unit* the process does not inherit our
+// file descriptors, so wiring `cmd.Stdout` captures nothing (measured: the log
+// held only systemd-run's own banner while the tool's output went to the
+// journal).
 //
 // Both fall back to a plain child process when the user manager is absent,
 // which is common on HPC login nodes (ADR-014).
 type Local struct {
 	// SystemdUser forces or forbids the user manager. Zero value auto-detects.
 	SystemdUser *bool
-	// Stdout receives a live copy of the log. Optional.
-	Stdout func(instanceID string, line []byte)
 }
 
 func (l *Local) Name() string { return "local" }
@@ -129,30 +133,50 @@ func (l *Local) Start(ctx context.Context, req StartRequest) (Handle, error) {
 		return nil, err
 	}
 
+	// The log file is created (and truncated) here so it exists before the unit
+	// starts: systemd appends to it, or a plain child writes to it.
 	logFile, err := os.Create(req.LogPath)
 	if err != nil {
 		return nil, err
 	}
-	sink := sinkFor(logFile, req.InstanceID, l.Stdout)
 
 	if req.Tool.Kind == tool.KindService {
-		return l.startService(ctx, req, inner, logFile, sink)
+		return l.startService(ctx, req, inner, logFile)
 	}
-	return l.startTask(ctx, req, inner, logFile, sink)
+	return l.startTask(ctx, req, inner, logFile)
 }
 
-// startTask runs a scope synchronously in a goroutine so Start can return a
-// handle immediately, matching the Backend contract.
-func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string, logFile *os.File, sink io.Writer) (Handle, error) {
+// startTask launches a run-to-completion unit and returns a handle whose Wait
+// reports how it ended.
+//
+// Under systemd this uses a *unit* with `--wait` (not a `--scope`): the unit
+// can be inspected and stopped by name, and its exit status is recorded by
+// systemd itself, so a verdict survives the death of this process (ADR-022).
+func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string, logFile *os.File) (Handle, error) {
 	path, args, limiterName := l.taskCommand(ctx, req, inner)
 
-	cmd := exec.Command(path, args...)
-	cmd.Stdout = sink
-	cmd.Stderr = sink
-	cmd.Stdin = nil
-	if req.View.Degraded {
-		cmd.Dir = req.Cwd
+	if limiterName == "systemd-run" {
+		// A unit name is derived from the instance id, so a *re-run* of the same
+		// instance meets its predecessor's leftovers: a failed unit stays loaded
+		// (which would make this start fail on the name), and the old verdict
+		// file would otherwise be read as this run's outcome.
+		_ = exec.Command("systemctl", "--user", "reset-failed", req.UnitName).Run()
+		_ = os.Remove(verdictPath(req.LogPath))
 	}
+
+	cmd := exec.Command(path, args...)
+	if limiterName != "systemd-run" {
+		// A plain child (degraded mode) inherits our file descriptors, so the
+		// log is ours to wire. A systemd unit does not: systemd writes the log
+		// (StandardOutput=append:) and this process's own stdio goes to the
+		// gateway's, where a registration failure is more useful anyway.
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		if req.View.Degraded {
+			cmd.Dir = req.Cwd
+		}
+	}
+	cmd.Stdin = nil
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -161,13 +185,24 @@ func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string,
 	h := &processHandle{
 		ref:     req.UnitName,
 		cmd:     cmd,
-		logFile: logFile,
 		done:    make(chan ExitStatus, 1),
 		limiter: limiterName,
 		command: append([]string{path}, args...),
 	}
+	if limiterName == "systemd-run" {
+		// The unit has its own descriptor for the log (StandardOutput=append:),
+		// so ours is not needed — and holding it would leak one per run.
+		logFile.Close()
+		go func() {
+			err := cmd.Wait()
+			h.done <- ExitStatus{Code: exitCode(err), Err: err}
+		}()
+		return h, nil
+	}
 	go func() {
 		err := cmd.Wait()
+		// A plain child writes through this descriptor: it lives until the
+		// child is gone.
 		logFile.Close()
 		h.done <- ExitStatus{Code: exitCode(err), Err: err}
 	}()
@@ -178,9 +213,20 @@ func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string,
 // limiter this host offers.
 func (l *Local) taskCommand(ctx context.Context, req StartRequest, inner []string) (string, []string, string) {
 	if l.useSystemd() {
-		args := []string{"--user", "--scope", "--quiet"}
+		args := []string{"--user", "--unit", req.UnitName, "--quiet", "--wait"}
 		for _, p := range req.Limiter.SystemdProps {
 			args = append(args, "-p", p)
+		}
+		// The log belongs to the unit: systemd opens it and appends the tool's
+		// stdout+stderr, interleaved as the tool produced them.
+		args = append(args,
+			"-p", "StandardOutput=append:"+req.LogPath,
+			"-p", "StandardError=append:"+req.LogPath,
+			"-p", verdictCommand(req.LogPath))
+		if req.View.Degraded {
+			// In a sandbox the working directory is set by bwrap (--chdir); a unit
+			// would otherwise start in / and the tool could not find its job dir.
+			args = append(args, "--working-directory", req.Cwd)
 		}
 		args = append(args, "--")
 		return "systemd-run", append(args, inner...), "systemd-run"
@@ -196,26 +242,31 @@ func (l *Local) taskCommand(ctx context.Context, req StartRequest, inner []strin
 
 // startService launches a transient unit and returns as soon as it is
 // registered, so the caller can healthcheck and publish a route.
-func (l *Local) startService(ctx context.Context, req StartRequest, inner []string, logFile *os.File, sink io.Writer) (Handle, error) {
+func (l *Local) startService(ctx context.Context, req StartRequest, inner []string, logFile *os.File) (Handle, error) {
 	h := &systemdUnitHandle{
 		ref:     req.UnitName,
 		unit:    req.UnitName,
-		logFile: logFile,
 		command: append([]string{"systemd-run"}, inner...),
 		useUnit: l.useSystemd(),
 	}
 	if !h.useUnit {
-		return l.startServiceFallback(req, inner, logFile, sink, h)
+		return l.startServiceFallback(req, inner, logFile, h)
 	}
 
 	// A previous run of the same (user, tool) may have left a failed unit
 	// behind, which would make this start fail on a name collision.
 	_ = exec.Command("systemctl", "--user", "reset-failed", req.UnitName).Run()
 
-	args := []string{"--user", "--unit", req.UnitName}
+	args := []string{"--user", "--unit", req.UnitName, "--quiet"}
 	for _, p := range req.Limiter.SystemdProps {
 		args = append(args, "-p", p)
 	}
+	// The unit's output goes to SRCOS's log file, not the journal: a service's
+	// log is how a user sees why it did not come up, and the journal belongs to
+	// the host, not to this instance.
+	args = append(args,
+		"-p", "StandardOutput=append:"+req.LogPath,
+		"-p", "StandardError=append:"+req.LogPath)
 	// A service is expected to be up for a long time; restart on failure gives
 	// crash recovery without SRCOS polling for liveness.
 	if req.Tool.Lifecycle != nil && req.Tool.Lifecycle.Restart != "" && req.Tool.Lifecycle.Restart != "never" {
@@ -223,24 +274,25 @@ func (l *Local) startService(ctx context.Context, req StartRequest, inner []stri
 	}
 	args = append(args, "--")
 	cmd := exec.Command("systemd-run", append(args, inner...)...)
-	cmd.Stdout = sink
-	cmd.Stderr = sink
 	h.command = append([]string{"systemd-run"}, append(args, inner...)...)
 
 	if err := cmd.Run(); err != nil {
 		logFile.Close()
 		return nil, fmt.Errorf("systemd-run --unit %s: %w", req.UnitName, err)
 	}
+	// The unit writes the log itself (StandardOutput=append:); our descriptor is
+	// not the unit's, so close it rather than leak one per service start.
+	logFile.Close()
 	return h, nil
 }
 
 // startServiceFallback runs a service as a plain child process. No cgroup
 // limits and no restart policy apply; the caller is told which limiter was
 // used so it can surface the degradation.
-func (l *Local) startServiceFallback(req StartRequest, inner []string, logFile *os.File, sink io.Writer, h *systemdUnitHandle) (Handle, error) {
+func (l *Local) startServiceFallback(req StartRequest, inner []string, logFile *os.File, h *systemdUnitHandle) (Handle, error) {
 	cmd := exec.Command(inner[0], inner[1:]...)
-	cmd.Stdout = sink
-	cmd.Stderr = sink
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	if req.View.Degraded {
 		cmd.Dir = req.Cwd
 	}
@@ -255,38 +307,83 @@ func (l *Local) startServiceFallback(req StartRequest, inner []string, logFile *
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 退出判定（verdict）
+// ─────────────────────────────────────────────────────────────────────────
+
+// verdictPath is where systemd records how a run ended.
+//
+// It sits beside the log, outside the workspace, for the same reason the log
+// does: the tool must not be able to rewrite its own outcome.
+func verdictPath(logPath string) string { return logPath + ".verdict" }
+
+// verdictCommand is the systemd property that records a run's outcome.
+//
+// The waiter that starts a unit normally reports the exit code itself — but a
+// waiter can die with the SRCOS process (a restart), and systemd's own
+// `ExecStopPost` runs regardless. systemd hands it $EXIT_STATUS and
+// $SERVICE_RESULT, so the verdict lands in a file where a *later* SRCOS finds
+// it. Without this the record would have to admit "no verdict" (ADR-022).
+//
+// The leading '-' ignores a failure of the command itself: failing to write
+// the verdict must never turn a successful run into a failed one. The path is
+// single-quoted for the shell because systemd parses this value as a command
+// line; SRCOS path construction (validated user and tool ids) is what makes
+// that safe.
+func verdictCommand(logPath string) string {
+	return fmt.Sprintf(`ExecStopPost=-/bin/sh -c "echo $EXIT_STATUS $SERVICE_RESULT > '%s'"`, verdictPath(logPath))
+}
+
+// parseVerdict reads the "<EXIT_STATUS> <SERVICE_RESULT>" systemd wrote.
+func parseVerdict(raw string) (ExitStatus, bool) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) == 0 {
+		return ExitStatus{}, false
+	}
+	status, result := fields[0], ""
+	if len(fields) > 1 {
+		result = fields[1]
+	}
+	if code, err := strconv.Atoi(status); err == nil {
+		switch {
+		case code == 0:
+			return ExitStatus{Code: 0}, true
+		case result != "" && result != "exit-code" && result != "success":
+			// systemd knows more than the number: an OOM kill or a timeout is the
+			// reason, and that is the useful half of the message.
+			return ExitStatus{Code: code, Err: errors.New(result)}, true
+		default:
+			return ExitStatus{Code: code, Err: fmt.Errorf("exited with code %d", code)}, true
+		}
+	}
+	// Not a number: $EXIT_STATUS carries a signal name when the unit was killed.
+	return ExitStatus{Code: -1, Err: fmt.Errorf("terminated by %s", status)}, true
+}
+
+// TaskExit reports how a task ended, for a caller whose waiter is gone.
+//
+// It reads the file systemd's ExecStopPost wrote (see verdictCommand), so the
+// answer survives both a SRCOS restart and garbage collection of the unit.
+// ok=false means "no verdict available" — never a guess.
+func (l *Local) TaskExit(ctx context.Context, inst *Instance) (ExitStatus, bool) {
+	if !l.useSystemd() {
+		return ExitStatus{}, false
+	}
+	data, err := os.ReadFile(verdictPath(inst.LogPath))
+	if err != nil {
+		return ExitStatus{}, false
+	}
+	return parseVerdict(string(data))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Handles
 // ─────────────────────────────────────────────────────────────────────────
 
-// fanoutWriter tees the instance log to an optional live sink so the CLI can
-// stream it while the run is still in progress.
-type fanoutWriter struct {
-	log      io.Writer
-	instance string
-	extra    func(string, []byte)
-}
-
-func (w fanoutWriter) Write(p []byte) (int, error) {
-	n, err := w.log.Write(p)
-	if n > 0 && w.extra != nil {
-		w.extra(w.instance, append([]byte(nil), p[:n]...))
-	}
-	return n, err
-}
-
-func sinkFor(logFile *os.File, instanceID string, extra func(string, []byte)) io.Writer {
-	if extra == nil {
-		return logFile
-	}
-	return fanoutWriter{log: logFile, instance: instanceID, extra: extra}
-}
-
-// processHandle is a task running as a direct child (systemd scope or plain
-// process).
+// processHandle is a task running as a direct child (a systemd unit with
+// --wait, or a plain process).
 type processHandle struct {
 	ref     string
 	cmd     *exec.Cmd
-	logFile *os.File
 	done    chan ExitStatus
 	limiter string
 	command []string
@@ -369,7 +466,6 @@ type systemdUnitHandle struct {
 	unit    string
 	useUnit bool
 	process *exec.Cmd
-	logFile *os.File
 	command []string
 
 	stopOnce sync.Once

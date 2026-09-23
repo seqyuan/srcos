@@ -3,14 +3,22 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
-// stubBackend answers the only question ReconcileTasks asks: is the unit still
-// there? It never starts anything, so these tests need no processes.
+// stubBackend answers the two questions ReconcileTasks asks: is the unit still
+// there, and (when it is not) how did it end. It never starts anything, so
+// these tests need no processes.
 type stubBackend struct {
-	alive bool
+	alive      bool
+	verdict    ExitStatus
+	hasVerdict bool
+}
+
+func (b *stubBackend) TaskExit(ctx context.Context, inst *Instance) (ExitStatus, bool) {
+	return b.verdict, b.hasVerdict
 }
 
 func (b *stubBackend) Name() string { return "local" }
@@ -56,6 +64,8 @@ func TestReconcileTasksSettlesOrphans(t *testing.T) {
 	configDir := t.TempDir()
 	saveTestInstance(t, configDir, "alice-demo-gone", "task", StateRunning)
 
+	// This backend cannot say how the run ended (no verdict file), so the record
+	// must admit that rather than invent a state.
 	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": &stubBackend{alive: false}}})
 	adopted, settled, err := runner.ReconcileTasks(context.Background())
 	if err != nil {
@@ -73,6 +83,81 @@ func TestReconcileTasksSettlesOrphans(t *testing.T) {
 	}
 	if rec.State.ConsumesResources() {
 		t.Error("a settled task must stop holding its quota")
+	}
+}
+
+// When the backend recorded how the run ended, the reconciler uses it: a task
+// interrupted by a restart is settled with its real outcome, not an apology.
+func TestReconcileTasksUsesTheBackendsVerdict(t *testing.T) {
+	cases := []struct {
+		name       string
+		verdict    ExitStatus
+		wantState  State
+		wantCode   int
+		wantErrHas string
+	}{
+		{"success", ExitStatus{Code: 0}, StateSucceeded, 0, ""},
+		{"failure", ExitStatus{Code: 3, Err: errors.New("exited with code 3")}, StateFailed, 3, "code 3"},
+		{"killed", ExitStatus{Code: -1, Err: errors.New("terminated by TERM")}, StateFailed, -1, "TERM"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			saveTestInstance(t, configDir, "alice-demo-verdict", "task", StateRunning)
+			backend := &stubBackend{alive: false, verdict: c.verdict, hasVerdict: true}
+			runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": backend}})
+
+			adopted, settled, err := runner.ReconcileTasks(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(adopted) != 0 || len(settled) != 1 {
+				t.Fatalf("adopted=%v settled=%v", adopted, settled)
+			}
+			rec := loadTestInstance(t, configDir, "alice-demo-verdict")
+			if rec.State != c.wantState || rec.ExitCode != c.wantCode {
+				t.Fatalf("record = state=%s code=%d error=%q", rec.State, rec.ExitCode, rec.Error)
+			}
+			if c.wantErrHas != "" && !strings.Contains(rec.Error, c.wantErrHas) {
+				t.Fatalf("error = %q, want it to mention %q", rec.Error, c.wantErrHas)
+			}
+		})
+	}
+}
+
+// The verdict file is systemd's format: "<EXIT_STATUS> <SERVICE_RESULT>".
+func TestParseVerdict(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantOK    bool
+		wantCode  int
+		wantErrIs string
+	}{
+		{"0 success", true, 0, ""},
+		{"3 exit-code", true, 3, "exited with code 3"},
+		{"TERM success", true, -1, "terminated by TERM"},
+		{"137 oom-kill", true, 137, "oom-kill"},
+		{"1 timeout", true, 1, "timeout"},
+		{"", false, 0, ""},
+		{"   ", false, 0, ""},
+	}
+	for _, c := range cases {
+		got, ok := parseVerdict(c.raw)
+		if ok != c.wantOK {
+			t.Errorf("parseVerdict(%q) ok = %v, want %v", c.raw, ok, c.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if got.Code != c.wantCode {
+			t.Errorf("parseVerdict(%q) code = %d, want %d", c.raw, got.Code, c.wantCode)
+		}
+		if c.wantErrIs != "" {
+			if got.Err == nil || !strings.Contains(got.Err.Error(), c.wantErrIs) {
+				t.Errorf("parseVerdict(%q) err = %v, want it to mention %q", c.raw, got.Err, c.wantErrIs)
+			}
+		}
 	}
 }
 
