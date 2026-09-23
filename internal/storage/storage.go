@@ -40,6 +40,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/sandbox"
 )
 
@@ -172,6 +173,11 @@ func New(items []Storage) (Provider, error) {
 
 		if !idRe.MatchString(s.ID) {
 			bad("%s: id must match %s", where, idRe)
+		}
+		// The two builtin resource scopes (ADR-011/016: srcos://file/home/...).
+		// Reserving them here keeps an address from being ambiguous.
+		if s.ID == resource.ScopeHome || s.ID == resource.ScopeWorkspace {
+			bad("%s: id %q is reserved (it names a builtin resource scope)", where, s.ID)
 		}
 		if seen[s.ID] {
 			bad("%s: duplicate id", where)

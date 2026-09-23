@@ -25,10 +25,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -77,6 +79,9 @@ type Reader struct {
 	// Grants filters the catalogue. Nil means authorization is not wired (a
 	// single-user deployment) and every tool is visible.
 	Grants Grants
+	// Viewers decides which viewer claims a srcos:// resource (ADR-016's
+	// registry). Nil uses the built-in first batch.
+	Viewers *resource.Registry
 }
 
 // StorageView is one declared data root, as a caller sees it.
@@ -204,6 +209,13 @@ func (r *Reader) VisibleManifests(username string) ([]*tool.Tool, error) {
 	}
 	all, err := tool.Discover(r.ToolsDir)
 	if err != nil {
+		// A missing directory is the same statement as an empty one — "this
+		// deployment has no tools (yet)" — and the startup path already reads it
+		// that way. A *malformed* tool still surfaces, because that is a
+		// configuration mistake rather than a fresh install.
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })

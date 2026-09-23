@@ -54,7 +54,7 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 	case path == "/instances" && r.Method == http.MethodGet:
 		instances, err := h.adminInstances(r)
 		if err != nil {
-			writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+			writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 			return true
 		}
 		writeJSON(w, 200, map[string]any{"instances": instances})
@@ -72,7 +72,7 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 		}
 		log, err := h.reader().AdminLogs(id, tail)
 		if err != nil {
-			writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+			writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 			return true
 		}
 		writeJSON(w, 200, map[string]any{"instance": id, "log": log})
@@ -80,7 +80,7 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 	case path == "/tools" && r.Method == http.MethodGet:
 		tools, err := h.adminTools()
 		if err != nil {
-			writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+			writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 			return true
 		}
 		writeJSON(w, 200, map[string]any{"tools": tools})
@@ -186,7 +186,7 @@ func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, id s
 	}
 	inst, err := h.reader().AdminInstance(id)
 	if err != nil {
-		writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	t, err := h.manifestForAdmin(inst.Tool)

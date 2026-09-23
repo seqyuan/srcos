@@ -24,6 +24,7 @@ import (
 	"github.com/seqyuan/srcos/internal/mcp"
 	"github.com/seqyuan/srcos/internal/proxy"
 	"github.com/seqyuan/srcos/internal/rate"
+	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/storage"
@@ -468,8 +469,10 @@ func (s *Server) Handler() http.Handler {
 
 	// Tool/storage API. Registered as exact paths, like /api/services, so a
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
-	// These four are now reserved gateway paths (README「保留路径」).
-	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/admin", "/api/admin/"} {
+	// Each of these is a reserved gateway path (README「保留路径」).
+	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs",
+		"/api/resources", "/api/resources/raw", "/api/resources/html",
+		"/api/admin", "/api/admin/"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
 			if s.apiHandler.ServeHTTP(w, r) {
 				return
@@ -485,6 +488,11 @@ func (s *Server) Handler() http.Handler {
 	// Tool catalogue and the generated fallback form (ADR-017).
 	mux.HandleFunc("/tools", s.handleToolsPage)
 	mux.HandleFunc("/tools/", s.handleToolFormPage)
+
+	// The built-in resource viewer (srcos:// + the first batch of viewers,
+	// ADR-011/016). A page, not JSON, because it is the platform's own fallback
+	// UI and must work with JavaScript disabled.
+	mux.HandleFunc("/view", s.handleView)
 
 	// The management console (admins only; non-admins are redirected, not shown
 	// a bare 403, because the page is not a secret).
@@ -1521,6 +1529,73 @@ func (s *Server) handleToolFormPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendHTML(w, 404, web.NotFoundPage(s.siteTitle))
+}
+
+// handleView renders one srcos:// resource, or — with no src — the roots this
+// user may browse.
+//
+// It is the platform's own viewer (ADR-016's default layer): server-rendered,
+// no JavaScript, no build step, so it works on a deployment that has never seen
+// Node, and so a file is viewable even if a tool ships no UI of its own.
+func (s *Server) handleView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	reader := s.reader()
+	src := strings.TrimSpace(r.URL.Query().Get("src"))
+
+	if src == "" {
+		scopes, err := reader.ResourceScopes(username)
+		if err != nil {
+			sendHTML(w, api.ErrorStatus(err), web.ResourceErrorPage(s.siteTitle, err.Error()))
+			return
+		}
+		sendHTML(w, 200, web.ResourceScopesPage(s.siteTitle, scopes))
+		return
+	}
+
+	addr, err := resource.Parse(src)
+	if err != nil {
+		sendHTML(w, http.StatusBadRequest, web.ResourceErrorPage(s.siteTitle, err.Error()))
+		return
+	}
+	view, err := reader.ViewResource(username, inspect.ResourceRequest{
+		Scope: addr.Scope,
+		Path:  addr.Path,
+		Tool:  addr.Tool,
+	}, r.URL.Query().Get("viewer"))
+	if err != nil {
+		sendHTML(w, api.ErrorStatus(err), web.ResourceErrorPage(s.siteTitle, err.Error()))
+		return
+	}
+
+	sendHTML(w, 200, web.ResourcePage(web.ResourcePageData{
+		SiteTitle: s.siteTitle,
+		Src:       addr.String(),
+		Addr:      addr,
+		View:      view,
+		ScopeName: s.resourceScopeName(username, addr),
+		Viewers:   resource.Default().All(),
+	}))
+}
+
+// resourceScopeName finds the human title of the scope an address names, so the
+// viewer's heading says "集群共享盘" rather than "data".
+func (s *Server) resourceScopeName(username string, addr resource.Address) string {
+	scopes, err := s.reader().ResourceScopes(username)
+	if err == nil {
+		for _, sc := range scopes {
+			if sc.Scope == addr.Scope && sc.Tool == addr.Tool {
+				return sc.Name
+			}
+		}
+	}
+	return addr.Scope
 }
 
 // reader is the read-only view of the platform, shared with the API and MCP

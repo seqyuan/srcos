@@ -105,7 +105,7 @@ func (h *Handler) handleListJobs(w http.ResponseWriter, r *http.Request, usernam
 		strings.TrimSpace(r.URL.Query().Get("tool")),
 		strings.TrimSpace(r.URL.Query().Get("kind")))
 	if err != nil {
-		writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"jobs": views})

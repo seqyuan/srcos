@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-22（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 起步 = 流程画布**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/并发调度/重试/取消/续跑/画布）完成）
+> 最后更新：2026-09-23（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 = 画布 + `srcos://` 资源协议与自带 viewer**；agent token + MCP（只读）+ 动态路由 + 自动回收 + 管理端 + 流程（契约/校验/并发调度/重试/取消/续跑/画布）+ 资源查看器完成）
 
 ---
 
@@ -46,8 +46,8 @@
 管理员还能**画流程**：`/admin/flows/<id>/edit`（webui/ Vite+React，只有这一页加载它 —— ADR-012），
 拓扑分层自动布局、两步点连线、**服务端校验**（画布不重复实现类型规则）、校验通过才写回 `flow.yaml`。
 
-下一步：**MCP 第二期**（`submit` / `run_flow` / `cancel`，需先定 `submit` scope 粒度）或 Phase 5 的其它前端件
-（viewer / 任务列表 / token 自助页）。
+下一步：**MCP 第二期**（`submit` / `run_flow` / `cancel`，需先定 `submit` scope 粒度）或 Phase 5 的其余前端件
+（任务列表 + SSE 日志流 / agent token 自助页 / 画布拖拽与 `expose` 自动推导）。
 
 ---
 
@@ -120,6 +120,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 生成式表单 + srcos-path-picker 原语控件                          │
 │ ✅ agent token：Bearer 认证 · 只存哈希 · 只读 scope · 立即撤销       │
 │ ✅ MCP Server：/mcp（Streamable HTTP）· 9 个只读工具 · 无状态        │
+│ ✅ 资源协议：srcos:// ＋ /api/resources ＋ /view（自带 viewer）      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -139,6 +140,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **路径浏览边界** | 未声明的 storage → 403；路径逃逸 → 400；未登录 → 401；`/assets/../../etc/passwd` → 404 |
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
+| **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
 | **流程的并发/重试/取消/配额** | `--concurrency 2` + 6 样本 × `sleep 3` → **9.4s**（顺序 18s），时间线显示恰好 2 个重叠；`retry: {max: 2}` + 故意失败一次的任务 → 日志 `retry … in 30s (attempt 1/2)` → 最终 succeeded，记录里 `units: {s01-x: 2}`；`flow cancel`（另一进程）→ 运行 `cancelled`、实例 `stopped`、`sleep 120` 被杀、调度器自行收敛、节点标 `skipped`；`--max-instances 1` + 并发 2 → 第二个任务被拒：`instance quota reached: you have 1 of 1 allowed for this tool; stop one first` |
 | **流程跑起来** | `srcos flow run --samples samples.csv scrna` → 2 节点 × 2 样本 = **4 个普通任务**（`job list` 里带 flow/run/node/sample 标签），按依赖顺序执行；下游 `qc` **真的读到了**上游 `count` 的产物（`clean.txt` = `counts.txt` 的内容，路径 `/flow/runs/<run>/nodes/count/s01-s001/outs`）；`nodes/*/.sign` 自动写好；`flow status` 列出运行；`flow resume` 两节点全 `skip (already done, signed)`；`flow run --dry-run` 打印每个 job 的参数与产物路径。失败路径：下游工具 `exit 3` → 该节点 `failed`（只提交了 1 个样本就停）、`when: always` 的 report 节点仍跑、普通下游 `strict` 标 `skipped`、退出码 1 |
 | **流程契约与校验** | `srcos flow list` 显示 3 节点 / 3 层 / 样本列 `fastq_dir,sample_id`；`flow validate` 对合法流程给出拓扑序（`count → qc → report(when=always)`）；对坏流程**一次报出 8 个问题**（含环 `a → c → b → a`、未知输出、非法 `from`、4 个未满足的必填输入）；`count@9.9.9` 版本不匹配与 `kind: service` 当节点各自被点名；退出码 1 |
@@ -154,8 +156,8 @@ UI 造起来便宜了 → UI 不再是护城河
   什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
 - ⛔ **画布的拖拽摆放与 `expose` 自动推导** —— 布局现在是拓扑推导（不写进契约），
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
-- ⛔ **Phase 5 其它前端件** —— viewer（文本/Markdown/表格/图片/PDF/HTML）、`srcos://` 资源协议、
-  任务列表 + 日志流、agent token 自助页
+- ⛔ **Phase 5 其它前端件** —— 任务列表 + SSE 日志流、agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
+  （`srcos://` 资源协议与自带 viewer 已于 2026-09-23 完成）
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **网关侧起停服务**（`svc start` 仍只在 CLI；管理端能停、不能起）—— admin API 的下一步
 - ⛔ **storage 声明的管理端编辑**（`storages.yaml` 目前只有 CLI/手写）
@@ -214,6 +216,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **bwrap 无法在已只读绑定的 `/usr` `/bin` `/lib*` 内创建挂载点** | 报 `Can't create file at ...: Read-only file system`。工具自带二进制统一放 `/opt/srcos/bin`（沙箱 PATH 第一项），注册期直接拒绝违规配置 |
 | **`--clearenv` 后必须显式给 `PATH`** | 否则工具连 `bash` 都找不到 |
 | **`unshare --user` 失败不代表 bwrap 不能工作** | AppArmor 授权是按二进制给的 |
+| **`ResolveExisting` 会把「文件不存在」报成「symlink escape」**（2026-09-23，写 viewer 时发现） | 它靠「最深的存在祖先」做 symlink 校验：目标本身不存在时，那个祖先必然在 mount 之外 → 报成逃逸（例：用户的虚拟 home 还没创建时，`srcos://file/home` 得到误导性的 `symlink escapes mount /home/alice`）。修法：**先 `os.Lstat` 判存在**（不存在即 `ErrNotFound`），再交给 `ResolveExisting`。教训：错误消息会变成错误的诊断方向 |
 
 ### 4.2 进程与资源
 
@@ -424,13 +427,17 @@ cmd_grant.go                grant 子命令
 cmd_token.go                token 子命令（create / list / revoke；`--expires 90d|never|<date>`）
 cmd_flow.go                 flow 子命令（list / validate；`--flows-dir`）
 
+internal/resource/           资源协议（纯解析，无 I/O）：地址语法（与 dsh-resource:// 同构）+ viewer 注册表
+  ├ address.go               srcos://<provider>/<scope>/<path>[?tool=]（无用户名：用户相对解析）
+  └ viewer.go                patterns 认领 + 优先级 + glob 匹配（Match）
 internal/config/            用户/状态/路径/存储与授权文件位置；registry 扫描 users/*.yaml
 internal/auth/              密码（bcrypt）、TOTP、会话 cookie、SSO、ClientIP/SameOrigin
 internal/inspect/           只读答案的唯一实现（REST API / HTML 页面 / MCP 三前端共用）
   ├ inspect.go              工具可见性、storage 闭包、路径浏览（Jail）
   ├ instances.go            实例 / 日志 / 产物（按用户收敛）
   ├ admin.go                管理视图：全部实例 + 资源快照、工具授权状态
-  └ read.go                 srcos_read_file 的读范围与文本、大小约束
+  ├ read.go                 srcos_read_file 的读范围与文本、大小约束
+  └ resource.go             srcos:// 的唯一解析入口（复用 sandbox.Spec/Jail；scope 用户相对）
 internal/mcp/               MCP Server（Streamable HTTP，无状态 /mcp）
   ├ mcp.go                  JSON-RPC 2.0 + 协议版本协商 + 认证 + 错误分层
   └ tools.go                9 个只读工具（srcos_ 前缀）+ 参数校验
@@ -443,10 +450,13 @@ internal/server/            网关 mux、登录/TOTP 页面、工具页面、/as
   └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 未就绪状态页
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
   ├ admin.go                /api/admin/*（仅管理员）：实例总览/强制停止/日志/授权/组/管理员
-  └ flows.go                /api/admin/flows*：画布的读/写/校验（校验复用 internal/flow）
+  ├ flows.go                /api/admin/flows*：画布的读/写/校验（校验复用 internal/flow）
+  └ resources.go            /api/resources｜raw｜html（srcos:// 的 HTTP 拼写；raw 永不 text/html）
 internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（生成式表单）
   ├ admin.go                /admin 控制台（服务端渲染 + 少量 JS 动作）
-  └ service_status.go       「启动中」进度页 / 失败说明页
+  ├ service_status.go       「启动中」进度页 / 失败说明页
+  ├ resourcepage.go         /view 的 viewer 页面（文本/Markdown/表格/图片/PDF/HTML/目录 + 根选择页）
+  ├ markdown.go             服务端 Markdown（子集：先转义再自行输出标签，无需额外清洗器）
   └ templates/srcos-path-picker.js   原语控件（Web Component）
 
 internal/tool/              tool.yaml 类型 + 13 类注册期校验 + input 值校验

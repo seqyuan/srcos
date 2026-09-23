@@ -418,6 +418,8 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
 | `/api/jobs` | 任务提交与状态列表 |
+| `/api/resources`、`/api/resources/raw`、`/api/resources/html` | **`srcos://` 资源协议**（元数据 / 字节 / sandbox 化的用户 HTML） |
+| `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
 | `/admin` | **管理控制台**（仅管理员：实例总览 / 强制停止 / 授权管理） |
 | `/api/admin`、`/api/admin/*` | 管理 API（仅管理员；控制台调用它，也可脚本化） |
@@ -739,7 +741,74 @@ curl -H 'Authorization: Bearer srcos_...' http://127.0.0.1:30152/api/tools
 |---|---|
 | `/tools` | 工具目录（只列出对你授权的工具） |
 | `/tools/<工具>` | **从 `interface` 自动生成的参数表单**；路径参数用 `srcos-path-picker` 原语控件 |
+| `/view` | **内置资源查看器**（见下节）；不带参数时列出你能看的根 |
+| `/admin` | 管理控制台（仅管理员） |
 | `/assets/srcos-path-picker.js` | 原语控件本体；工具自建 UI 一行标签即可复用 |
+
+### 资源查看器（`srcos://`，内置 viewer）
+
+平台自带一个查看器，**不依赖 dsh、不依赖 Node、不需要构建**：页面由 Go 模板在服务端渲染，
+浏览器禁用 JavaScript 也能用。入口是 `/view`，不带参数时会列出你**有权看的根**
+（你的 home、各工具的工作区、已授权的共享数据）。
+
+地址语法与 dsh 的 `dsh-resource://<protocol>/<scope>/<path>` **同构**（ADR-011/016，
+将来写适配器只需字符串改写）：
+
+```
+srcos://<provider>/<scope>/<path>[?tool=<tool-id>]
+
+  provider  file（目前唯一实现；留给将来的 artifact / log 等）
+  scope     home | workspace | <storage id>
+  path      相对 scope 根，按 RFC 3986 转义（? # % 需转义）
+  tool      仅 scope=workspace 需要（/workspace 的宿主目录取决于工具）
+```
+
+```bash
+# 目录 → home 根
+/view?src=srcos%3A%2F%2Ffile%2Fhome
+# 工作区文件（工具写在地址里）
+/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fcounts.txt%3Ftool%3Ddemo
+# 已声明 storage 里的文件
+/view?src=srcos%3A%2F%2Ffile%2Fshare%2Fref%2Fgenes.tsv
+
+# 同一份解析结果（脚本 / dsh 插件 / 工具自建 UI 可用）
+curl -b cj 'http://<gateway>/api/resources?src=srcos%3A%2F%2Ffile%2Fhome%2Fnotes.md'
+curl -b cj -o out.tsv \
+  'http://<gateway>/api/resources/raw?src=srcos%3A%2F%2Ffile%2Fshare%2Fref%2Fgenes.tsv'  # 字节（支持 Range）
+```
+
+| 端点 | 作用 |
+|---|---|
+| `GET /api/resources` | 元数据：沙箱路径、大小、mtime、读写模式、**认领的 viewer**；目录则返回条目；不带 `src` 时返回可浏览的根列表 |
+| `GET /api/resources/raw` | 原始字节。类型只从**安全集合**里选（图片 / PDF 给真类型，其余一律 `text/plain`） |
+| `GET /api/resources/html` | 用户 HTML，**只给 sandbox iframe 用**（见下） |
+
+首批 viewer（按文件名的 glob 认领，`patterns` 与优先级随元数据一起返回）：
+
+| viewer | 认领 | 渲染 |
+|---|---|---|
+| `text` | 兜底 | 行号 + 分页显示；二进制会明确说明而不是显示乱码 |
+| `markdown` | `*.md` 等 | 服务端渲染（CommonMark/GFM 子集；不支持内联 HTML——这正是不需要额外清洗器的原因） |
+| `table` | `*.csv` `*.tsv` `*.tab` | 真表格（上限 500 行 × 40 列，其余可下载） |
+| `image` | `*.png` `*.jpg` `*.svg` … | `<img>` |
+| `pdf` | `*.pdf` | `<iframe>` |
+| `html` | `*.html` `*.htm` | **sandbox iframe** |
+| `dir` | 目录 | 条目标表 + 逐级导航 |
+
+边界（这几条是安全模型的一部分，不是风格）：
+
+- **地址是「以请求者为身份」解析的，因此地址里没有用户名**：`srcos://file/home/...` 永远是
+  **你自己**的 home，跨用户寻址在语法上就不存在（ADR-021）。
+- **scope 就是可见范围**：`workspace` 要求工具已授权；storage scope 必须在「你能看到的工具的
+  `requires_storages` 闭包」里（ADR-020）——所以「UI 里能选的」与「沙箱里挂载的」不可能不一致。
+- **路径一律过 Jail**：`..`、绝对宿主路径、symlink 逃逸全部拒绝。
+- **HTML 预览必须 sandbox iframe + 独立 origin**：iframe 带 `sandbox`（**不含** `allow-same-origin`），
+  因此文档落在**不透明 origin**；`/api/resources/html` 同时下发 `Content-Security-Policy: sandbox`，
+  即使直接打开这个 URL 也拿不到会话。`/api/resources/raw` **永不返回 `text/html`**，
+  所以点「原始文件」看到的是文本而不是被执行。
+
+> 实测（headless Chromium）：从网关页面里读该 iframe 的 `contentDocument` 为 `null`
+> （跨源），框内 `document.cookie` 抛异常。
 
 ### MCP（给 agent 的只读接口）
 

@@ -114,7 +114,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		path == "/api/tools" ||
 		strings.HasPrefix(path, "/api/tools/") ||
 		path == "/api/paths" ||
-		path == "/api/jobs"
+		path == "/api/jobs" ||
+		path == "/api/resources" ||
+		path == "/api/resources/raw" ||
+		path == "/api/resources/html"
 
 	if !isAPI {
 		return false
@@ -180,6 +183,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		h.handleSubmitJob(w, r, username)
 	case path == "/api/jobs" && r.Method == "GET":
 		h.handleListJobs(w, r, username)
+
+	// The srcos:// resource protocol (ADR-011/016): one metadata answer, the
+	// bytes, and the sandboxed HTML door kept separate.
+	case path == "/api/resources" && r.Method == "GET":
+		h.handleResource(w, r, username)
+	case path == "/api/resources/raw" && (r.Method == "GET" || r.Method == "HEAD"):
+		h.handleResourceRaw(w, r, username)
+	case path == "/api/resources/html" && (r.Method == "GET" || r.Method == "HEAD"):
+		h.handleResourceHTML(w, r, username)
 	default:
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/inspect"
+	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -30,13 +31,15 @@ func (h *Handler) reader() *inspect.Reader {
 	}
 }
 
-// errorStatus maps the read side's error classes onto HTTP.
+// ErrorStatus maps the read side's error classes onto HTTP.
 //
 // The mapping is explicit rather than "500 by default" so a new read answer
 // cannot quietly turn "not permitted" into a server error: every class has a
 // decided spelling here, and the fallback is the honest one (500).
-func errorStatus(err error) int {
+func ErrorStatus(err error) int {
 	switch {
+	case errors.Is(err, resource.ErrInvalid):
+		return http.StatusBadRequest
 	case errors.Is(err, inspect.ErrBadRequest):
 		return http.StatusBadRequest
 	case errors.Is(err, inspect.ErrForbidden):
@@ -54,7 +57,7 @@ func errorStatus(err error) int {
 func (h *Handler) handleListTools(w http.ResponseWriter, username string) {
 	views, err := h.reader().Tools(username)
 	if err != nil {
-		writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	// The catalogue entry is a summary: the interface is what describe is for,
@@ -132,7 +135,7 @@ func (h *Handler) handlePaths(w http.ResponseWriter, r *http.Request, username s
 		Limit:   limit,
 	})
 	if err != nil {
-		writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, listing)

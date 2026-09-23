@@ -92,20 +92,22 @@
 
 ### 2.2 尚未实现（**不要误以为有**）
 
-- 流程编排（`Flow` / `FlowRun`）—— Phase 4
+- ~~流程编排（`Flow` / `FlowRun`）~~ —— ✅ 完成（Phase 4，含并发/重试/取消/续跑与画布）
 - ~~MCP Server（`/mcp`，read-only）~~ —— ✅ 完成（Phase 3.5）
 - ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
-- 授权变更热加载（改 `grants.yaml` 需重启）
+- ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - 审计日志；`storages` 的 rw 配额
-- `apptainer` sandbox；`webui/` Vite 前端包；dsh 集成（ADR-016 一步未做）
+- `apptainer` sandbox；dsh 集成（ADR-016 一步未做）
+- **Phase 5 剩余**：任务列表页 + 日志流（SSE）、agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
 
-Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端都已完成。
+Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
+**`srcos://` 资源协议与自带 viewer**都已完成。
 下一步见 §6 与 [`handoff.md`](handoff.md) §3：**MCP 第二期**（`submit` scope，需先定粒度）或
-**管理端画布**（Phase 5）。
+**Phase 5 的其余前端件**（任务列表 + SSE 日志流 / agent token 自助页）。
 
 ---
 
@@ -741,10 +743,15 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] **`webui/` 工程骨架 + `make webui` + `//go:embed dist`**（2026-09-22）：Vite + React + TS，
       产物嵌入 `internal/web/dist/`；整个 dist/ 都是产物（只有 `.gitkeep` 进版本库），
       所以没有 Node 的环境也能 `make build`（画布页退化为解释页）
-- [ ] `srcos://` 地址协议 + `/api/resources` 统一解析
-      —— 地址语法**刻意与 `dsh-resource://` 同构**（含 `patterns` 认领规则），即路 D 保险（ADR-016）
-- [ ] viewer 注册表 + 首批 viewer：文本/代码（分页 + 行号）、Markdown、表格、图片、PDF、HTML（sandbox + 独立 origin）
-- [ ] **从 `interface` 自动生成参数表单**（fallback UI，含 `type: path` 渲染成路径选择器）（ADR-017）
+- [x] **`srcos://` 地址协议 + `/api/resources` 统一解析**（2026-09-23）：`internal/resource`（地址语法
+      + viewer 注册表，纯解析，**与 `dsh-resource://` 同构**，即路 D 保险）+ `internal/inspect`
+      （唯一解析入口，复用 `sandbox.Spec`/Jail；scope 是用户相对的，地址里没有用户名）+
+      `/api/resources`（元数据）/`raw`（字节，**永不 text/html**）/`html`（sandbox + CSP）
+- [x] **viewer 注册表 + 首批 viewer**（2026-09-23）：`patterns` glob 认领 + 优先级；
+      文本（行号）/Markdown（服务端渲染的子集）/表格（CSV/TSV）/图片/PDF/HTML（sandbox iframe
+      + 不透明 origin）/目录；`/view` 页面 + 无 src 时的根选择页；全部 Go 模板，无 Node 依赖
+- [x] **从 `interface` 自动生成参数表单**（fallback UI，含 `type: path` → `srcos-path-picker`）
+      —— 已在 Phase 3 完成，此处仅登记（ADR-017）
 - [ ] 任务列表页 + 日志流（SSE）
 - [x] **流程编排画布**（2026-09-22）：`/admin/flows/<id>/edit` —— 拓扑分层自动布局（不写布局进契约）、
       两步点连线、**服务端校验**（画布不重复实现类型规则）、检查器编辑取值来源/依赖/when/retry、
@@ -834,3 +841,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **Phase 4 主体：流程跑起来了** —— `internal/flow` 补 planner（样本表解析、`expose`×表×连线 → 每个 (节点×样本) 的 job、类型强制转换、`--param` 与 `output.<名>` 两种来源）+ 运行记录/布局（`/flow` 内建挂载、run id、样本段）+ `internal/flowrun`（拓扑序、AND、`when: always`、失败即停、`.sign` 续跑、样本表留档）+ `srcos flow run\|resume\|status --dry-run` |
 | 2026-09-22 | **Phase 4 收尾**：流程级并发（`--concurrency`，默认 4，job 粒度）、`retry.max` 自动重试+退避（任务粒度）、`flow cancel`（跨进程标志文件 + 停掉在跑 job）、流程级配额；并发首次把运行时放到「两个 unit 同时开工」，因此修掉两个真 bug：**`BwrapProbe` 的缓存没有同步**（第二个调用者看到空的失败，报成无消息的 failed）与**任务不记录 pid**（`systemd-run --scope` 的名字由 systemd 生成，按引用停不掉） |
 | 2026-09-22 | **管理端流程画布**：`webui/`（Vite+React+TS，独立工程，产物 embed 进二进制，dist 全部 gitignore 只留 .gitkeep 所以无 Node 也能构建）+ `/admin/flows/<id>/edit` + `/api/admin/flows`（list/get/put/validate，仅管理员，路径由 id 推导）+ 拓扑分层自动布局 + 两步点连线（**服务端校验**，画布不重复实现类型规则）；顺带补一条契约规则：**连线即依赖**（画布自动补 depends_on，服务端拒绝手工删掉的情况） |
+| 2026-09-23 | **Phase 5：`srcos://` 资源协议 + 自带 viewer** —— `internal/resource`（地址语法 + `patterns` 认领注册表，纯解析，与 `dsh-resource://` 同构 = 路 D 保险）+ `internal/inspect`（唯一解析入口：复用 `sandbox.Spec`/Jail，scope 用户相对、地址里无用户名，storage scope 走 ADR-020 闭包）+ `/api/resources`（元数据）/`raw`（字节，**永不 text/html**）/`html`（CSP sandbox）/`/view`（Go 模板 viewer：文本行号、服务端 Markdown、表格、图片、PDF、**sandbox iframe 的 HTML**、目录）+ viewer 注册表首批（`internal/web`）；storage id 保留 `home`/`workspace`；修掉一个真问题：`ResolveExisting` 把「文件不存在」报成「symlink escape」（见 handoff §4.2） |
