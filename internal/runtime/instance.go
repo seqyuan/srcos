@@ -42,6 +42,21 @@ func (s State) Terminal() bool {
 	return false
 }
 
+// ConsumesResources reports whether an instance is holding the resources it
+// asked for.
+//
+// `pending` deliberately does not count: it is *queued*, and a queue is exactly
+// what lets someone submit more work than the host can run at once. What the
+// quota has to bound is how much runs simultaneously — otherwise a submission
+// could not pass the very quota check its own queue position implies.
+func (s State) ConsumesResources() bool {
+	switch s {
+	case StatePending, StateSucceeded, StateFailed, StateStopped:
+		return false
+	}
+	return true
+}
+
 // Instance is the persisted record of one RunUnit.
 //
 // Task and service instances share this table; only Kind differs (ADR-003).

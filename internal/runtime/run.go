@@ -788,6 +788,73 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 	return adopted, orphaned, err
 }
 
+// ReconcileTasks settles task records that no live process backs any more.
+//
+// A task's verdict (exit code, duration) is written by the SRCOS process that
+// started it. If that process is gone — a restart, a crash — nobody will ever
+// write it, and without this the record would say "running" forever: a lie in
+// the UI *and* a quota leak, because a running instance counts against its
+// user's ceiling.
+//
+// It runs on the scan tick rather than only at startup, because the process
+// usually outlives the restart: the truth only becomes knowable when it dies.
+//
+// What it cannot do is recover the exit code. A task runs as a systemd *scope*,
+// and a scope carries no `ExecMainStatus` (measured on node01: after `exit 7`
+// the scope is `inactive/dead` with `Result=success`). So a run interrupted by a
+// restart is settled as `stopped` with an explanation, not guessed at. Making
+// tasks transient *units* instead of scopes is what would preserve the verdict
+// across a restart — that is a backend change, recorded in the roadmap.
+func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string, err error) {
+	insts, err := ListInstances(r.opts.ConfigDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, inst := range insts {
+		if inst.Kind != string(tool.KindTask) {
+			continue
+		}
+		switch inst.State {
+		case StatePending, StateSucceeded, StateFailed, StateStopped:
+			// `pending` is a *queue position*, not a process: the task queue owns
+			// it and will start it. The rest are already decided.
+			continue
+		}
+
+		alive := false
+		if b, ok := r.opts.Backends[inst.Backend]; ok {
+			if prober, ok := b.(UnitProber); ok {
+				alive = prober.UnitAlive(ctx, inst)
+			}
+		}
+		if alive {
+			// Still running after the restart: leave it alone. A later tick will
+			// see it die and settle it then.
+			adopted = append(adopted, inst.ID)
+			continue
+		}
+
+		inst.State = StateStopped
+		inst.EndedAt = time.Now().UTC()
+		if !inst.StartedAt.IsZero() {
+			inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
+		}
+		if inst.Error == "" {
+			inst.Error = "no verdict: the process is gone, and the SRCOS process that started this run " +
+				"is no longer here to record its exit status (restart or crash). The log and any outputs " +
+				"are still there; re-run with `srcos job run --force` if you need a fresh verdict."
+		}
+		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
+			err = serr
+			continue
+		}
+		settled = append(settled, inst.ID)
+	}
+	sort.Strings(adopted)
+	sort.Strings(settled)
+	return adopted, settled, err
+}
+
 // UnitProber is implemented by backends that can answer "is this unit still
 // running?" from a persisted record — which is all that survives a SRCOS
 // restart. A backend with a name to probe (a systemd unit, an SGE job) uses

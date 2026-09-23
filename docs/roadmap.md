@@ -100,6 +100,7 @@
 - 审计日志；`storages` 的 rw 配额
 - `apptainer` sandbox；dsh 集成（ADR-016 一步未做）
 - **Phase 5 剩余**：agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
+- **任务以 systemd 瞬时 unit 运行**（保住重启后的退出码；现在 scope 拿不到 `ExecMainStatus`，见 ADR-022）
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
@@ -107,7 +108,7 @@
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
 **`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
 下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5 的剩余前端件**（agent token 自助页 / 画布拖拽与
-`expose` 自动推导）或 **Phase 5.5（dsh 路 B）**。
+`expose` 自动推导）、**Phase 5.5（dsh 路 B）**，或把任务改成 systemd unit（ADR-022 的那条限制）。
 
 ---
 
@@ -628,6 +629,40 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-022：任务队列的消费者在网关内，一次提交自动执行一次
+
+- **背景**：「目录即队列」（ADR-004）在实现上只成立了一半：目录确实是队列，但**唯一的消费者是人手
+  敲 `srcos job run`**。没有那个人的地方（agent、表单用户）提交即等于石沉大海 —— 对一个自称
+  「确定性执行后端」的平台，这是最贵的一个缺口。
+- **决策**：网关内置队列消费者（`internal/execute` 的 `Queue`），在启动时与周期 tick 上消费投递目录。
+  配套规则：
+  - **提交唤醒队列**：写 `job.json` 后立刻唤醒，所以常见延迟是毫秒而不是一个 tick；tick（默认 5s）
+    只是兜底（网关不在时留下的提交、另一个进程写的提交）。
+  - **启动即冲刷**：重启后第一轮就把「还没跑过」的提交捡起来。**排队状态是文件，不丢。**
+  - **一次提交自动执行一次**：任务目录里留一个 O_EXCL 认领标记（`job.Claim`），所以网关的队列、
+    `srcos job run`（另一进程）、流程执行器三方不会把同一个任务跑两遍；`--force` 是显式重跑入口。
+    记录存在且已非 `pending` 就是「已经尝试过」，守护进程不再重试（一个会无限重试的 daemon 比
+    只跑一次的更糟）。
+  - **准入在启动时判**：每次真正启动前重新检查 Grant（撤权后不会偷偷跑）与配额（`--task-workers`
+    是全局宿主保护，用户自己的上限仍是 grant 配额）。
+  - **`pending` 是队列位置，不是资源占用**：`State.ConsumesResources` 把 `pending` 排除在配额之外 ——
+    否则一条提交过不了它自己排队位置所蕴含的那道检查（队列里排着 10 个任务，不应该等于占了 10 份资源）。
+  - **按 (用户, 工具) 串行** + 全局上限：同一工具的两个运行不会在同一个工作区里互相踩。
+  - **流程节点不走队列**：`flowrun` 以依赖顺序调度自己的 job（并已认领），队列跳过带流程标签的提交。
+    否则一个 DAG 会被当成一堆互不相干的队列项乱序执行 —— 这是实现这一条时差点踩进去的坑。
+  - **队列跑过的任务一样有审计**：走的是同一条 `job.Validate` + 配额 + 实例记录 + 日志路径。
+- **代价（明确写出来）**：退出码的「记录者」是启动它的那个网关进程。重启**不会**杀掉正在跑的任务
+  （systemd 拥有它），但重启后再结束的运行**退出码无从得知**：systemd 的 scope 不提供
+  `ExecMainStatus`（node01 实测：`exit 7` 之后 scope 仍是 `inactive/dead` + `Result=success`）。
+  因此 `ReconcileTasks` 在**每个 tick** 上结算这类记录：进程还活着就继续收养，死了就写 `stopped`
+  + 「no verdict」说明（`runtime.ReconcileTasks`；只碰有进程的状态，不碰 `pending`，不碰 service）。
+  要彻底保住判定，需要把任务从 systemd **scope** 改成瞬时 **unit**（unit 有 `ExecMainStatus`）——
+  这是 backend 改动，列为后续。
+- **不做**：引入外部队列/消息中间件（与「文件系统即数据库」冲突）；把 `qstat` 子作业跟踪塞进队列
+  （ADR-006 已排除）；为队列加优先级/公平调度（先按提交时间 FIFO，够用）。
+
+---
+
 ## 6. 路线图
 
 ### Phase 0：基线 ✅
@@ -701,6 +736,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] storage 声明的管理端编辑（目前 `storages.yaml` 只有 CLI/手写；只读展示已在 MCP `srcos_list_storages`）
 - [ ] 端口/路由的持久化审计
 - [ ] prlimit 路径下的 RSS 看门狗（RLIMIT 无法表达"每单元进程数"，见 ADR-014 新增说明）
+- [x] **任务队列的消费者**（2026-09-24，ADR-022）：网关启动/周期 tick 消费投递目录、提交唤醒队列、
+      O_EXCL 认领标记（与 `job run`、流程执行器互斥）、`--task-workers` 全局上限、按 (用户,工具) 串行、
+      `runtime.ReconcileTasks` 每 tick 结算失去等待者的任务记录
 
 ### Phase 3：注册、授权与管理端（**进行中**）
 - [x] 工具注册：扫描工具目录（`--tools-dir` / `$SRCOS_TOOLS_DIR`）
@@ -869,3 +907,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-23 | **Phase 5：`srcos://` 资源协议 + 自带 viewer** —— `internal/resource`（地址语法 + `patterns` 认领注册表，纯解析，与 `dsh-resource://` 同构 = 路 D 保险）+ `internal/inspect`（唯一解析入口：复用 `sandbox.Spec`/Jail，scope 用户相对、地址里无用户名，storage scope 走 ADR-020 闭包）+ `/api/resources`（元数据）/`raw`（字节，**永不 text/html**）/`html`（CSP sandbox）/`/view`（Go 模板 viewer：文本行号、服务端 Markdown、表格、图片、PDF、**sandbox iframe 的 HTML**、目录）+ viewer 注册表首批（`internal/web`）；storage id 保留 `home`/`workspace`；修掉一个真问题：`ResolveExisting` 把「文件不存在」报成「symlink escape」（见 handoff §4.2） |
 | 2026-09-23 | **Phase 5：任务列表 + SSE 日志流** —— `internal/inspect/logstream.go`（`FollowLogs`：尾部回放 → 跟随 → 终态收尾；**半行不当作一行**、15s 心跳、日志未出现时等待）+ `GET /api/jobs/<id>/logs`（默认纯文本尾部，`?follow=1` 为 SSE）+ `/tasks`、`/tasks/<id>`（服务端渲染，无 JS 也能读；产物的 `srcos://` 地址一键进 viewer）；顺带修 `Address.Child` 造成的目录导航路径重复（浏览器 e2e 发现，见 handoff §4.6） |
 | 2026-09-24 | **MCP 第二期：submit / cancel / run_flow** —— `internal/execute`（写入面唯一实现：校验 + 配额 + 投递 + 启动） `submit` scope 可签发（`srcos token create --scope submit --tool X` 按工具收窄，蕴含 read） REST `POST /api/jobs`（新增 `run`）/`/api/jobs/<id>/cancel`/`/api/flows/<id>/run` MCP 写入三件套（只对有 submit scope 的 token 列出） 每次写入一行审计；修掉两个真问题：实例在 submit 返回前不可寻址、取消被等待者盖成 failed（见 handoff §4.2） |
+| 2026-09-24 | **任务队列消费者（ADR-022）** —— 「目录即队列」终于有了守护进程：`internal/execute/queue.go`（启动即时冲刷 + 提交唤醒 + 周期 tick；按 (用户,工具) 串行、`--task-workers` 全局上限）、`job.Claim`（O_EXCL 认领，网关/CLI/流程执行器互斥）、`pending` 不算资源占用（`State.ConsumesResources`）、队列跳过流程节点、`runtime.ReconcileTasks` 每 tick 结算失去等待者的任务；新增 `--task-workers` / `--no-task-drainer`；已知限制：重启后运行结束的运行拿不回退出码（scope 无 `ExecMainStatus`） |

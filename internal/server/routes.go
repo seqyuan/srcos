@@ -50,6 +50,28 @@ func (s *Server) reconcile() {
 	s.syncRoutes()
 }
 
+// reconcileTasks settles task records whose process is gone.
+//
+// It runs on every scan tick, not only at startup: a restart normally happens
+// while the task is still running (systemd owns the process, not the gateway),
+// so the moment the truth becomes knowable is when that process dies — possibly
+// minutes after the gateway came back.
+func (s *Server) reconcileTasks() {
+	if s.runner == nil {
+		return
+	}
+	adopted, settled, err := s.runner.ReconcileTasks(context.Background())
+	if err != nil {
+		log.Printf("[srcos] tasks reconcile: %v", err)
+	}
+	if len(adopted) > 0 {
+		log.Printf("[srcos] tasks reconcile: %d still running %v", len(adopted), adopted)
+	}
+	for _, id := range settled {
+		log.Printf("[srcos] tasks reconcile: settled %s (no verdict: its process is gone)", id)
+	}
+}
+
 // reloadPolicyIfChanged re-reads grants.yaml when its modification time moved.
 //
 // It exists so the two ways an operator edits authorization behave the same:

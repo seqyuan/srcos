@@ -360,9 +360,10 @@ func writeTools() []tool {
 	return []tool{
 		{
 			name:  "srcos_submit_job",
-			title: "Submit and start a job",
-			description: "Submit a run of a task tool and start it immediately. Returns the jobId and the " +
-				"instanceId: poll srcos_task_status and srcos_task_logs while it runs. The parameters must " +
+			title: "Submit a job",
+			description: "Submit a run of a task tool. The gateway's task queue starts it within moments " +
+				"(or at startup, if the gateway was down). Returns the jobId and the instanceId: poll " +
+				"srcos_task_status and srcos_task_logs while it runs. The parameters must " +
 				"match the tool's interface — call srcos_describe_tool for the inputSchema. Requires an agent " +
 				"token with the submit scope, and (when the token carries a submit allowlist) this tool must " +
 				"be in it.",
@@ -387,9 +388,6 @@ func writeTools() []tool {
 					Outputs:   optStrings(args, "outputs"),
 					Tags:      optStringMap(args, "tags"),
 					Resources: optResources(args, "resources"),
-					// An agent cannot drain the drop-box, so "submitted" for an agent
-					// means "running": without this the work would sit forever.
-					Run: true,
 				})
 				if err != nil {
 					return nil, err

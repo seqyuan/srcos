@@ -100,10 +100,14 @@ type Controller struct {
 	opts   Options
 	reader *inspect.Reader
 
-	// mu serializes the quota check with the drop-box write and the start of the
-	// run. Without it a burst of submissions each reads the same "no instances
-	// yet" and all pass a quota meant to admit one.
+	// mu serializes the quota check with the drop-box write. Without it a burst
+	// of submissions each reads the same "nothing running yet" and all pass a
+	// quota meant to admit one.
 	mu sync.Mutex
+	// wake tells the task queue that work is waiting. Set by NewQueue; nil in a
+	// deployment that does not drain (the CLI, tests), where a submission simply
+	// waits for whoever reads the drop-box.
+	wake func()
 }
 
 // New builds a controller.
@@ -140,25 +144,23 @@ type SubmitRequest struct {
 	Resources *tool.Resources   `json:"resources"`
 	Outputs   []string          `json:"outputs"`
 	Tags      map[string]string `json:"tags"`
-	// Run starts the run immediately instead of leaving it in the drop-box.
-	// The gateway runs it in the background, so the call returns as soon as the
-	// unit exists.
-	Run bool `json:"run"`
 }
 
-// SubmitResult is what a caller gets back.
+// SubmitResult is what a caller gets back. The instance is queued at this
+// point: the gateway's task loop starts it within moments (or at startup, if
+// SRCOS was down when it was submitted).
 type SubmitResult struct {
 	JobID string `json:"jobId"`
 	Dir   string `json:"dir"`
 	Tool  string `json:"tool"`
-	// InstanceID is set when Run was requested: the id to poll with
-	// srcos_task_status / GET /api/jobs/<id>/logs.
+	// InstanceID is the queued run's id, to poll with srcos_task_status / GET
+	// /api/jobs/<id>/logs.
 	InstanceID string `json:"instanceId,omitempty"`
 	State      string `json:"state,omitempty"`
 }
 
 // Submit validates a job against its tool, checks the quota, and drops it into
-// the queue — starting it when Run is set.
+// the queue — where the gateway's task loop picks it up and runs it.
 //
 // The queue is the same drop-box `srcos job submit` writes to (ADR-004: 目录即
 // 队列), so a run submitted by an agent is an ordinary task with an ordinary
@@ -199,6 +201,10 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (*Subm
 
 	// Quota after validation, so a request is first checked against what the
 	// tool is willing to run with and then against what this user may consume.
+	// It bounds *simultaneous* runs: a queued job does not count (see
+	// State.ConsumesResources), so a user may queue more work than they can run
+	// at once — which is what a queue is for — while the drain checks the same
+	// ceiling again before each start.
 	if err := c.checkQuota(ident.User, t, j); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
@@ -207,39 +213,36 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (*Subm
 	if err != nil {
 		return nil, err
 	}
-	res := &SubmitResult{JobID: jobID, Dir: dir, Tool: t.ID}
-	if req.Run {
-		instID := runtime.InstanceID(ident.User, t.ID, jobID)
-		res.InstanceID = instID
-		res.State = string(runtime.StatePending)
-		c.startTask(ident.User, t, &job.Loaded{
-			ID:   jobID,
-			Dir:  dir,
-			Path: filepath.Join(dir, "job.json"),
-			Job:  j,
-		}, instID)
+	loaded := &job.Loaded{ID: jobID, Dir: dir, Path: filepath.Join(dir, "job.json"), Job: j}
+	instID := runtime.InstanceID(ident.User, t.ID, jobID)
+	c.writePending(ident.User, t, loaded, instID)
+
+	// Start now rather than at the next poll. The queue owns every start, so
+	// this is a hint, not a second execution path: if the gateway is down, the
+	// file waits and the first pass after startup runs it.
+	if c.wake != nil {
+		c.wake()
 	}
-	audit(ident, "submit", fmt.Sprintf("tool=%s@%s job=%s run=%v", t.ID, t.Version, jobID, req.Run))
-	return res, nil
+	audit(ident, "submit", fmt.Sprintf("tool=%s@%s job=%s", t.ID, t.Version, jobID))
+	return &SubmitResult{
+		JobID:      jobID,
+		Dir:        dir,
+		Tool:       t.ID,
+		InstanceID: instID,
+		State:      string(runtime.StatePending),
+	}, nil
 }
 
-// startTask runs a submitted job in the background.
+// writePending records the queued instance before anything runs, so the id the
+// caller is handed resolves immediately. Without it an agent's first status
+// poll — which happens right after submit — would be told "no such instance".
 //
-// The context is deliberately *not* the request's: a run outlives the call that
-// asked for it, and cancelling the HTTP request (an agent disconnecting) must
-// not kill the work. Stopping is its own operation (Cancel).
-//
-// The price of that detachment is stated plainly: the waiter is this process,
-// so a gateway restart while a run is in flight loses the exit code (the
-// record is reconciled from what the backend can still see). The CLI's `job
-// run` has the same property — SRCOS has no durable task supervisor yet.
-func (c *Controller) startTask(user string, t *tool.Tool, loaded *job.Loaded, instanceID string) {
-	// Write the pending record *before* returning, so the id the caller was just
-	// handed resolves immediately. Without this there is a window — until the
-	// backend actually starts — in which the instance looks like it does not
-	// exist, which is exactly when an agent polls for the first time.
+// A `pending` record is also what tells the task queue this submission is work
+// to start, as opposed to history (see Queue.nextJob).
+func (c *Controller) writePending(user string, t *tool.Tool, loaded *job.Loaded, instanceID string) {
 	paths := runtime.PathsFor(c.opts.ConfigDir, user, t.ID, loaded.ID)
-	pending := &runtime.Instance{
+	now := time.Now().UTC()
+	inst := &runtime.Instance{
 		ID:        instanceID,
 		User:      user,
 		Tool:      t.ID,
@@ -252,29 +255,12 @@ func (c *Controller) startTask(user string, t *tool.Tool, loaded *job.Loaded, in
 		WorkDir:   paths.JobDir,
 		Outputs:   loaded.Job.Outputs,
 		Tags:      loaded.Job.Tags,
-		StartedAt: time.Now().UTC(),
+		StartedAt: now,
 	}
-	if err := runtime.SaveInstance(runtime.InstancePath(c.opts.ConfigDir, instanceID), pending); err != nil {
-		log.Printf("[srcos] run %s: could not write the pending record: %v", instanceID, err)
+	path := runtime.InstancePath(c.opts.ConfigDir, instanceID)
+	if err := runtime.SaveInstance(path, inst); err != nil {
+		log.Printf("[srcos] submit %s: could not write the pending record: %v", instanceID, err)
 	}
-
-	go func() {
-		runner, err := c.runnerFor(user)
-		if err != nil {
-			log.Printf("[srcos] run %s could not start: %v", instanceID, err)
-			return
-		}
-		inst, err := runner.RunTask(context.Background(), t, loaded)
-		if err != nil {
-			log.Printf("[srcos] run %s could not start: %v", instanceID, err)
-			return
-		}
-		line := fmt.Sprintf("[srcos] run %s finished: %s", inst.ID, inst.State)
-		if inst.Error != "" {
-			line += " (" + inst.Error + ")"
-		}
-		log.Print(line)
-	}()
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -528,8 +514,12 @@ func (c *Controller) checkQuota(user string, t *tool.Tool, j *job.Job) error {
 	return grant.CheckQuota(q, used, want)
 }
 
-// usageFor sums a user's live instances of one tool. Terminal instances do not
-// count: a finished job is not holding a slot.
+// usageFor sums what a user is *currently consuming* of one tool.
+//
+// Finished work does not count (a finished job holds nothing), and neither does
+// queued work: `pending` is a queue position, and charging for it would make a
+// queue impossible — the submission could not pass the check its own queue
+// position implies. What the ceiling bounds is simultaneous consumption.
 func (c *Controller) usageFor(user, toolID string) (grant.Usage, error) {
 	all, err := runtime.ListInstances(c.opts.ConfigDir)
 	if err != nil {
@@ -537,7 +527,7 @@ func (c *Controller) usageFor(user, toolID string) (grant.Usage, error) {
 	}
 	var u grant.Usage
 	for _, inst := range all {
-		if inst.User != user || inst.Tool != toolID || inst.State.Terminal() {
+		if inst.User != user || inst.Tool != toolID || !inst.State.ConsumesResources() {
 			continue
 		}
 		u.Instances++

@@ -17,6 +17,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/server"
 )
 
@@ -59,6 +60,11 @@ Options:
   --flows-dir <dir>       Flow package root containing <flow-id>/flow.yaml
                           (default: $SRCOS_FLOWS_DIR, then <program dir>/
                           srcos-flows)
+  --task-workers <n>      How many queued submissions to run at once (host
+                          protection; a user's own ceiling is their grant's
+                          quota). Default 4.
+  --no-task-drainer       Do not run the task queue in this process: submitted
+                          jobs wait for: srcos job run
   -V, --version           Show version
   -h, --help              Show this help
 
@@ -223,6 +229,9 @@ type options struct {
 	// flowsDir is the flow package root (the admin console's canvas reads and
 	// writes it). Empty means $SRCOS_FLOWS_DIR, then <program dir>/srcos-flows.
 	flowsDir string
+	// taskWorkers is how many queued submissions the gateway runs at once. 0
+	// uses the default; -1 disables the queue (drain the drop-box by hand).
+	taskWorkers int
 }
 
 func parseOptions(args []string) (options, error) {
@@ -253,6 +262,18 @@ func parseOptions(args []string) (options, error) {
 				return opts, fmt.Errorf("option %s requires a value", a)
 			}
 			opts.flowsDir = v
+		case "--task-workers":
+			v, ok := next()
+			if !ok {
+				return opts, fmt.Errorf("option %s requires a value", a)
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return opts, fmt.Errorf("--task-workers must be a non-negative integer")
+			}
+			opts.taskWorkers = n
+		case "--no-task-drainer":
+			opts.taskWorkers = -1
 		case "-d", "--config-dir":
 			v, ok := next()
 			if !ok {
@@ -573,17 +594,22 @@ func runServer(opts options) {
 	// the runner is built without a user — package runtime refuses to start a
 	// unit without one rather than inventing a workspace for nobody.
 	toolsDir := resolveToolsDir(opts.toolsDir, configDir)
+	taskWorkers := opts.taskWorkers
+	if taskWorkers == 0 {
+		taskWorkers = execute.DefaultTaskWorkers
+	}
 	supervisor, routes, err := buildRunner(configDir, toolsDir, "")
 	if err != nil {
 		log.Fatalf("supervisor: %v", err)
 	}
 
 	srv := server.NewWithOptions(state, configDir, server.Options{
-		ToolsDir:   opts.toolsDir,
-		FlowsDir:   opts.flowsDir,
-		Version:    version,
-		Supervisor: supervisor,
-		Routes:     routes,
+		ToolsDir:    opts.toolsDir,
+		FlowsDir:    opts.flowsDir,
+		Version:     version,
+		Supervisor:  supervisor,
+		Routes:      routes,
+		TaskWorkers: taskWorkers,
 	})
 
 	httpServer := &http.Server{
@@ -616,6 +642,13 @@ func runServer(opts options) {
 	stopScan := make(chan struct{})
 	go srv.ScanLoop(10*time.Second, stopScan)
 
+	// The task queue runs what was submitted (ADR-004's consumer). Its work is
+	// detached from the request that queued it, and it keeps its own loop so a
+	// submission starts in milliseconds rather than at the next scan tick.
+	taskCtx, stopTasks := context.WithCancel(context.Background())
+	defer stopTasks()
+	go srv.TaskLoop(taskCtx, 0)
+
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -623,6 +656,10 @@ func runServer(opts options) {
 		sig := <-sigCh
 		log.Printf("received %s, shutting down", sig)
 		close(stopScan)
+		// Stop starting new work; runs already in flight are owned by systemd
+		// (or are plain children) and are left to finish — a restart reconciles
+		// their records from what is actually still alive.
+		stopTasks()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {

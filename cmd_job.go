@@ -326,11 +326,24 @@ func runJobRun(args []string) {
 
 		instID := runtime.InstanceID(user, t.ID, loaded.ID)
 		recordPath := runtime.InstancePath(*jf.configDir, instID)
-		if prev, err := runtime.LoadInstance(recordPath); err == nil && !*jf.force {
-			if prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning {
+		prev, prevErr := runtime.LoadInstance(recordPath)
+		if !*jf.force {
+			if prevErr == nil && (prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning) {
 				fmt.Printf("skip %s (already %s; use --force to re-run)\n", loaded.ID, prev.State)
 				continue
 			}
+			// A claim means a runner took it — the gateway's task loop, or another
+			// `job run`. Skipping is only right while that run is still coming: a
+			// *terminal* record means it is over, so this invocation may retry it
+			// (which is what running `job run` on a failed job has always meant).
+			if job.Claimed(loaded.Dir) && (prevErr != nil || prev.State == runtime.StatePending) {
+				fmt.Printf("skip %s (a runner already has it in flight; use --force to run it anyway)\n", loaded.ID)
+				continue
+			}
+		}
+		// Take the job, so the gateway's task loop does not start it too.
+		if _, cerr := job.Claim(loaded.Dir); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not claim %s: %v\n", loaded.ID, cerr)
 		}
 
 		fmt.Printf("\n=== running %s (%s) ===\n", loaded.ID, loaded.Job.Name)

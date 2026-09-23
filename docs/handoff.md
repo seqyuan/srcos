@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-24（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 = 画布 + `srcos://` 资源协议与自带 viewer + 任务列表与 SSE 日志流**，**MCP 第二期（submit / cancel / run_flow + `submit` scope）完成**；agent token + MCP（读 + 写）+ 动态路由 + 自动回收 + 管理端 + 流程 + 资源查看器 + 任务/日志完成）
+> 最后更新：2026-09-24（Phase 0/1 完成，Phase 2/3 基本完成，Phase 4 完成，**Phase 5 = 画布 + `srcos://` 资源协议与自带 viewer + 任务列表与 SSE 日志流**，**MCP 第二期（submit / cancel / run_flow）**，**任务队列消费者（ADR-022：提交即自动执行）完成**；agent token + MCP（读 + 写）+ 动态路由 + 自动回收 + 管理端 + 流程 + 资源查看器 + 任务/日志 + 队列完成）
 
 ---
 
@@ -19,14 +19,15 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，23 个包，约 3.6 万行，约 560 个测试用例；46 个测试文件），
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，24 个包，约 4 万行，约 640 个测试用例；52 个测试文件），
 在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了**工具平台**四层：
 工具契约、实例化运行时、存储 provider、授权模型。认证面现在有两扇门：
 浏览器的 session cookie，与程序（agent / MCP 客户端）的 agent token（`Authorization: Bearer`）。
 全部在 node01 上端到端实测过。
 
-**agent 面已经能用**：网关内置 `/mcp`（Streamable HTTP，只读，9 个 `srcos_*` 工具），
-官方 Python MCP SDK 客户端实测连得上、列得出、查得到、读得回。
+**agent 面已经能用，而且真的能执行**：网关内置 `/mcp`（Streamable HTTP，9 个只读工具 + 3 个写工具），
+官方 Python MCP SDK 客户端实测连得上、列得出、查得到、读得回、**提交得了**（`submit` scope，
+可按工具收窄）。**提交即自动执行**：网关自己消费投递目录（ADR-022），队列是持久的。
 
 服务实例现在**可以通过网关访问**（`/proxy/<user>/<tool>/`，动态路由表从实例记录重建）。
 
@@ -47,7 +48,7 @@
 拓扑分层自动布局、两步点连线、**服务端校验**（画布不重复实现类型规则）、校验通过才写回 `flow.yaml`。
 
 下一步：Phase 5 剩余前端件（agent token 自助页 / 画布拖拽与 `expose` 自动推导）、Phase 5.5（dsh 路 B），
-或补上**网关侧的持久任务执行器**（见 §2.3 与 §4.2 的已知限制）。
+或把任务从 systemd scope 改成瞬时 unit（保住重启后的退出码，见 §2.3）。
 
 ---
 
@@ -122,6 +123,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ MCP Server：/mcp · 9 个只读工具 + 3 个写工具（需 submit scope）   │
 │ ✅ 资源协议：srcos:// ＋ /api/resources ＋ /view（自带 viewer）      │
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
+│ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -142,6 +144,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
+| **任务队列（提交即自动执行）** | 网关起着：`POST /api/jobs`（带会话 cookie）→ 返回 `pending` + instanceId → **2.5s 后实例已 `succeeded`**（无人敲任何 CLI）；网关**停着**时用 `srcos job submit` 提交 → 启动网关 → `task queue: started 1 run(s) after startup` → 1s 内 `succeeded`；`--no-task-drainer` 时同一提交停 `pending` → `srcos job run` 手动跑成功；**运行中重启**：记录先被 `tasks reconcile: adopted 1`，进程死后下一 tick `settled`（state=stopped + 「no verdict」说明），**不重跑**；流程（`flow run`，2 样本）在队列运行时依然成功且每个 job 只出现一次（队列不偷流程节点）|
 | **MCP 第二期（submit / cancel / run_flow）** | 官方 Python MCP SDK：read token → 9 个工具（无写工具），调 `srcos_submit_job` → `isError`「需要 submit scope」；submit token（`--tool ticker`）→ 12 个工具（3 个 write，`readOnlyHint=false`）→ `srcos_submit_job` 返回 `jobId`+`instanceId` → `srcos_task_status` 轮询到 `succeeded` → `srcos_task_logs` 有 tick 1..3 → `srcos_list_artifacts` 给出 `srcos://file/workspace/out?tool=ticker` → `srcos_read_file` 读到产物；白名单外工具（sleeper）被拒「may not submit」；`srcos_cancel_instance` → `stopped`；`srcos_run_flow` → 1 job 且跑到成功；网关日志有 `audit submit/cancel/run_flow` 五行（含工具版本与 job/instance/run）|
 | **任务列表 + SSE 日志流** | `srcos job run` 一个每秒打印一行的任务 → `/tasks` 列表出现「运行中」；`/tasks/<id>` 页面**不重载**的情况下 `#log` 文本在 2.5s 内从 32 字长到 64 字（真流）；任务结束后 `state` 事件把徽章改成「成功」、指示器变「日志结束」、EventSource 自行 `close()`；产物的「预览」→ `/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fout%3Ftool%3Dticker`（目录）→ 点 `result.txt` → 文本 viewer 显示 `all ticks done`；`/api/jobs/<id>/logs` 默认纯文本尾部，`?follow=1` 返回 `text/event-stream` + `X-Accel-Buffering: no` 并以 `event: state` / `event: end` 收尾；未知 id、`<id>/other`、另一用户的实例全部 404（`-race` 全绿）|
 | **流程的并发/重试/取消/配额** | `--concurrency 2` + 6 样本 × `sleep 3` → **9.4s**（顺序 18s），时间线显示恰好 2 个重叠；`retry: {max: 2}` + 故意失败一次的任务 → 日志 `retry … in 30s (attempt 1/2)` → 最终 succeeded，记录里 `units: {s01-x: 2}`；`flow cancel`（另一进程）→ 运行 `cancelled`、实例 `stopped`、`sleep 120` 被杀、调度器自行收敛、节点标 `skipped`；`--max-instances 1` + 并发 2 → 第二个任务被拒：`instance quota reached: you have 1 of 1 allowed for this tool; stop one first` |
@@ -161,8 +164,9 @@ UI 造起来便宜了 → UI 不再是护城河
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
 - ⛔ **Phase 5 其它前端件** —— agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
   （`srcos://` 资源协议 / 自带 viewer / 任务列表与 SSE 日志流已于 2026-09-23 完成）
-- ⛔ **网关侧的持久任务执行器（队列 drainer）** —— 现在 `submit` 的执行等待者活在网关进程里，
-  重启会丢掉运行中任务的退出码（§4.2 有记录）；队列本身也没有守护进程在消费
+- ⛔ **重启后的退出码** —— 任务以 systemd **scope** 运行，scope 不提供 `ExecMainStatus`；
+  网关重启后再结束的运行只能诚实收尾为 `stopped` + 「no verdict」（ADR-022）。把任务改成瞬时
+  **unit** 才能保住判定，那是 backend 改动
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
 - ⛔ **网关侧起停服务**（`svc start` 仍只在 CLI；管理端能停、不能起）—— admin API 的下一步
 - ⛔ **storage 声明的管理端编辑**（`storages.yaml` 目前只有 CLI/手写）
@@ -191,6 +195,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~8~~ | ~~**MCP 第二期**~~：✅ **已完成**（`submit` / `cancel` / `run_flow` + `submit` scope 与 `submit_tools` 白名单；`internal/execute` 是写入面唯一实现，REST 与 MCP 共用） | agent 真的能"执行用 SRCOS"了 |
 | ~~9~~ | ~~**管理端画布**~~：✅ **已完成**（`webui/` Vite+React，只在该页加载；服务端校验；校验通过才写回） | 顺带补了一条契约规则：连线即依赖 |
 | **10** | **Phase 5 其余前端件**：`srcos://` 资源协议 + 自带 viewer ✅ / 任务列表 + SSE 日志流 ✅；**剩** agent token 自助页、画布拖拽摆放与 `expose` 自动推导 | 不涉架构选择；viewer 是 dsh 路 B 的前置 |
+| ~~11~~ | ~~**任务队列消费者**（ADR-022）~~：✅ **已完成**（提交即自动执行；启动冲刷 + 唤醒 + tick；认领互斥；队列跳过流程节点） | 「目录即队列」终于名副其实；剩下的是「重启后退出码」那条 backend 限制 |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -223,6 +228,8 @@ UI 造起来便宜了 → UI 不再是护城河
 | **`--clearenv` 后必须显式给 `PATH`** | 否则工具连 `bash` 都找不到 |
 | **`unshare --user` 失败不代表 bwrap 不能工作** | AppArmor 授权是按二进制给的 |
 | **`ResolveExisting` 会把「文件不存在」报成「symlink escape」**（2026-09-23，写 viewer 时发现） | 它靠「最深的存在祖先」做 symlink 校验：目标本身不存在时，那个祖先必然在 mount 之外 → 报成逃逸（例：用户的虚拟 home 还没创建时，`srcos://file/home` 得到误导性的 `symlink escapes mount /home/alice`）。修法：**先 `os.Lstat` 判存在**（不存在即 `ErrNotFound`），再交给 `ResolveExisting`。教训：错误消息会变成错误的诊断方向 |
+| **「目录即队列」的另一半是消费者**（2026-09-24，ADR-022） | 投递目录一直是队列，但**唯一消费者是人手敲 `srcos job run`** —— agent 与表单提交等于石沉大海。补上守护进程时暴露出三个必须一起定的规则：① **`pending` 不能算配额占用**（否则一条提交过不了它自己排队位置蕴含的那道检查：队列里排 10 个 ≠ 占 10 份资源）；② **认领必须是原子的**（O_EXCL 文件），否则网关队列与另一个进程的 `job run` 会把同一任务跑两遍；③ **流程节点不能被队列当普通项偷走**（`flowrun` 自己按依赖顺序调度并认领；队列还额外按 `Tags["run"]` 跳过，那个判断写在提交里、无窗口期）。教训：**一个「队列」如果没有消费者，它只是目录** |
+| **重启后再结束的任务：退出码无从得知**（2026-09-24，ADR-022） | 网关重启不会杀掉任务（systemd 拥有进程），但记录退出码的是那个死掉的进程；而 systemd 的 **scope 没有 `ExecMainStatus`**（实测 `exit 7` 之后 scope 仍 `inactive/dead` + `Result=success`）。更早的漏洞是 `Reconcile` **只处理 service**（`if inst.Kind != service { continue }`），于是任务记录会永远停在 `running` —— 既是谎话，又永久占着用户的配额。修法：`runtime.ReconcileTasks` 在每个 tick 上结算（活着就收养、死了就 `stopped` + 「no verdict」；只碰有进程的状态，不碰 `pending`/service）。要保住判定得把任务改成瞬时 unit |
 | **取消会被等待者盖成 `failed`**（2026-09-24，写 MCP cancel 时发现） | `Cancel` → `StopService` 在 A 处写 `stopped`，而 `RunTask` 的等待者在 B 处被进程退出唤醒后可写 `failed (signal: terminated)` —— 两个 goroutine 各自 `SaveInstance`，谁后写谁赢，于是**一次故意的取消可能被记成崩溃**。修法：`RunTask` 在 `Wait` 返回后**回读记录**，若已是 `stopped` 就直接返回它（故意停止是权威）。确定性回归测试见 `execute` 的 `TestWaiterDoesNotOverwriteADeliberateStop`（先写 stopped、再放行进程）—— 去掉守卫它必失败（实测：`state=succeeded`）。教训：**记录是两个进程之间的决策点，只能回读，不能假设** |
 | **提交返回的实例 id 一时查不到**（2026-09-24，MCP e2e 第一跑发现） | `submit` 先返回 `instanceId`、再由后台 goroutine 启动；而记录是启动时才写的 —— 于是 agent「刚提交就查」得到误导性的 `not found`。修法：`startTask` **先写 pending 记录再起 goroutine**。教训：一个立刻返回的 id 必须立刻可寻址 |
 | **`Address.Child` 的语义陷阱：目录导航路径翻倍**（2026-09-23，浏览器 e2e 发现） | 资源条目的 `Rel` 是**相对 scope 根**的，而 `Address.Child(rel)` 是「拼接到当前路径」的。在 `/view?src=…/home/sub` 里用 `Child(entry.Rel)` 得到 `home/sub/sub/x.txt` —— 单测只断言「页面里出现了文件名」所以全绿，Playwright 点一下才发现 404。修法：条目的地址直接 `child.Path = entry.Rel`，**删掉 `Child`**（一个只在一个地方用、语义又容易搞错的便捷方法比没有更危险），并把「子链接必须是 scope 相对的」写成断言。教训：**UI 是检验契约的探针**（与流程画布那次同源）|
@@ -293,6 +300,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 019 | MCP Server 内置网关，第一期 read-only（✅ **已完成**，见 roadmap「MCP 实现契约」）；agent token（✅）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
+| 022 | **任务队列的消费者在网关内**；一次提交自动执行一次（认领互斥、`pending` 不算占用、流程节点不走队列）；重启后退出码无从得知（scope 无 `ExecMainStatus`） |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
 
 ### 授权模型的两条原则（未进 ADR 编号，但与 ADR 同级重要）
@@ -431,7 +439,7 @@ ss -tln | awk '$4 ~ /:241[0-9][0-9]$/'              # 应为空（不为空说�
 
 ```
 main.go                     CLI 入口与一级子命令分发（serve/user/sso/tool/job/svc/grant/token）
-cmd_job.go                  tool / job / svc 子命令 + 通用 flag 解析
+cmd_job.go                  tool / job / svc 子命令 + 通用 flag 解析（job run 也认领任务）
 cmd_grant.go                grant 子命令
 cmd_token.go                token 子命令（create / list / revoke；`--expires 90d|never|<date>`）
 cmd_flow.go                 flow 子命令（list / validate；`--flows-dir`）
@@ -454,12 +462,14 @@ internal/mcp/               MCP Server（Streamable HTTP，无状态 /mcp）
 internal/agenttoken/        agent token（程序凭据）：只存 SHA-256、每次校验重读文件、失败关闭
   ├ agenttoken.go           Token/Store/Identity/Scope（read|submit）+ submit_tools + 注册期校验
   └ usage.go                使用时间（data/agent-token-usage.yaml，网关写、按 token 降频）
-internal/execute/           写入面唯一实现：Submit / Cancel / RunFlow（校验 + 配额 + 投递 + 启动）
-  └ execute.go              submit 授权 = scope × submit_tools × Grant；取消幂等；流程逐节点校验白名单
+internal/execute/           写入面唯一实现：Submit / Cancel / RunFlow（校验 + 配额 + 投递）
+  ├ execute.go              submit 授权 = scope × submit_tools × Grant；取消幂等；流程逐节点校验白名单
+  └ queue.go                任务队列消费者：启动冲刷 / 提交唤醒 / tick；认领、(用户,工具) 串行、全局上限
 internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全部逻辑
   └ conns.go                ActiveConns：长连接（WebSocket）计数，供回收判断"在用"
 internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
-  └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 未就绪状态页
+  └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 每 tick 结算任务 / 未就绪状态页
+                            （TaskLoop 跑任务队列；ScanLoop 里的 reconcileTasks 收尾失去等待者的任务）
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
   ├ admin.go                /api/admin/*（仅管理员）：实例总览/强制停止/日志/授权/组/管理员
   ├ flows.go                /api/admin/flows*：画布的读/写/校验（校验复用 internal/flow）
@@ -476,7 +486,7 @@ internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（
 
 internal/tool/              tool.yaml 类型 + 13 类注册期校验 + input 值校验
   └ schema.go               Interface → JSON Schema（ADR-018 的第一处派生）
-internal/job/               job.json 类型 + 对工具的校验 + 目录扫描 + Slug/NewID/Submit
+internal/job/               job.json 类型 + 对工具的校验 + 目录扫描 + Slug/NewID/Submit + Claim（认领）
 internal/grant/             授权策略（默认拒绝 · 组/用户/public/通配 · 配额）+ yaml 往返
 internal/storage/           StorageProvider（列表/浏览/Jail 复用/可达性检查）
 internal/sandbox/           MountSpec + Jail（symlink 逃逸防护）+ bwrap argv 物化

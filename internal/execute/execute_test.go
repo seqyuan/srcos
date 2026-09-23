@@ -56,14 +56,31 @@ func (b *fakeBackend) Start(ctx context.Context, req runtime.StartRequest) (runt
 	return h, nil
 }
 
-// release finishes every started unit with exit code 0.
-func (b *fakeBackend) release() {
+// finishAll lets every started unit complete with exit code 0 — and every unit
+// started later, so a run still being *prepared* when the test releases does not
+// block forever (a reservation exists before its process does).
+func (b *fakeBackend) finishAll() {
+	b.auto.Store(true)
 	b.mu.Lock()
 	handles := append([]*fakeHandle(nil), b.handles...)
 	b.mu.Unlock()
 	for _, h := range handles {
 		h.Stop(context.Background())
 	}
+}
+
+// live counts units that have started and not finished.
+func (b *fakeBackend) live() int {
+	b.mu.Lock()
+	handles := append([]*fakeHandle(nil), b.handles...)
+	b.mu.Unlock()
+	n := 0
+	for _, h := range handles {
+		if !h.doneClosed() {
+			n++
+		}
+	}
+	return n
 }
 
 func (b *fakeBackend) count() int {
@@ -90,6 +107,16 @@ func (h *fakeHandle) Wait(ctx context.Context) runtime.ExitStatus {
 		return runtime.ExitStatus{Code: 0}
 	case <-ctx.Done():
 		return runtime.ExitStatus{Code: -1, Err: ctx.Err()}
+	}
+}
+
+// doneClosed reports whether this unit has finished.
+func (h *fakeHandle) doneClosed() bool {
+	select {
+	case <-h.done:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -161,6 +188,7 @@ type fixture struct {
 	toolsDir  string
 	flowsDir  string
 	backend   *fakeBackend
+	queue     *Queue
 }
 
 func newFixture(t *testing.T, policy *grant.Policy) *fixture {
@@ -220,7 +248,21 @@ expose:
 		Grants:    policy,
 		NewRunner: newRunner,
 	})
-	return &fixture{Controller: c, configDir: configDir, toolsDir: toolsDir, flowsDir: flowsDir, backend: fb}
+	q := NewQueue(c, QueueOptions{
+		Workers: 2,
+		Users:   func() []string { return []string{"alice", "bob"} },
+		Log:     func(string, ...any) {}, // a test's queue is quiet
+	})
+	return &fixture{
+		Controller: c, configDir: configDir, toolsDir: toolsDir,
+		flowsDir: flowsDir, backend: fb, queue: q,
+	}
+}
+
+// drain runs one pass of the task queue: the daemon's tick, synchronously.
+func (f *fixture) drain(t *testing.T) int {
+	t.Helper()
+	return f.queue.Tick(context.Background())
 }
 
 func writeUser(t *testing.T, configDir, user string) {
@@ -322,7 +364,10 @@ func TestSubmitHonoursGrantAndAllowlist(t *testing.T) {
 	}
 }
 
-func TestSubmitWithoutRunQueuesOnly(t *testing.T) {
+// A submission is a drop-box entry (ADR-004) plus a *pending* record, so the
+// id is addressable before anything runs — and the queue, not the request, is
+// what starts it.
+func TestSubmitQueuesAndIsAddressable(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
 
@@ -330,52 +375,42 @@ func TestSubmitWithoutRunQueuesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.JobID == "" || res.InstanceID != "" {
-		t.Fatalf("result = %+v, want a job id and no instance", res)
+	if res.JobID == "" || res.InstanceID == "" || res.State != string(runtime.StatePending) {
+		t.Fatalf("result = %+v", res)
 	}
-	// The submission is a drop-box entry (ADR-004), nothing more.
 	if _, err := os.Stat(filepath.Join(res.Dir, "job.json")); err != nil {
 		t.Fatalf("job.json was not written: %v", err)
 	}
-	instID := runtime.InstanceID("alice", "demo", res.JobID)
-	if _, err := os.Stat(runtime.InstancePath(f.configDir, instID)); !os.IsNotExist(err) {
-		t.Fatalf("run=false must not create an instance record (%v)", err)
+	// Nothing has started yet: the request queued the work.
+	if f.backend.count() != 0 {
+		t.Fatalf("submit started %d run(s) itself", f.backend.count())
 	}
-}
-
-func TestSubmitRunStartsAndRecordsTheInstance(t *testing.T) {
-	f := newFixture(t, allowAll(t))
-	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
-
-	res, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "hi"}, Run: true})
+	rec, err := runtime.LoadInstance(runtime.InstancePath(f.configDir, res.InstanceID))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the queued instance must be addressable: %v", err)
 	}
-	if res.InstanceID == "" || res.State != string(runtime.StatePending) {
-		t.Fatalf("result = %+v", res)
-	}
-
-	// The instance is addressable the moment submit returns: an agent polls for
-	// the first time immediately, and "no such instance" would be a lie.
-	if _, err := runtime.LoadInstance(runtime.InstancePath(f.configDir, res.InstanceID)); err != nil {
-		t.Fatalf("the instance is not addressable right after submit: %v", err)
+	if rec.State != runtime.StatePending {
+		t.Fatalf("record = %+v, want pending", rec)
 	}
 
-	// The instance becomes visible as running while the (fake) process lives.
-	rec := waitInstance(t, f.configDir, res.InstanceID, runtime.StateRunning)
-	if rec.Tool != "demo" || rec.JobName == "" {
-		t.Fatalf("record = %+v", rec)
+	// The queue runs it.
+	if n := f.drain(t); n != 1 {
+		t.Fatalf("the queue started %d run(s), want 1", n)
 	}
-	if f.backend.count() != 1 {
-		t.Fatalf("backend saw %d starts, want 1", f.backend.count())
-	}
-
-	// Let it finish; the waiter must settle the record.
-	f.backend.release()
+	waitInstance(t, f.configDir, res.InstanceID, runtime.StateRunning)
+	f.backend.finishAll()
 	waitInstance(t, f.configDir, res.InstanceID, runtime.StateSucceeded)
+
+	// A second pass must not run it again.
+	if n := f.drain(t); n != 0 {
+		t.Fatalf("the queue re-started a finished job (%d)", n)
+	}
 }
 
-func TestSubmitRejectsQuotaOverrun(t *testing.T) {
+// The quota bounds *simultaneous* consumption, not queue length: a user may
+// submit more than they can run at once (that is what a queue is for), and the
+// drain starts the next one only when the ceiling has room.
+func TestQuotaGatesStartsNotSubmissions(t *testing.T) {
 	policy, err := grant.New(nil, []string{"alice"}, []grant.Grant{
 		{Tool: "demo", Public: true, Quota: grant.Quota{MaxInstances: 1}},
 	})
@@ -385,17 +420,39 @@ func TestSubmitRejectsQuotaOverrun(t *testing.T) {
 	f := newFixture(t, policy)
 	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
 
-	first, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "a"}, Run: true})
+	first, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "a"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait for the first run to exist before the second is judged: the quota is
-	// computed from records, and the record is written by the run itself.
-	waitInstance(t, f.configDir, first.InstanceID, runtime.StateRunning)
-	// The first run is still alive, so the second must be refused.
-	if _, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "b"}, Run: true}); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("second run = %v, want ErrForbidden (max_instances 1)", err)
+	second, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "b"}})
+	if err != nil {
+		t.Fatalf("queuing a second run must not be refused: %v", err)
 	}
+	// Pin the submission order: two files written microseconds apart may share
+	// an mtime, and the queue's tie-break is then arbitrary.
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(first.Dir, "job.json"), past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	// One pass starts only one: the other is over the ceiling for now.
+	if n := f.drain(t); n != 1 {
+		t.Fatalf("queue started %d, want 1 (max_instances 1)", n)
+	}
+	waitInstance(t, f.configDir, first.InstanceID, runtime.StateRunning)
+	if rec, _ := runtime.LoadInstance(runtime.InstancePath(f.configDir, second.InstanceID)); rec.State != runtime.StatePending {
+		t.Fatalf("second = %+v, want still queued", rec)
+	}
+
+	// Let the first finish; the ceiling frees and the second starts.
+	f.backend.finishAll()
+	waitInstance(t, f.configDir, first.InstanceID, runtime.StateSucceeded)
+	if n := f.drain(t); n != 1 {
+		t.Fatalf("queue started %d after the ceiling freed, want 1", n)
+	}
+	// The fake backend is in auto-finish mode by now, so the run completes on
+	// its own; what matters is that it left the queue.
+	waitInstance(t, f.configDir, second.InstanceID, runtime.StateSucceeded)
 	f.releaseAndSettle(t)
 }
 
@@ -405,10 +462,11 @@ func TestCancelStopsARunningInstance(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
 
-	res, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, Run: true})
+	res, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.drain(t)
 	waitInstance(t, f.configDir, res.InstanceID, runtime.StateRunning)
 
 	out, err := f.Cancel(context.Background(), ident, res.InstanceID)
@@ -434,10 +492,11 @@ func TestCancelScopeRules(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	owner := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
 
-	res, err := f.Submit(owner, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, Run: true})
+	res, err := f.Submit(owner, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.drain(t)
 	waitInstance(t, f.configDir, res.InstanceID, runtime.StateRunning)
 
 	// Another user cannot even see it.
@@ -474,10 +533,11 @@ func TestWaiterDoesNotOverwriteADeliberateStop(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
 
-	res, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, Run: true})
+	res, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.drain(t)
 	waitInstance(t, f.configDir, res.InstanceID, runtime.StateRunning)
 
 	// What StopService writes when someone cancels.
@@ -547,30 +607,52 @@ func TestRunFlowChecksEveryNodeTool(t *testing.T) {
 	f.releaseAndSettle(t)
 }
 
-// releaseAndSettle finishes the fake units and waits for every instance record
-// to reach a terminal state. Without it a background waiter could still be
-// writing into the test's temporary directories when they are removed.
+// releaseAndSettle lets the fake units finish and waits for the work to be
+// over. Without it a background waiter could still be writing into the test's
+// temporary directories when they are removed.
 func (f *fixture) releaseAndSettle(t *testing.T) {
 	t.Helper()
-	f.backend.release()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		insts, err := runtime.ListInstances(f.configDir)
-		if err == nil {
-			live := false
-			for _, i := range insts {
-				if !i.State.Terminal() {
-					live = true
-					break
-				}
-			}
-			if !live {
+		f.backend.finishAll()
+		if f.backend.live() == 0 && f.instancesSettled() {
+			// One more beat: a run whose prepare was still in flight may only
+			// now reach the backend, and it self-finishes because auto is on.
+			time.Sleep(10 * time.Millisecond)
+			if f.backend.live() == 0 && f.instancesSettled() {
 				return
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("instances did not settle after the fake backend released them")
+}
+
+func (f *fixture) instancesSettled() bool {
+	insts, err := runtime.ListInstances(f.configDir)
+	if err != nil {
+		return false
+	}
+	for _, i := range insts {
+		if !i.State.Terminal() {
+			return false
+		}
+	}
+	return true
+}
+
+// waitStarted waits until the fake backend has seen n units start, so a test
+// never releases before there is anything to release.
+func (f *fixture) waitStarted(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.backend.count() >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the backend saw %d starts in 2s, want %d", f.backend.count(), n)
 }
 
 // waitRun polls a flow run record until it reaches a terminal state.

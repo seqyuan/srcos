@@ -695,13 +695,16 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
 ./srcos tool validate --tools-dir srcos-tools
 ./srcos tool list     --tools-dir srcos-tools
 
-# 任务：提交（写 job.json 到投递目录）→ 执行 → 查看
+# 任务：提交 = 写 job.json 到投递目录（目录即队列）；**网关的任务队列会自动执行**
 ./srcos job submit -d /opt/srcos/config --tools-dir srcos-tools \
   -n "hello demo" --tool hello-fanout \
   --param samples=S001,S002,S003 --output /workspace/out
-./srcos job run  -d /opt/srcos/config --tools-dir srcos-tools --tool hello-fanout
 ./srcos job list -d /opt/srcos/config
 ./srcos job logs -d /opt/srcos/config <instance-id>
+
+# 没有网关的机器（或要立刻跑、要重试）时，手动消费队列：
+./srcos job run  -d /opt/srcos/config --tools-dir srcos-tools --tool hello-fanout
+./srcos job run  --tools-dir srcos-tools --tool hello-fanout --force   # 重跑已完成的
 
 # 服务：长驻实例（端口池自动分配，探活通过后发布路由）
 ./srcos svc start -d /opt/srcos/config --tools-dir srcos-tools --tool <service-tool>
@@ -899,10 +902,9 @@ PY
 | `srcos_cancel_instance` | 停掉一个在跑的实例（幂等：已结束的返回它的终态） |
 | `srcos_run_flow` | 用 CSV 样本表展开一个流程并启动（每个节点的工具都要在 token 的白名单里） |
 
-> **为什么 MCP 的 submit 会执行，而 `POST /api/jobs` 默认只入队？** 平台目前还没有
-> 网关侧的队列执行器（队列靠 `srcos job run` 消费），而 agent 没有地方去跑那条命令 ——
-> 所以对 agent 而言「提交」必须等于「开始执行」。REST 保留入队语义（表单/脚本可显式传
-> `"run": true` 立即执行）。网关侧持久执行器仍是待办。
+> **提交即执行**：`POST /api/jobs`、`srcos_submit_job` 与 `srcos job submit` 都只是写
+> `job.json`（目录即队列），**网关的任务队列会自动把它跑起来**（提交会唤醒队列，通常毫秒级）。
+> 详见下面的「任务队列」。
 
 边界（写在实现里，不是约定）：
 
@@ -915,6 +917,36 @@ PY
   写入操作另有一行 `audit submit|cancel|run_flow`（含工具与版本、job/instance/run）。
 - **写入需要 `submit` scope**，且再经 `--tool` 白名单与 Grant 两道收窄；三者都在 `internal/execute`
   里一次判定，REST/MCP 不可能不一致。
+
+### 任务队列（`job.json` 的消费者）
+
+**目录即队列**（ADR-004）的另一半：网关自己消费投递目录，所以提交之后不需要任何人再执行一条命令。
+
+- **提交即入队，队列自动执行**。API（`POST /api/jobs`）、MCP（`srcos_submit_job`）与 CLI
+  （`srcos job submit`）都只是写 `job.json`；提交会**唤醒**队列，通常毫秒级开始跑。
+- **持久**：投递是文件，网关不在时也不会丢。重启后第一轮扫描就会把还没跑过的提交捡起来
+  （`--no-task-drainer` 可关掉，交给 `srcos job run`）。
+- **一次提交自动执行一次**。投递目录里会留下一个认领标记（`.srcos-claimed`），所以网关的队列与
+  另一个进程里的 `srcos job run` 不会把同一个任务跑两遍；`--force` 是显式重跑的入口。
+- **准入在排队时判**：每次真正启动前重新检查 Grant 授权与配额（所以撤权后不会偷偷跑，配额是
+  「同时占用」的上限——队列里排着不算占用）；每 5 秒一轮退避，没有额度就等下一轮。
+- **按 (用户, 工具) 串行**，全局并发由 `--task-workers`（默认 4）封顶：同一工具的两个运行不会
+  在同一个工作区里互相踩，同时又不至于让一个人排队堵住所有人。
+- **流程节点不走队列**：`flow run` 自己按依赖顺序调度它的 job（并已认领），队列会跳过带流程标签的
+  提交 —— 否则一个 DAG 会被当成一堆互不相干的队列项乱序执行。
+
+```bash
+# 队列并发（宿主保护；每个用户自己的上限是 grant 配额）
+srcos serve -d /opt/srcos/config --task-workers 2
+# 关掉队列：提交只入队，等 `srcos job run`
+srcos serve -d /opt/srcos/config --no-task-drainer
+```
+
+> **已知限制（退出码）**：任务进程由 systemd 拥有，网关重启**不会**杀掉正在跑的任务；
+> 但「谁记下了它的退出码」是网关进程 —— 重启后再等它结束，退出码已经无从得知
+> （systemd 的 scope 不提供 `ExecMainStatus`，实测 `exit 7` 之后 scope 仍是 `Result=success`）。
+> 这种情况记录会诚实收尾为 `stopped` 并写明原因，而不是假装成功或失败；日志与产物都还在。
+> 要彻底保住判定，需要让任务以 systemd **瞬时 unit**（而非 scope）运行 —— 见 roadmap。
 
 ## 管理控制台（`/admin`，仅管理员）
 

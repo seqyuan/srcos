@@ -345,6 +345,49 @@ func randomSuffix() string {
 	return hex.EncodeToString(b[:])
 }
 
+// claimFile is the drop-box's "a runner took this" marker.
+//
+// Two consumers share one queue: the gateway's task runner (which drains it
+// automatically) and `srcos job run` (a human asking for it now, in another
+// process). The window that matters is between "no instance record yet" and "the
+// record says running" — a create-with-O_EXCL closes it, so a submission is
+// executed once and not twice.
+//
+// The marker stays put after the run: a taken submission has been attempted,
+// and a daemon that retries forever is worse than one that runs once.
+// `srcos job run --force` is the deliberate way to try again.
+const claimFile = ".srcos-claimed"
+
+// ClaimPath is the claim marker of one job directory.
+func ClaimPath(jobDir string) string { return filepath.Join(jobDir, claimFile) }
+
+// Claim takes a submission for execution and reports whether it got it.
+//
+// The marker lives in the job directory, which is inside the user's workspace —
+// deliberately not a lock the platform depends on for *correctness*: the
+// instance record (outside the workspace, unwritable by the tool) is the
+// authority on what has run. This file only makes "who starts it"
+// deterministic.
+func Claim(jobDir string) (bool, error) {
+	f, err := os.OpenFile(ClaimPath(jobDir), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	// The content is a hint for whoever looks at the directory; the existence
+	// of the file is what decides.
+	fmt.Fprintf(f, "claimed by pid %d at %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	return true, f.Close()
+}
+
+// Claimed reports whether a runner already took this submission.
+func Claimed(jobDir string) bool {
+	_, err := os.Stat(ClaimPath(jobDir))
+	return err == nil
+}
+
 // Submit writes a job into the drop-box and returns its id.
 //
 // The directory is the queue (ADR-004): writing the file *is* the submission,

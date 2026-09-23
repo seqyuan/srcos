@@ -30,23 +30,15 @@ type submitJobBody struct {
 	Resources *tool.Resources   `json:"resources"`
 	Outputs   []string          `json:"outputs"`
 	Tags      map[string]string `json:"tags"`
-	// Run starts the job immediately instead of leaving it in the drop-box. The
-	// default is false: submitting from a form queues work, and an operator (or
-	// an agent, which cannot drain a queue) asks for a start explicitly.
-	Run *bool `json:"run,omitempty"`
 }
 
 // handleSubmitJob validates a submission against the tool's interface and drops
-// it into the job directory, starting it when the caller asked to.
+// it into the job directory, where the gateway's task queue runs it.
 func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, ident agenttoken.Identity) {
 	var body submitJobBody
 	if err := parseBody(r, &body); err != nil {
 		writeBodyError(w, err)
 		return
-	}
-	run := false
-	if body.Run != nil {
-		run = *body.Run
 	}
 	res, err := h.opts.Execute.Submit(ident, execute.SubmitRequest{
 		Tool:      body.Tool,
@@ -55,7 +47,6 @@ func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, ident 
 		Resources: body.Resources,
 		Outputs:   body.Outputs,
 		Tags:      body.Tags,
-		Run:       run,
 	})
 	if err != nil {
 		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})

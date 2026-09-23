@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/flow"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
@@ -80,6 +82,10 @@ type Server struct {
 	policyMu    sync.Mutex
 	// reaper enforces the tool's lifecycle ceilings via the same runner.
 	reaper *runtime.Reaper
+	// taskQueue drains the submission drop-box: the daemon that makes a
+	// submission run by itself. Nil when draining is disabled (or when the write
+	// path is not configured at all).
+	taskQueue *execute.Queue
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -112,6 +118,11 @@ type Options struct {
 	// must not carry a user: reconciling and reaping act on records, not on
 	// behalf of an actor (package runtime refuses to start units without one).
 	Supervisor *runtime.Runner
+	// TaskWorkers is how many queued runs the gateway keeps in flight across the
+	// host. Zero uses execute.DefaultTaskWorkers; a negative value disables the
+	// task queue entirely (the deployment drains the drop-box by hand or from
+	// another process).
+	TaskWorkers int
 }
 
 // New creates a new Server from state config. configDir is where the shared
@@ -287,11 +298,29 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 			LastActive: srv.serviceActivity.Last,
 		}
 	}
+	// The task queue drains the submission drop-box. It shares the API handler's
+	// write-path controller, so a queued run goes through exactly the same
+	// validation, grants and quotas a submitted one does.
+	if opts.TaskWorkers >= 0 && opts.ToolsDir != "" && srv.apiHandler.Executor() != nil {
+		srv.taskQueue = execute.NewQueue(srv.apiHandler.Executor(), execute.QueueOptions{
+			Workers: opts.TaskWorkers,
+			Users: func() []string {
+				records := registry.ListUsers()
+				names := make([]string, 0, len(records))
+				for _, u := range records {
+					names = append(names, u.Username)
+				}
+				return names
+			},
+		})
+	}
+
 	// Bring the records and the routing table in line with reality before
 	// serving: adopt the instances that are still alive (they were started by
 	// the CLI, in another process), mark the dead ones stopped, and publish the
 	// survivors so a gateway restart does not take every service offline.
 	srv.reconcile()
+	srv.reconcileTasks()
 	return srv
 }
 
@@ -1274,7 +1303,11 @@ func (s *Server) redirectBareService(w http.ResponseWriter, r *http.Request, use
 	return true
 }
 
-// ScanLoop periodically reloads the user registry.
+// ScanLoop periodically reloads the user registry and enforces the lifecycle
+// ceilings.
+//
+// The task queue has its own loop (TaskLoop): a submission wakes it, and it is
+// the thing that makes "目录即队列" true without a human typing `srcos job run`.
 func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1299,11 +1332,33 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// means "no traffic", which is why the reaper is given the proxy's
 			// observations rather than the record's start time.
 			s.reapServices()
+			// Settle task records whose process died while the gateway was away:
+			// a task's verdict is written by the process that started it, and a
+			// "running" record that nothing backs is a lie that also holds the
+			// user's quota.
+			s.reconcileTasks()
 		case <-stop:
 			return
 		}
 	}
 }
+
+// TaskLoop drains the task drop-box until ctx ends (ADR-004's missing
+// consumer): every submission runs without anyone typing `srcos job run`.
+//
+// It is a no-op on a deployment that disabled the queue, and it starts with an
+// immediate pass, so work submitted while SRCOS was down runs as soon as it is
+// back.
+func (s *Server) TaskLoop(ctx context.Context, interval time.Duration) {
+	if s.taskQueue == nil {
+		return
+	}
+	s.taskQueue.Run(ctx, interval)
+}
+
+// TaskQueue exposes the queue for the admin surface (in-flight count) and for
+// tests.
+func (s *Server) TaskQueue() *execute.Queue { return s.taskQueue }
 
 // UserCount returns the number of loaded users.
 func (s *Server) UserCount() int {

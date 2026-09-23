@@ -462,8 +462,10 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 | `GET` | `/api/tools` | 当前用户可见的工具目录 |
 | `GET` | `/api/tools/<id>` | **机器可读的 `interface`** + 该工具可选的 storages |
 | `GET` | `/api/paths?tool=&input=&path=&select=&limit=&storage=` | 列目录（沙箱路径空间） |
-| `POST` | `/api/jobs` | 提交任务（写 `job.json` 到投递目录） |
+| `POST` | `/api/jobs` | 提交任务（写 `job.json` 到投递目录；网关的任务队列会自动执行一次） |
 | `GET` | `/api/jobs?tool=&kind=` | 本用户的实例列表（含 service 的 endpoint/route） |
+| `POST` | `/api/jobs/<id>/cancel` | 停掉一个实例（幂等） |
+| `POST` | `/api/flows/<id>/run` | 用 CSV 样本表展开并启动一个流程 |
 
 **`/api/paths` 的安全约束（ADR-020 在 API 边缘的执行）**：可浏览的 storage 由
 `tool` + `input` **推导**，不接受调用方自由指定。`storage=` 只能在**该 input 声明的**

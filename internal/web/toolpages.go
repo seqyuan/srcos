@@ -223,9 +223,8 @@ var toolFormScript = `
       return r.json().then(function (b) { return { ok: r.ok, body: b }; });
     }).then(function (r) {
       if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : '提交失败');
-      out.innerHTML = '已提交任务 <code>' + r.body.jobId + '</code>。' +
-        '它会在下次运行时执行 —— 在服务器上执行 <code>srcos job run --tool ' +
-        toolID + '</code> 即可。';
+      out.innerHTML = '已提交任务 <code>' + r.body.jobId + '</code>，网关的队列会立即开始执行。' +
+        '到 <a href="/tasks">任务</a> 看状态与实时日志。';
     }).catch(function (err) {
       out.textContent = '错误：' + (err.message || err);
     });
