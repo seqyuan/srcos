@@ -9,6 +9,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // srcos token ... maintains config/agent-tokens.yaml.
@@ -42,7 +43,8 @@ func printTokenUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  create --user <name>     mint a token (the plaintext is shown once)")
 	fmt.Fprintln(os.Stderr, "      --label <text>       what it is for, e.g. annovibe")
-	fmt.Fprintln(os.Stderr, "      --scope <scope>      repeatable; only \"read\" can be issued (default read)")
+	fmt.Fprintln(os.Stderr, "      --scope <scope>      repeatable; read | submit (default read)")
+	fmt.Fprintln(os.Stderr, "      --tool <id>          repeatable; narrows submit to these tools (needs --scope submit)")
 	fmt.Fprintln(os.Stderr, "      --expires <when>     90d | 12h | 2026-12-21 | never (default 90d)")
 	fmt.Fprintln(os.Stderr, "  list [--user <name>]     show tokens, expiry and last use")
 	fmt.Fprintln(os.Stderr, "  revoke <id>              revoke one token (by id from `list`)")
@@ -52,6 +54,7 @@ func printTokenUsage() {
 	fmt.Fprintln(os.Stderr, "Store: config/agent-tokens.yaml (SHA-256 hashes only).")
 	fmt.Fprintln(os.Stderr, "A token acts as its user and can only narrow that: the Grant policy still")
 	fmt.Fprintln(os.Stderr, "decides which tools the user may see or run. Scopes never widen access.")
+	fmt.Fprintln(os.Stderr, "`submit` implies `read`; `--tool` narrows it per tool (empty = all of the user's tools).")
 	fmt.Fprintln(os.Stderr, "The gateway re-reads the file on every check, so create/revoke are immediate.")
 }
 
@@ -78,7 +81,9 @@ func runTokenCreate(args []string) {
 	user := fs.String("user", "", "owner username (required)")
 	label := fs.String("label", "", "what this token is for")
 	scopeFlags := &strList{}
-	fs.Var(scopeFlags, "scope", "scope (repeatable; default read)")
+	fs.Var(scopeFlags, "scope", "scope (repeatable; read|submit)")
+	toolFlags := &strList{}
+	fs.Var(toolFlags, "tool", "submit allowlist entry (repeatable; needs --scope submit)")
 	expires := fs.String("expires", "90d", "90d | 12h | 2026-12-21 | never")
 	var positional []string
 	fs.Usage = func() { printTokenUsage() }
@@ -102,13 +107,29 @@ func runTokenCreate(args []string) {
 	for _, s := range *scopeFlags {
 		scopes = append(scopes, agenttoken.Scope(s))
 	}
+	// A submit allowlist must name tools that exist, or it could never be used
+	// and the operator would blame the gateway instead of the typo. The check is
+	// skipped when there is no tool directory to check against (a host that has
+	// not registered tools yet).
+	for _, id := range *toolFlags {
+		if id == "" {
+			continue
+		}
+		toolsDir := config.ResolveToolsDir(*configDir)
+		if _, err := os.Stat(toolsDir); err == nil {
+			if _, err := tool.Find(toolsDir, id); err != nil {
+				fatalf("--tool %s: no such tool under %s", id, toolsDir)
+			}
+		}
+	}
 
 	store := tokenStore(*configDir)
 	rec, plaintext, err := store.Create(agenttoken.CreateParams{
-		User:      *user,
-		Label:     *label,
-		Scopes:    scopes,
-		ExpiresAt: expiresAt,
+		User:        *user,
+		Label:       *label,
+		Scopes:      scopes,
+		SubmitTools: *toolFlags,
+		ExpiresAt:   expiresAt,
 	})
 	if err != nil {
 		fatalf("%v", err)
@@ -121,6 +142,9 @@ func runTokenCreate(args []string) {
 	fmt.Printf("created agent token %s for %s\n", rec.ID, rec.User)
 	fmt.Printf("  label     %s\n", dash(rec.Label))
 	fmt.Printf("  scopes    %s\n", agenttoken.ScopeSet(rec.Scopes).String())
+	if len(rec.SubmitTools) > 0 {
+		fmt.Printf("  tools     %s (submit allowlist)\n", strings.Join(rec.SubmitTools, ","))
+	}
 	fmt.Printf("  expires   %s\n", expiry)
 	fmt.Printf("  store     %s (SHA-256 hash only)\n", store.Path())
 	fmt.Println()
@@ -167,16 +191,20 @@ func runTokenList(args []string) {
 	// they just created.
 	usage := agenttoken.LoadUsage(config.AgentTokenUsagePath(*configDir))
 	now := time.Now()
-	fmt.Printf("%-8s %-10s %-16s %-8s %-16s %-16s %-16s %s\n",
-		"ID", "USER", "LABEL", "SCOPES", "CREATED", "EXPIRES", "LAST USED", "STATUS")
+	fmt.Printf("%-8s %-10s %-16s %-13s %-16s %-16s %-16s %-16s %s\n",
+		"ID", "USER", "LABEL", "SCOPES", "TOOLS", "CREATED", "EXPIRES", "LAST USED", "STATUS")
 	for i := len(tokens) - 1; i >= 0; i-- {
 		t := tokens[i]
 		last := "-"
 		if at := usage.Last(t.ID); !at.IsZero() {
 			last = at.Local().Format("2006-01-02 15:04")
 		}
-		fmt.Printf("%-8s %-10s %-16s %-8s %-16s %-16s %-16s %s\n",
-			t.ID, t.User, truncate(dash(t.Label), 16), agenttoken.ScopeSet(t.Scopes).String(),
+		tools := "-"
+		if len(t.SubmitTools) > 0 {
+			tools = truncate(strings.Join(t.SubmitTools, ","), 16)
+		}
+		fmt.Printf("%-8s %-10s %-16s %-13s %-16s %-16s %-16s %-16s %s\n",
+			t.ID, t.User, truncate(dash(t.Label), 16), agenttoken.ScopeSet(t.Scopes).String(), tools,
 			t.CreatedAt.Local().Format("2006-01-02 15:04"),
 			expiryCell(t), last, t.Status(now))
 	}

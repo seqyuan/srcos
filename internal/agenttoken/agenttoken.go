@@ -69,14 +69,16 @@ type Scope string
 
 const (
 	// ScopeRead allows the read-only surface: catalogues, paths, instance
-	// state, logs, artifacts. It is the default, and the only scope that can be
-	// issued today.
+	// state, logs, artifacts. It is the default.
 	ScopeRead Scope = "read"
 
-	// ScopeSubmit is reserved for the second phase of ADR-019 (submit / cancel
-	// / run_flow) and is still undecided in detail (see roadmap §8 #9), so
-	// `Create` refuses to issue it rather than hand out a credential whose
-	// scope silently does nothing.
+	// ScopeSubmit allows driving execution: submitting a run, cancelling one, and
+	// running a flow (ADR-019 phase 2). It **implies read**: a credential that can
+	// start work but cannot watch it would only let its holder act blind.
+	//
+	// It is further narrowed, per tool, by Token.SubmitTools when that list is
+	// set — the tool half of the two-dimensional submit authorization, whose user
+	// half is the owner's Grant policy.
 	ScopeSubmit Scope = "submit"
 )
 
@@ -126,6 +128,9 @@ type Identity struct {
 	TokenID string
 	Label   string
 	Scopes  ScopeSet
+	// SubmitTools is the optional per-tool narrowing of ScopeSubmit. Empty means
+	// "any tool its user may use".
+	SubmitTools []string
 }
 
 // HumanIdentity is the identity of a browser session: the whole user.
@@ -138,6 +143,27 @@ func (i Identity) Has(s Scope) bool {
 		return true
 	}
 	return i.Scopes.Has(s)
+}
+
+// CanSubmitTool reports whether this identity may drive a run of toolID.
+//
+// It is the *credential* half of the decision: the submit scope, narrowed by
+// the token's tool allowlist. The other half — may this user use this tool at
+// all — is the Grant policy, which the write path always applies as well, so a
+// token can never widen its owner's access (ADR-019's subset rule).
+func (i Identity) CanSubmitTool(toolID string) bool {
+	if !i.Has(ScopeSubmit) {
+		return false
+	}
+	if len(i.SubmitTools) == 0 {
+		return true
+	}
+	for _, t := range i.SubmitTools {
+		if t == toolID {
+			return true
+		}
+	}
+	return false
 }
 
 // Describe renders the identity for an audit log line.
@@ -162,6 +188,11 @@ type Token struct {
 	// revoke by label far more often than by id, so it is part of the record.
 	Label  string  `yaml:"label,omitempty"`
 	Scopes []Scope `yaml:"scopes"`
+	// SubmitTools narrows ScopeSubmit to these tool ids (empty = every tool the
+	// owner may use). It is the tool dimension of the submit authorization
+	// (roadmap §8 #9): a CI token that may drive one pipeline is not a token
+	// that may drive every tool its owner happens to be granted.
+	SubmitTools []string `yaml:"submit_tools,omitempty"`
 	// CreatedAt / ExpiresAt are seconds-resolution UTC. A zero ExpiresAt means
 	// the token does not expire.
 	CreatedAt time.Time `yaml:"created_at"`
@@ -196,6 +227,9 @@ var ErrNoCredential = errors.New("no bearer credential")
 var (
 	idPattern   = regexp.MustCompile(`^[a-z2-7]{8}$`)
 	hashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// toolPattern is the tool-id alphabet (shared with tool.yaml and storage
+	// ids), so a submit allowlist cannot name something that could never exist.
+	toolPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	// idEncoding is lowercase base32 (RFC 4648 alphabet) without padding.
 	idEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
@@ -371,11 +405,12 @@ func (s *Store) verifyAt(raw string, now time.Time) (Identity, error) {
 		}
 	}
 	return Identity{
-		User:    rec.User,
-		Agent:   true,
-		TokenID: rec.ID,
-		Label:   rec.Label,
-		Scopes:  ScopeSet(rec.Scopes),
+		User:        rec.User,
+		Agent:       true,
+		TokenID:     rec.ID,
+		Label:       rec.Label,
+		Scopes:      ScopeSet(rec.Scopes),
+		SubmitTools: rec.SubmitTools,
 	}, nil
 }
 
@@ -391,7 +426,10 @@ type CreateParams struct {
 	Label     string
 	Scopes    []Scope
 	ExpiresAt time.Time
-	Now       time.Time
+	// SubmitTools narrows the submit scope to these tools (only meaningful with
+	// ScopeSubmit; the empty list means every tool the owner may use).
+	SubmitTools []string
+	Now         time.Time
 }
 
 // Create mints a token, records its hash and returns the plaintext token,
@@ -410,6 +448,10 @@ func (s *Store) Create(p CreateParams) (Token, string, error) {
 	}
 
 	scopes, err := normalizeScopes(p.Scopes)
+	if err != nil {
+		return Token{}, "", err
+	}
+	tools, err := normalizeSubmitTools(p.SubmitTools, scopes)
 	if err != nil {
 		return Token{}, "", err
 	}
@@ -449,13 +491,14 @@ func (s *Store) Create(p CreateParams) (Token, string, error) {
 	raw := TokenPrefix + id + separator + base64.RawURLEncoding.EncodeToString(secret)
 	sum := sha256.Sum256([]byte(raw))
 	rec := Token{
-		ID:         id,
-		User:       p.User,
-		Label:      label,
-		Scopes:     scopes,
-		CreatedAt:  now,
-		ExpiresAt:  expires,
-		SecretHash: hex.EncodeToString(sum[:]),
+		ID:          id,
+		User:        p.User,
+		Label:       label,
+		Scopes:      scopes,
+		SubmitTools: tools,
+		CreatedAt:   now,
+		ExpiresAt:   expires,
+		SecretHash:  hex.EncodeToString(sum[:]),
 	}
 
 	if err := s.commitLocked(append(append([]Token{}, s.tokens...), rec)); err != nil {
@@ -641,6 +684,19 @@ func validateTokens(tokens []Token) error {
 			}
 			scopeSeen[s] = true
 		}
+		toolSeen := map[string]bool{}
+		for _, id := range t.SubmitTools {
+			if !toolPattern.MatchString(id) {
+				bad("%s: submit_tools entry %q must match %s", where, id, toolPattern)
+			}
+			if toolSeen[id] {
+				bad("%s: duplicate submit_tools entry %q", where, id)
+			}
+			toolSeen[id] = true
+		}
+		if len(t.SubmitTools) > 0 && !scopeSeen[ScopeSubmit] {
+			bad("%s: submit_tools is set but the token lacks the %q scope", where, ScopeSubmit)
+		}
 		if !hashPattern.MatchString(strings.ToLower(t.SecretHash)) {
 			bad("%s: secret_hash must be a SHA-256 hex digest", where)
 		}
@@ -658,7 +714,8 @@ func validateTokens(tokens []Token) error {
 	return nil
 }
 
-// normalizeScopes applies the default and rejects what cannot be issued.
+// normalizeScopes applies the default, expands the implications and rejects
+// what cannot be issued.
 func normalizeScopes(in []Scope) ([]Scope, error) {
 	if len(in) == 0 {
 		return []Scope{ScopeRead}, nil
@@ -669,18 +726,55 @@ func normalizeScopes(in []Scope) ([]Scope, error) {
 		if !isKnownScope(s) {
 			return nil, fmt.Errorf("unknown scope %q (known: %s)", s, scopeNames(KnownScopes))
 		}
-		if s == ScopeSubmit {
-			return nil, fmt.Errorf("scope %q is reserved for the second phase of ADR-019 (submit / cancel / run_flow) and cannot be issued yet", s)
-		}
 		if seen[s] {
 			continue
 		}
 		seen[s] = true
 		out = append(out, s)
 	}
+	// submit implies read: a credential that can start work but not watch it
+	// would only let its holder act blind. Recording both is friendlier than a
+	// hidden implication, because the file then says exactly what the token can
+	// do.
+	if seen[ScopeSubmit] && !seen[ScopeRead] {
+		out = append(out, ScopeRead)
+	}
 	// Canonical order, so the file and the audit lines do not depend on the
 	// order flags happened to be typed in.
 	sort.Slice(out, func(i, j int) bool { return scopeRank(out[i]) < scopeRank(out[j]) })
+	return out, nil
+}
+
+// normalizeSubmitTools validates a submit allowlist against the scopes it will
+// narrow. An allowlist without the submit scope would silently do nothing, so
+// it is refused rather than ignored.
+func normalizeSubmitTools(in []string, scopes []Scope) ([]string, error) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if !toolPattern.MatchString(id) {
+			return nil, fmt.Errorf("tool %q in the submit allowlist must match %s", id, toolPattern)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) > 0 {
+		hasSubmit := false
+		for _, s := range scopes {
+			hasSubmit = hasSubmit || s == ScopeSubmit
+		}
+		if !hasSubmit {
+			return nil, fmt.Errorf("a submit allowlist needs the %q scope (otherwise it would silently do nothing)", ScopeSubmit)
+		}
+		sort.Strings(out)
+	}
 	return out, nil
 }
 
@@ -751,7 +845,12 @@ const headerComment = "# SRCOS agent token registry（程序凭据，ADR-019）\
 	"# 之后无法恢复。因此这份文件（或它的备份）泄露并不等于凭据泄露。\n" +
 	"#\n" +
 	"# agent token 以「所属用户」的身份行事：Grant 授权策略依旧生效，scope 只能\n" +
-	"# 在此基础上收窄（子集原则）。目前只能签发 `read`（只读面）。\n" +
+	"# 在此基础上收窄（子集原则）。\n" +
+	"#\n" +
+	"# scope：\n" +
+	"#   read    只读面（目录、路径、状态、日志、产物）\n" +
+	"#   submit  驱动执行（提交运行 / 取消 / 跑流程）；蕴含 read\n" +
+	"#           submit_tools 可选，按工具收窄（空 = 该用户可见的全部工具）\n" +
 	"#\n" +
 	"# 由 `srcos token create|revoke` 维护；网关在每次校验时重新读取该文件，\n" +
 	"# 所以 create / revoke 立即生效，无需重启。\n" +

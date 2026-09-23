@@ -266,6 +266,17 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 	}
 
 	status := h.Wait(ctx)
+
+	// A deliberate stop is the authority. `Cancel` / `flow cancel` / the reaper
+	// run in another goroutine (or another process) and write `stopped` while this
+	// waiter is blocked; letting the exit status overwrite it would report a
+	// deliberate kill as a crash. The record is the shared decision point between
+	// the two, so it is read back instead of assumed — and the stopped record is
+	// returned as-is, because it already carries the ending.
+	if persisted, err := LoadInstance(prep.paths.RecordPath); err == nil && persisted.State == StateStopped {
+		return persisted, nil
+	}
+
 	inst.EndedAt = time.Now().UTC()
 	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
 	inst.ExitCode = status.Code

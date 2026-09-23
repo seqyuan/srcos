@@ -7,13 +7,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/agenttoken"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/inspect"
+	toolpkg "github.com/seqyuan/srcos/internal/tool"
 )
 
-// This file is the read-only tool surface of ADR-019, in the spirit of ADR-018:
-// the schemas are written once here, and every handler answers from package
-// inspect — the same code the REST API uses. Nothing in this file talks to the
-// filesystem directly.
+// This file is the tool surface of ADR-019, in the spirit of ADR-018: the
+// schemas are written once here, and every handler answers from package inspect
+// (read) or package execute (write) — the same code the REST API uses. Nothing
+// in this file talks to the filesystem directly.
+//
+// Two halves, one catalogue: `readTools` (always offered) and `writeTools`
+// (offered when the token carries the submit scope). The split is what lets a
+// client auto-approve the read half and ask about the write half.
 //
 // Naming: every tool is prefixed `srcos_` so an agent connected to several MCP
 // servers can tell whose tool it is calling, and so a name collision with
@@ -25,18 +32,25 @@ type tool struct {
 	title       string
 	description string
 	inputSchema map[string]any
-	call        func(ctx context.Context, env env, args map[string]any) (any, error)
+	// write marks a tool that changes state. It decides two things: whether the
+	// tool is listed to a credential that cannot write, and the annotations a
+	// client uses to decide whether to ask its human first.
+	write bool
+	call  func(ctx context.Context, e env, args map[string]any) (any, error)
 }
 
-// env is what a handler is allowed to know: who is asking, and the read side.
+// env is what a handler is allowed to know: who is asking (the identity, not
+// just the user, because a token's submit allowlist narrows what it may drive),
+// the read side, and the write path.
 type env struct {
 	user   string
+	ident  agenttoken.Identity
 	reader *inspect.Reader
+	exec   *execute.Controller
 }
 
-// readTools is the catalogue, in the order it is listed. All of them are
-// read-only, which is why none of them takes a confirmation flag or a dry-run
-// switch: there is nothing to confirm.
+// readTools is the phase-1 catalogue: the questions. All of them are read-only,
+// which is why none takes a confirmation flag.
 func readTools() []tool {
 	return []tool{
 		{
@@ -274,19 +288,34 @@ func readTools() []tool {
 }
 
 // listTools renders the catalogue for `tools/list`.
-func (s *Server) listTools() map[string]any {
+//
+// The write tools are listed only to a credential that can call them: a
+// read-only token sees exactly the read surface it has, which is both honest
+// and what lets a client safely auto-approve the read-only half.
+func (s *Server) listTools(identity agenttoken.Identity) map[string]any {
+	canWrite := s.Exec != nil && identity.Has(agenttoken.ScopeSubmit)
 	out := make([]map[string]any, 0, len(s.tools))
 	for _, t := range s.tools {
+		if t.write && !canWrite {
+			continue
+		}
+		annotations := map[string]any{}
+		if t.write {
+			annotations["readOnlyHint"] = false
+			// Not "destructive" in the delete-your-data sense, but it does
+			// consume real resources, so a client should ask its human when it is
+			// not sure.
+			annotations["destructiveHint"] = false
+			annotations["idempotentHint"] = false
+		} else {
+			annotations["readOnlyHint"] = true
+		}
 		out = append(out, map[string]any{
 			"name":        t.name,
 			"title":       t.title,
 			"description": t.description,
 			"inputSchema": t.inputSchema,
-			"annotations": map[string]any{
-				// Every tool in this phase only reads; saying so lets a client
-				// auto-approve them without weakening anything.
-				"readOnlyHint": true,
-			},
+			"annotations": annotations,
 		})
 	}
 	return map[string]any{"tools": out}
@@ -319,6 +348,103 @@ func render(v any) string {
 	return string(out)
 }
 
+// writeTools is the second phase of ADR-019: the tools that make the platform
+// *do* something. They are listed only to a token that carries the submit scope,
+// and each one is checked again on the call — a hidden tool is discoverability,
+// not a security boundary.
+//
+// The division of labour is the same as the read tools': the answers come from
+// package execute, so the REST surface and MCP cannot disagree about what a
+// valid submission is or which credential may drive which tool.
+func writeTools() []tool {
+	return []tool{
+		{
+			name:  "srcos_submit_job",
+			title: "Submit and start a job",
+			description: "Submit a run of a task tool and start it immediately. Returns the jobId and the " +
+				"instanceId: poll srcos_task_status and srcos_task_logs while it runs. The parameters must " +
+				"match the tool's interface — call srcos_describe_tool for the inputSchema. Requires an agent " +
+				"token with the submit scope, and (when the token carries a submit allowlist) this tool must " +
+				"be in it.",
+			write: true,
+			inputSchema: objectSchema(map[string]any{
+				"tool":      stringProp("Tool id, as listed by srcos_list_tools; must be kind=task"),
+				"params":    objectProp("Interface inputs, keyed by input name (see srcos_describe_tool)"),
+				"name":      stringProp("Optional display name for the run"),
+				"outputs":   arrayProp("Optional: declared output sandbox paths, e.g. /workspace/out"),
+				"resources": objectProp("Optional: lower the tool's resource ceiling (cpu / memory / walltime)"),
+				"tags":      objectProp("Optional: key/value tags recorded with the instance"),
+			}, []string{"tool"}),
+			call: func(ctx context.Context, e env, args map[string]any) (any, error) {
+				toolID, err := requireString(args, "tool")
+				if err != nil {
+					return nil, err
+				}
+				res, err := e.exec.Submit(e.ident, execute.SubmitRequest{
+					Tool:      toolID,
+					Name:      optString(args, "name"),
+					Params:    optObject(args, "params"),
+					Outputs:   optStrings(args, "outputs"),
+					Tags:      optStringMap(args, "tags"),
+					Resources: optResources(args, "resources"),
+					// An agent cannot drain the drop-box, so "submitted" for an agent
+					// means "running": without this the work would sit forever.
+					Run: true,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return res, nil
+			},
+		},
+		{
+			name:  "srcos_cancel_instance",
+			title: "Cancel an instance",
+			description: "Stop a running task or service instance. Idempotent: cancelling something that " +
+				"already finished reports its final state instead of failing. Requires the submit scope " +
+				"(and, when the token carries an allowlist, the instance's tool must be in it).",
+			write: true,
+			inputSchema: objectSchema(map[string]any{
+				"instance": stringProp("Instance id from srcos_list_instances, or a job id"),
+			}, []string{"instance"}),
+			call: func(ctx context.Context, e env, args map[string]any) (any, error) {
+				needle, err := requireString(args, "instance")
+				if err != nil {
+					return nil, err
+				}
+				return e.exec.Cancel(ctx, e.ident, needle)
+			},
+		},
+		{
+			name:  "srcos_run_flow",
+			title: "Run a flow",
+			description: "Expand a flow over a sample table and start it. `samples` is the table's CSV text " +
+				"with a header row naming the flow's sample columns. Returns the runId; watch it with " +
+				"srcos_list_instances (the jobs carry flow/run/node tags). Every tool the flow uses must " +
+				"be within this token's submit scope.",
+			write: true,
+			inputSchema: objectSchema(map[string]any{
+				"flow":        stringProp("Flow id"),
+				"samples":     stringProp("Sample table as CSV text, with a header row"),
+				"params":      objectProp("Optional: flow-level string parameters"),
+				"concurrency": intProp("Optional: max jobs at once (default 4)"),
+			}, []string{"flow", "samples"}),
+			call: func(ctx context.Context, e env, args map[string]any) (any, error) {
+				flowID, err := requireString(args, "flow")
+				if err != nil {
+					return nil, err
+				}
+				return e.exec.RunFlow(e.ident, execute.FlowRunRequest{
+					Flow:        flowID,
+					Samples:     optString(args, "samples"),
+					Params:      optStringMap(args, "params"),
+					Concurrency: optInt(args, "concurrency"),
+				})
+			},
+		},
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // argument helpers
 // ─────────────────────────────────────────────────────────────────────────
@@ -336,6 +462,17 @@ func objectSchema(props map[string]any, required []string) map[string]any {
 
 func stringProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
+}
+
+func objectProp(desc string) map[string]any {
+	return map[string]any{"type": "object", "description": desc}
+}
+
+func arrayProp(desc string) map[string]any {
+	return map[string]any{
+		"type": "array", "description": desc,
+		"items": map[string]any{"type": "string"},
+	}
 }
 
 func intProp(desc string) map[string]any {
@@ -382,4 +519,79 @@ func optInt(args map[string]any, key string) int {
 		}
 	}
 	return 0
+}
+
+// optObject reads an optional free-form object (job params, resource overrides).
+// A wrong type is ignored rather than stringified: a caller who sent an array
+// where an object belongs should get the validation error from the tool's own
+// interface, not a silently empty parameter set.
+func optObject(args map[string]any, key string) map[string]any {
+	if v, ok := args[key].(map[string]any); ok {
+		return v
+	}
+	return nil
+}
+
+// optStringMap reads an optional object of strings (tags, flow params).
+// Non-string values are skipped: they have nowhere sensible to go.
+func optStringMap(args map[string]any, key string) map[string]string {
+	raw := optObject(args, key)
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// optStrings reads an optional array of strings.
+func optStrings(args map[string]any, key string) []string {
+	raw, ok := args[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// optResources reads the optional resource overrides into the tool contract's
+// shape. Unknown keys are ignored: the job validator is what reports a problem,
+// and it knows the tool's ceiling.
+func optResources(args map[string]any, key string) *toolpkg.Resources {
+	raw := optObject(args, key)
+	if len(raw) == 0 {
+		return nil
+	}
+	res := &toolpkg.Resources{}
+	if v := optInt(raw, "cpu"); v > 0 {
+		res.CPU = v
+	}
+	if v := optString(raw, "memory"); v != "" {
+		res.Memory = v
+	}
+	if v := optString(raw, "walltime"); v != "" {
+		res.Walltime = v
+	}
+	if v := optInt(raw, "gpu"); v > 0 {
+		res.GPU = v
+	}
+	if v := optString(raw, "queue"); v != "" {
+		res.Queue = v
+	}
+	return res
 }

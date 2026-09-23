@@ -1,5 +1,5 @@
-// Package mcp is the MCP (Model Context Protocol) front-end of the read-only
-// platform surface (ADR-019).
+// Package mcp is the MCP (Model Context Protocol) front-end of the platform
+// surface (ADR-019).
 //
 // Why this exists: the platform's selling point is "探索用 AI，执行用 SRCOS" —
 // an agent explores, and the deterministic execution is SRCOS's. An agent can
@@ -9,13 +9,15 @@
 //
 // Three decisions shape this package:
 //
-//   - **Read-only.** Phase 1 exposes questions, never actions. Submitting,
-//     cancelling and running flows wait for the `submit` scope, which cannot
-//     even be issued yet (see package agenttoken).
-//   - **Answers are borrowed, not reimplemented.** Every tool here calls
-//     package inspect — the same code the REST API and the HTML pages call
-//     (ADR-018: 一份实现，两个前端). What is MCP-specific is the protocol, the
-//     schemas and the rendering.
+//   - **Two halves, one authority.** The read tools answer from package inspect
+//     and are always offered. The write tools (submit / cancel / run_flow)
+//     answer from package execute and are offered only to a token carrying the
+//     submit scope. Both packages are shared with the REST API, so the two
+//     front-ends cannot disagree about a decision (ADR-018: 一份实现，多个前端).
+//   - **Authorization is two-dimensional.** The submit scope says a program may
+//     drive execution; the token's optional submit allowlist narrows it per
+//     tool; the owner's Grant policy remains the outer bound. Nothing here is a
+//     security boundary of its own — it all funnels into execute.
 //   - **Authenticated by agent token.** A browser session is not accepted: MCP
 //     is the surface for programs, and a program's credential is a token
 //     (ADR-019). Each call is audited with the token's identity.
@@ -38,6 +40,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/auth"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/inspect"
 )
 
@@ -82,15 +85,18 @@ type Server struct {
 	// Tokens authenticates the bearer credential. It is required: /mcp exists
 	// for programs, and a program's credential is an agent token (ADR-019).
 	Tokens *agenttoken.Store
+	// Exec is the write path the phase-2 tools call. Nil means this deployment
+	// cannot execute, and the write tools are then not offered at all.
+	Exec *execute.Controller
 
 	tools  []tool
 	byName map[string]tool
 }
 
 // NewServer builds the server and its tool registry.
-func NewServer(version string, reader *inspect.Reader, tokens *agenttoken.Store) *Server {
-	s := &Server{Version: version, Reader: reader, Tokens: tokens}
-	s.tools = readTools()
+func NewServer(version string, reader *inspect.Reader, tokens *agenttoken.Store, exec *execute.Controller) *Server {
+	s := &Server{Version: version, Reader: reader, Tokens: tokens, Exec: exec}
+	s.tools = append(readTools(), writeTools()...)
 	s.byName = make(map[string]tool, len(s.tools))
 	for _, t := range s.tools {
 		s.byName[t.name] = t
@@ -211,7 +217,7 @@ func (s *Server) dispatch(ctx context.Context, identity agenttoken.Identity, met
 
 	case "tools/list":
 		log.Printf("[srcos] mcp %s tools/list", identity.Describe())
-		return s.listTools(), nil
+		return s.listTools(identity), nil
 
 	case "tools/call":
 		var call struct {
@@ -228,11 +234,20 @@ func (s *Server) dispatch(ctx context.Context, identity agenttoken.Identity, met
 		}
 		log.Printf("[srcos] mcp %s tools/call %s", identity.Describe(), t.name)
 
+		// A write tool on a deployment without a write path, or on a token
+		// without the submit scope, is refused here as well as inside execute:
+		// the listing already hides it, and a hidden tool must not be reachable
+		// by guessing its name.
+		if t.write && (s.Exec == nil || !identity.Has(agenttoken.ScopeSubmit)) {
+			return textResult("this tool needs an agent token with the \"submit\" scope"+
+				" (and a gateway with the write path configured)", true), nil
+		}
+
 		// A tool *execution* failure is a result with isError, not a protocol
 		// error: the agent asked a well-formed question and the platform
 		// answered "no, because …". A malformed call is a protocol error
 		// (handled above).
-		out, err := t.call(ctx, env{user: identity.User, reader: s.Reader}, call.Arguments)
+		out, err := t.call(ctx, env{user: identity.User, ident: identity, reader: s.Reader, exec: s.Exec}, call.Arguments)
 		if err != nil {
 			return textResult(err.Error(), true), nil
 		}
@@ -262,8 +277,9 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 		},
 		"serverInfo": map[string]any{"name": "srcos", "version": s.Version},
 		"instructions": "SRCOS is a deterministic execution backend: tools are work.sh + a typed interface, " +
-			"and an instance is one run of one tool. This phase is read-only — list tools, browse the storage " +
-			"roots a tool declares, inspect instances, tail logs, list artifacts and read text files. " +
+			"and an instance is one run of one tool. Read surface: list tools, browse the storage roots a " +
+			"tool declares, inspect instances, tail logs, list artifacts and read text files. With the " +
+			"\"submit\" scope you can also submit a run, cancel one, and run a flow. " +
 			"Every answer is scoped to the user the agent token belongs to; a tool's interface comes from " +
 			"srcos_describe_tool, and the storages a path parameter may use come from srcos_list_storages.",
 	}

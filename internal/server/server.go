@@ -470,7 +470,7 @@ func (s *Server) Handler() http.Handler {
 	// Tool/storage API. Registered as exact paths, like /api/services, so a
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
 	// Each of these is a reserved gateway path (README「保留路径」).
-	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/jobs/",
+	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/jobs/", "/api/flows/",
 		"/api/resources", "/api/resources/raw", "/api/resources/html",
 		"/api/admin", "/api/admin/"} {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
@@ -1468,7 +1468,10 @@ func contentTypeFor(name string) string {
 // mcpHandler is the gateway's MCP endpoint: the read-only platform surface an
 // agent reaches with an agent token (ADR-019).
 func (s *Server) mcpHandler() http.Handler {
-	return mcp.NewServer(s.mcpVersion, s.reader(), s.agentTokens)
+	// The write path is the API handler's own controller, so an agent's
+	// submission and a browser's form submission are the same operation with the
+	// same checks (one implementation, two front-ends).
+	return mcp.NewServer(s.mcpVersion, s.reader(), s.agentTokens, s.apiHandler.Executor())
 }
 
 // requireUserPage enforces a session for a page and redirects to login

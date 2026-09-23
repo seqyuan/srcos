@@ -202,8 +202,8 @@ func TestExpiredTokenIsRejected(t *testing.T) {
 	}
 }
 
-// Create refuses what it cannot honour: an unknown scope, and the reserved
-// `submit` scope (whose semantics are still undecided, ADR-019 / roadmap §8 #9).
+// Create refuses what it cannot honour: an unknown scope, and an allowlist whose
+// scope is missing (which would silently do nothing).
 func TestCreateRejectsWhatItCannotIssue(t *testing.T) {
 	s, path := newTestStore(t)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -213,8 +213,10 @@ func TestCreateRejectsWhatItCannotIssue(t *testing.T) {
 		p    CreateParams
 		want string
 	}{
-		{"submit is reserved", CreateParams{User: "alice", Scopes: []Scope{ScopeSubmit}}, "reserved"},
 		{"unknown scope", CreateParams{User: "alice", Scopes: []Scope{"admin"}}, "unknown scope"},
+		{"allowlist without submit", CreateParams{User: "alice", SubmitTools: []string{"ticker"}}, "needs the \"submit\" scope"},
+		{"allowlist with a bad id", CreateParams{
+			User: "alice", Scopes: []Scope{ScopeSubmit}, SubmitTools: []string{"Not A Tool"}}, "must match"},
 		{"invalid user", CreateParams{User: "not a user"}, "invalid username"},
 		{"empty user", CreateParams{}, "invalid username"},
 		{"past expiry", CreateParams{User: "alice", ExpiresAt: now.Add(-time.Hour), Now: now}, "not in the future"},
@@ -231,6 +233,60 @@ func TestCreateRejectsWhatItCannotIssue(t *testing.T) {
 	// Nothing was written: a refused create must not leave a file behind.
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a refused create wrote %s: %v", path, err)
+	}
+}
+
+// The submit scope is the phase-2 capability, and it implies read: a credential
+// that can start work but not watch it would only let its holder act blind.
+func TestSubmitScopeImpliesReadAndHonoursTheAllowlist(t *testing.T) {
+	s, _ := newTestStore(t)
+	rec, raw := mustCreate(t, s, CreateParams{
+		User: "alice", Scopes: []Scope{ScopeSubmit}, SubmitTools: []string{"ticker", "ticker"},
+	})
+	if got := ScopeSet(rec.Scopes).String(); got != "read,submit" {
+		t.Fatalf("scopes = %q, want read,submit", got)
+	}
+	if len(rec.SubmitTools) != 1 || rec.SubmitTools[0] != "ticker" {
+		t.Fatalf("submit_tools = %v, want a deduplicated [ticker]", rec.SubmitTools)
+	}
+
+	ident, err := s.verifyAt(raw, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ident.Has(ScopeRead) || !ident.Has(ScopeSubmit) {
+		t.Fatalf("scopes = %v", ident.Scopes)
+	}
+	if !ident.CanSubmitTool("ticker") {
+		t.Error("the allowlisted tool must be submittable")
+	}
+	if ident.CanSubmitTool("other") {
+		t.Error("a tool outside the allowlist must not be submittable")
+	}
+
+	// An empty allowlist means every tool the owner may use.
+	_, rawOpen := mustCreate(t, s, CreateParams{User: "alice", Scopes: []Scope{ScopeSubmit}})
+	open, err := s.verifyAt(rawOpen, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !open.CanSubmitTool("anything") {
+		t.Error("an empty allowlist must allow any tool")
+	}
+
+	// A read-only token cannot submit, whatever the tool.
+	_, rawRead := mustCreate(t, s, CreateParams{User: "alice"})
+	readOnly, err := s.verifyAt(rawRead, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readOnly.CanSubmitTool("ticker") {
+		t.Error("a read-only token must not submit")
+	}
+
+	// A human session is not narrowed (the Grant policy is the bound).
+	if !HumanIdentity("alice").CanSubmitTool("ticker") {
+		t.Error("a session must be able to submit")
 	}
 }
 

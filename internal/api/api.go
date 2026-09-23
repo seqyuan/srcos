@@ -12,6 +12,7 @@ import (
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/storage"
@@ -67,6 +68,10 @@ type Options struct {
 	// FlowsDir is the flow package root, for the admin console's canvas. Empty
 	// disables the flow endpoints.
 	FlowsDir string
+	// Execute is the write path (submit / cancel / run_flow). Nil builds the
+	// default controller from the other options, so a deployment gets it without
+	// wiring anything extra.
+	Execute *execute.Controller
 }
 
 // Handler handles REST API requests for service management.
@@ -76,6 +81,11 @@ type Handler struct {
 	opts          Options
 }
 
+// Executor exposes the write path. The gateway passes the same controller to
+// the MCP server, so an agent's submission and a browser's submission are the
+// same operation with the same checks (one implementation, two front-ends).
+func (h *Handler) Executor() *execute.Controller { return h.opts.Execute }
+
 // NewHandler creates a new API handler.
 func NewHandler(registry *config.UserRegistry, sessionSecret string) *Handler {
 	return NewHandlerWithOptions(registry, sessionSecret, Options{})
@@ -83,6 +93,19 @@ func NewHandler(registry *config.UserRegistry, sessionSecret string) *Handler {
 
 // NewHandlerWithOptions creates an API handler with the tool/storage seams wired.
 func NewHandlerWithOptions(registry *config.UserRegistry, sessionSecret string, opts Options) *Handler {
+	if opts.Execute == nil {
+		// One controller per handler: the write path's quota check and drop-box
+		// write must be serialized across requests, so it cannot be rebuilt per
+		// call.
+		opts.Execute = execute.New(execute.Options{
+			ConfigDir:  opts.ConfigDir,
+			ToolsDir:   opts.ToolsDir,
+			FlowsDir:   opts.FlowsDir,
+			Storages:   opts.Storages,
+			Grants:     opts.Grants,
+			Supervisor: opts.Runner,
+		})
+	}
 	return &Handler{
 		Registry:      registry,
 		SessionSecret: sessionSecret,
@@ -116,6 +139,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		path == "/api/paths" ||
 		path == "/api/jobs" ||
 		strings.HasPrefix(path, "/api/jobs/") ||
+		strings.HasPrefix(path, "/api/flows/") ||
 		path == "/api/resources" ||
 		path == "/api/resources/raw" ||
 		path == "/api/resources/html"
@@ -181,7 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	// Submissions: the generated form, a tool's own UI, and the MCP submit tool
 	// all funnel through the same validation and the same drop-box.
 	case path == "/api/jobs" && r.Method == "POST":
-		h.handleSubmitJob(w, r, username)
+		h.handleSubmitJob(w, r, ident)
 	case path == "/api/jobs" && r.Method == "GET":
 		h.handleListJobs(w, r, username)
 
@@ -194,6 +218,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		h.handleLogs(w, r, username, id)
+
+	// Cancelling is a write: it needs the submit scope and the tool allowlist,
+	// which handleCancelInstance checks.
+	case strings.HasPrefix(path, "/api/jobs/") && r.Method == "POST":
+		id, ok := jobCancelID(path)
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "not found"})
+			return true
+		}
+		h.handleCancelInstance(w, r, ident, id)
+
+	// Running a flow: the same write scope, checked per tool the flow uses.
+	case strings.HasPrefix(path, "/api/flows/") && r.Method == "POST":
+		id, ok := flowRunID(path)
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "not found"})
+			return true
+		}
+		h.handleRunFlow(w, r, ident, id)
 
 	// The srcos:// resource protocol (ADR-011/016): one metadata answer, the
 	// bytes, and the sandboxed HTML door kept separate.

@@ -106,8 +106,8 @@
 
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
 **`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
-下一步见 §6 与 [`handoff.md`](handoff.md) §3：**MCP 第二期**（`submit` scope，需先定粒度）或
-**Phase 5 的其余前端件**（agent token 自助页 / 画布拖拽与 `expose` 自动推导）。
+下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5 的剩余前端件**（agent token 自助页 / 画布拖拽与
+`expose` 自动推导）或 **Phase 5.5（dsh 路 B）**。
 
 ---
 
@@ -537,10 +537,31 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
     「已撤销的 token 仍被接受」是这个面最不能出的 bug（粗粒度时间戳的 FS 上 mtime 缓存会漏掉撤销）。
   - **失败关闭**：文件缺失 = 无 token；文件格式错 = 全部失效并记日志（只记一次），修好即恢复。
   - **token 不放大权限**：以所属用户身份行事，Grant 照常生效；scope 只收窄。
-    `read` 可签发；`submit` 是预留 scope，`Create` 直接拒绝签发（而不是发一个“什么都不做”的凭据）。
-  - **API 层规则**：HTTP 非 GET/HEAD/OPTIONS 且无 `submit` scope → 403（第一期即只读面）；
+    `read` 与 `submit` 都可签发；`submit` **蕴含 `read`**（只能开工不能看结果的凭据只会让持有者盲动）。
+  - **API 层规则**：HTTP 非 GET/HEAD/OPTIONS 且无 `submit` scope → 403；
     Bearer 请求免 `Origin` 校验（token 不是浏览器自动携带的凭据）；
     每次认证都写审计日志行（被拒时另记一行）。
+
+- **第二期实现契约（2026-09-24 完成，submit / cancel / run_flow）** ——
+  **submit 授权 = 工具 × 用户双维度**（roadmap §8 #9 的决定）：
+  - **按用户**：owner 的 Grant 依旧外层上界（未授权的工具对写入面同样是「未找到」），
+    配额（`max_cpu` / `max_memory` / `max_instances`）照常生效。token 永远是自己用户的子集。
+  - **按工具**：token 可带 `submit_tools` 白名单（`srcos token create --scope submit --tool X`），
+    空 = 该用户可见的全部工具。白名单只能*收窄*：工具不在里面 → 403。
+    跑流程时对**每个节点的工具**都校验（不能靠组合把另一个工具洗进来）。
+  - **单一实现**：`internal/execute` 是写入面的唯一权威（校验 + 配额 + 投递 + 启动），
+    REST（`POST /api/jobs`、`/api/jobs/<id>/cancel`、`/api/flows/<id>/run`）与 MCP
+    （`srcos_submit_job` / `srcos_cancel_instance` / `srcos_run_flow`）都调它（ADR-018）。
+  - **submit 的语义是「入队并开始执行」**：MCP 提交一律 `run=true`（agent 无法去 drain 队列）；
+    REST 默认仍只入队（保持表单/队列语义），显式传 `"run": true` 才立即执行。
+  - **实例在 submit 返回时就可供寻址**（先写 pending 记录再启动）：否则"刚提交就查"会得到
+    误导性的 not found。
+  - **取消是幂等的**：已终态的实例直接返回它的终态，而不是报错（agent 重试取消不应该失败）。
+  - **已知限制（未解决）**：执行等待者活在网关进程里（与 CLI `job run` 同构）。
+    网关在任务运行中重启会丢掉退出码（记录由 Reconcile 按后端能看到的真实状态收尾）。
+    真正的持久任务执行器（网关侧的队列 drainer）仍是待办。
+  - **审计**：每次写入另记一行 `audit submit/cancel/run_flow`（谁、哪个 token/scope、
+    哪个工具与版本、哪个 job/instance/run）。
   - **撤销**：`token revoke <id>` / `--user <name> --all`；`srcos del <user>` 一并撤销；
     网关侧还有「用户必须存在」的失败关闭兜底。
   - **使用时间**写在 `data/agent-token-usage.yaml`（运行态、网关写、按 token 降频、
@@ -691,7 +712,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] **生成式表单**（ADR-017 的必要补全：只有 `work.sh` + `interface` 的工具立即可用）
 - [x] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）：
       `internal/agenttoken`（创建/校验/撤销/失败关闭 + 使用时间）+ `srcos token create|list|revoke` +
-      HTTP 面 `Authorization: Bearer`（第一期只读：写接口需预留的 `submit` scope，现不可签发）+ 审计日志行
+      HTTP 面 `Authorization: Bearer`（第一期只读；第二期已可签发 `submit`，见下）+ 审计日志行
 - [x] **管理端页面**（2026-09-22）：`/admin` —— 实例总览（全部用户 + CPU/内存快照 + 日志）、
       强制停止（走 `StopService`）、工具/授权内联编辑（增删用户/组/public/配额，"删除授权" = 下架）、
       组与管理员管理；配套 `/api/admin/*`（仅管理员 + Origin 校验）
@@ -813,7 +834,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 6 | `storages.yaml` 的 `rw` 是否允许写共享盘？配额怎么做（XFS project quota / 单独卷 / 目录计数）？ | **数据盘是 ext4 不是 XFS → XFS project quota 排除**；倾向单独卷 + 目录计数（见 `docs/environments.md`） |
 | 7 | `task` 的 `doneWhen` 探针是否需要内置常见类型（`file_exists` / `dir_nonempty` / `exit_code`）？ | 是，先内置这三个，其余留给工具自己写 |
 | 8 | dsh 集成的 Phase 5.5 何时做？集群/登录节点 Node 可用性如何？ | 取决于实际部署环境，路 B 可先于路 A |
-| 9 | MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？ | 倾向按工具 + 按用户双维度授权 |
+| 9 | ~~MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？~~ | ✅ **已决（2026-09-24）**：**工具 × 用户双维度** —— token 需 `submit` scope，`submit_tools` 白名单按工具收窄，owner 的 Grant 与配额仍是外层上界；实现见 ADR-019「第二期实现契约」 |
 | 10 | ~~**「不用 root」是架构偏好还是环境限制？**~~ | ✅ **已决（2026-09-22）**：架构偏好。docker 最多作可选 backend，不得成为 `local` 必需项 |
 | 11 | ~~**是否执行 bwrap 修复**（AppArmor profile）？~~ | ✅ **已执行并验证通过**（2026-09-22）；重跑 `scripts/probe-env.sh` 确认 |
 | 12 | **真正的 SGE 登录节点在哪？** 需要在它上面也跑一次 `scripts/probe-env.sh` | 阻塞 `backend: sge` 的全部实现细节 |
@@ -847,3 +868,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-22 | **管理端流程画布**：`webui/`（Vite+React+TS，独立工程，产物 embed 进二进制，dist 全部 gitignore 只留 .gitkeep 所以无 Node 也能构建）+ `/admin/flows/<id>/edit` + `/api/admin/flows`（list/get/put/validate，仅管理员，路径由 id 推导）+ 拓扑分层自动布局 + 两步点连线（**服务端校验**，画布不重复实现类型规则）；顺带补一条契约规则：**连线即依赖**（画布自动补 depends_on，服务端拒绝手工删掉的情况） |
 | 2026-09-23 | **Phase 5：`srcos://` 资源协议 + 自带 viewer** —— `internal/resource`（地址语法 + `patterns` 认领注册表，纯解析，与 `dsh-resource://` 同构 = 路 D 保险）+ `internal/inspect`（唯一解析入口：复用 `sandbox.Spec`/Jail，scope 用户相对、地址里无用户名，storage scope 走 ADR-020 闭包）+ `/api/resources`（元数据）/`raw`（字节，**永不 text/html**）/`html`（CSP sandbox）/`/view`（Go 模板 viewer：文本行号、服务端 Markdown、表格、图片、PDF、**sandbox iframe 的 HTML**、目录）+ viewer 注册表首批（`internal/web`）；storage id 保留 `home`/`workspace`；修掉一个真问题：`ResolveExisting` 把「文件不存在」报成「symlink escape」（见 handoff §4.2） |
 | 2026-09-23 | **Phase 5：任务列表 + SSE 日志流** —— `internal/inspect/logstream.go`（`FollowLogs`：尾部回放 → 跟随 → 终态收尾；**半行不当作一行**、15s 心跳、日志未出现时等待）+ `GET /api/jobs/<id>/logs`（默认纯文本尾部，`?follow=1` 为 SSE）+ `/tasks`、`/tasks/<id>`（服务端渲染，无 JS 也能读；产物的 `srcos://` 地址一键进 viewer）；顺带修 `Address.Child` 造成的目录导航路径重复（浏览器 e2e 发现，见 handoff §4.6） |
+| 2026-09-24 | **MCP 第二期：submit / cancel / run_flow** —— `internal/execute`（写入面唯一实现：校验 + 配额 + 投递 + 启动） `submit` scope 可签发（`srcos token create --scope submit --tool X` 按工具收窄，蕴含 read） REST `POST /api/jobs`（新增 `run`）/`/api/jobs/<id>/cancel`/`/api/flows/<id>/run` MCP 写入三件套（只对有 submit scope 的 token 列出） 每次写入一行审计；修掉两个真问题：实例在 submit 返回前不可寻址、取消被等待者盖成 failed（见 handoff §4.2） |

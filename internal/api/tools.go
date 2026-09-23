@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/storage"
@@ -40,6 +41,14 @@ func ErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, resource.ErrInvalid):
 		return http.StatusBadRequest
+	case errors.Is(err, execute.ErrBadRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, execute.ErrForbidden):
+		return http.StatusForbidden
+	case errors.Is(err, execute.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, execute.ErrUnavailable):
+		return http.StatusServiceUnavailable
 	case errors.Is(err, inspect.ErrBadRequest):
 		return http.StatusBadRequest
 	case errors.Is(err, inspect.ErrForbidden):

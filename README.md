@@ -367,20 +367,28 @@ srcos 2fa-reset <用户名>
 srcos token create -d /opt/srcos/config --user alice --label annovibe --expires 90d
 #   → srcos_hml5na3g.kVC-NFz6WrBzarEWERINKmzdygunpiUBr9JaNyor-3Q
 
+# 给 agent 执行权：submit scope（蕴含 read），并可用 --tool 按工具收窄
+srcos token create -d /opt/srcos/config --user alice --label ci \
+  --scope submit --tool ticker --tool demo
+
 # 列出 / 撤销（撤销立即生效，网关无需重启）
 srcos token list   -d /opt/srcos/config
 srcos token revoke -d /opt/srcos/config <id>
 
-# 使用：读工具目录、路径、任务状态（第一期只读面）
+# 使用：读工具目录、路径、任务状态（read 面）
 curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 ```
 
-- **只存哈希**：`config/agent-tokens.yaml` 是 SHA-256 哈希 + 用户 + scope + 过期 + 标签，
+- **只存哈希**：`config/agent-tokens.yaml` 是 SHA-256 哈希 + 用户 + scope + 工具白名单 + 过期 + 标签，
   没有明文。因此这份文件（或它的备份）泄露不等于凭据泄露。
 - **scope 只收窄不放宽**：token 以「所属用户」的身份行事，Grant 授权策略照常生效；
-  scope 只能在其之上收窄。目前只能签发 `read`；`submit`（提交/取消/跑流程）是
-  ADR-019 第二期的保留 scope，现在会明确拒绝签发。
-- **只读**：写接口（`POST /api/jobs` 等）用 token 调用会被拒（403），提示需要 `submit`。
+  scope 只能在其之上收窄。两个 scope：
+  - `read`（默认）—— 目录、路径、状态、日志、产物；
+  - `submit` —— 提交运行 / 取消 / 跑流程，**蕴含 `read`**（只能开工不能看结果的凭据只会让持有者盲动）。
+    `--tool <id>` 可重复，把 `submit` 按工具收窄；空 = 该用户可见的全部工具。
+- **submit 授权是工具 × 用户双维度**：token 需 `submit`；`--tool` 白名单再按工具收窄；
+  owner 的 Grant 与配额仍是外层上界（白名单只能收窄，不能放宽）。跑流程时对**每个节点的工具**都校验，
+  所以一个只能跑 `ticker` 的 token 不能靠组合把别的工具洗进来。
 - **过期**：默认 90 天，`--expires never` 可取消，`--expires 2026-12-21` / `12h` 亦可。
 - **删除用户即撤销**：`srcos del <user>` 会一并撤销该用户的 token；即使文件里残留，
   网关也会因用户不存在而拒绝（需存在才算有效凭据）。
@@ -417,7 +425,8 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/services`、`/api/services/*` | 卡片增删改、布局调整的 REST API |
 | `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
-| `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流） |
+| `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
+| `/api/flows/*` | `POST /api/flows/<id>/run` 用 CSV 样本表展开并启动一个流程 |
 | `/api/resources`、`/api/resources/raw`、`/api/resources/html` | **`srcos://` 资源协议**（元数据 / 字节 / sandbox 化的用户 HTML） |
 | `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
@@ -867,7 +876,7 @@ asyncio.run(main())
 PY
 ```
 
-工具清单（全部只读，名字带 `srcos_` 前缀以免与其他 MCP server 撞名）：
+工具清单（名字带 `srcos_` 前缀以免与其他 MCP server 撞名）。**读工具**随时可用：
 
 | 工具 | 作用 |
 |---|---|
@@ -878,8 +887,22 @@ PY
 | `srcos_list_instances` | 该用户的实例（任务/服务）列表 |
 | `srcos_task_status` | 单个实例状态 + 产物概览（接受实例 id / job id / 唯一后缀） |
 | `srcos_task_logs` | 实例日志尾部（SRCOS 自己写的那份，工具改不到） |
-| `srcos_list_artifacts` | 实例声明的产物（是否存在、大小、mtime） |
+| `srcos_list_artifacts` | 实例声明的产物（是否存在、大小、mtime，以及可进 viewer 的 `srcos://` 地址） |
 | `srcos_read_file` | 读文本文件（限该用户的 home / 工作区 / 已声明 storage） |
+
+**写工具**只在 token 带 `submit` scope 时才出现在 `tools/list` 里（`readOnlyHint: false`），
+即使猜到名字调用也会被拒：
+
+| 工具 | 作用 |
+|---|---|
+| `srcos_submit_job` | 提交一个任务**并立即执行**，返回 `jobId` + `instanceId` |
+| `srcos_cancel_instance` | 停掉一个在跑的实例（幂等：已结束的返回它的终态） |
+| `srcos_run_flow` | 用 CSV 样本表展开一个流程并启动（每个节点的工具都要在 token 的白名单里） |
+
+> **为什么 MCP 的 submit 会执行，而 `POST /api/jobs` 默认只入队？** 平台目前还没有
+> 网关侧的队列执行器（队列靠 `srcos job run` 消费），而 agent 没有地方去跑那条命令 ——
+> 所以对 agent 而言「提交」必须等于「开始执行」。REST 保留入队语义（表单/脚本可显式传
+> `"run": true` 立即执行）。网关侧持久执行器仍是待办。
 
 边界（写在实现里，不是约定）：
 
@@ -888,8 +911,10 @@ PY
   读不到别人的实例、日志、产物与路径。
 - **`read_file` 的范围**：`/home/<user>/...`、指定工具的工作区 `/workspace/...`、
   已声明 storage 的沙箱路径。路径穿越、symlink 逃逸、宿主路径、`/tool/...` 一律拒绝。
-- **每次调用写一行审计日志**（用户 / token / 方法 / 工具名），撤销 token 后立即失效。
-- 第二期（`submit` / `cancel` / `run_flow`）需要独立签发的 `submit` scope —— 现在明确不可签发。
+- **每次调用写一行审计日志**（用户 / token / 方法 / 工具名），撤销 token 后立即失效；
+  写入操作另有一行 `audit submit|cancel|run_flow`（含工具与版本、job/instance/run）。
+- **写入需要 `submit` scope**，且再经 `--tool` 白名单与 Grant 两道收窄；三者都在 `internal/execute`
+  里一次判定，REST/MCP 不可能不一致。
 
 ## 管理控制台（`/admin`，仅管理员）
 

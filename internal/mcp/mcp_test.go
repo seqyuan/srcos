@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -22,12 +24,13 @@ import (
 // storage, one storage root, one finished instance, and an agent token.
 type harness struct {
 	*Server
-	handler   http.Handler
-	token     string
-	configDir string
-	toolsDir  string
-	dataRoot  string
-	registry  *config.UserRegistry
+	handler     http.Handler
+	token       string
+	submitToken string
+	configDir   string
+	toolsDir    string
+	dataRoot    string
+	registry    *config.UserRegistry
 }
 
 const demoManifest = `
@@ -142,17 +145,51 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	srv := NewServer("test-version", reader, store)
-	return &harness{
-		Server:    srv,
-		handler:   srv,
-		token:     token,
-		configDir: configDir,
-		toolsDir:  toolsDir,
-		dataRoot:  dataRoot,
-		registry:  registry,
+	// A second credential with the submit scope, so the write half can be
+	// exercised without weakening the read one.
+	_, submitToken, err := store.Create(agenttoken.CreateParams{
+		User: "alice", Label: "ci", Scopes: []agenttoken.Scope{agenttoken.ScopeSubmit}, SubmitTools: []string{"demo"},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	// The write path is wired with a runner that refuses to start anything: the
+	// MCP layer's job is to decide *whether* to act, and a unit test must not
+	// spawn processes.
+	ctrl := execute.New(execute.Options{
+		ConfigDir: configDir,
+		ToolsDir:  toolsDir,
+		Storages:  provider,
+		Grants:    policy,
+		NewRunner: func(user string) (*runtime.Runner, error) {
+			return nil, errNoRunner
+		},
+	})
+
+	srv := NewServer("test-version", reader, store, ctrl)
+	return &harness{
+		Server:      srv,
+		handler:     srv,
+		token:       token,
+		submitToken: submitToken,
+		configDir:   configDir,
+		toolsDir:    toolsDir,
+		dataRoot:    dataRoot,
+		registry:    registry,
+	}
+}
+
+// errNoRunner stands in for a deployment where starting a unit is not possible
+// in a unit test.
+var errNoRunner = fmt.Errorf("no runner in this test")
+
+// useToken runs fn with a different credential, then restores the harness's.
+func (h *harness) useToken(tok string, fn func()) {
+	old := h.token
+	h.token = tok
+	defer func() { h.token = old }()
+	fn()
 }
 
 // call posts one JSON-RPC message and returns the decoded response.
@@ -245,7 +282,7 @@ func TestInitializeNegotiates(t *testing.T) {
 	if _, ok := caps["tools"]; !ok {
 		t.Fatalf("capabilities = %v", caps)
 	}
-	if inst, _ := res["instructions"].(string); !strings.Contains(inst, "read-only") {
+	if inst, _ := res["instructions"].(string); !strings.Contains(inst, "submit") || !strings.Contains(inst, "Read surface") {
 		t.Fatalf("instructions = %v", res["instructions"])
 	}
 
@@ -450,4 +487,107 @@ func TestTokenOfDeletedUserIsRejected(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("deleted user = %d %s", rec.Code, rec.Body)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// the write half (ADR-019 phase 2)
+// ─────────────────────────────────────────────────────────────────────────
+
+// toolNames reads tools/list and returns the names offered to this credential.
+func (h *harness) toolNames(t *testing.T) map[string]map[string]any {
+	t.Helper()
+	res := h.rpc(t, "1", "tools/list", `{}`)
+	list, _ := res["tools"].([]any)
+	out := map[string]map[string]any{}
+	for _, raw := range list {
+		tool, _ := raw.(map[string]any)
+		name, _ := tool["name"].(string)
+		out[name] = tool
+	}
+	return out
+}
+
+func TestWriteToolsAreOfferedOnlyToSubmitTokens(t *testing.T) {
+	h := newHarness(t)
+
+	// A read-only token sees exactly the read surface it has.
+	read := h.toolNames(t)
+	for _, name := range []string{"srcos_submit_job", "srcos_cancel_instance", "srcos_run_flow"} {
+		if _, ok := read[name]; ok {
+			t.Errorf("a read-only token was offered %s", name)
+		}
+	}
+	if tool, ok := read["srcos_list_tools"]; !ok {
+		t.Fatal("the read catalogue is missing")
+	} else if ann, _ := tool["annotations"].(map[string]any); ann["readOnlyHint"] != true {
+		t.Errorf("read tool annotations = %v", ann)
+	}
+
+	// A submit token sees them, annotated as writes.
+	var write map[string]map[string]any
+	h.useToken(h.submitToken, func() { write = h.toolNames(t) })
+	for _, name := range []string{"srcos_submit_job", "srcos_cancel_instance", "srcos_run_flow"} {
+		tool, ok := write[name]
+		if !ok {
+			t.Fatalf("a submit token was not offered %s", name)
+		}
+		ann, _ := tool["annotations"].(map[string]any)
+		if ann["readOnlyHint"] != false {
+			t.Errorf("%s annotations = %v, want readOnlyHint=false", name, ann)
+		}
+	}
+	// The read tools are still there.
+	if _, ok := write["srcos_list_instances"]; !ok {
+		t.Error("the read catalogue disappeared for a submit token")
+	}
+}
+
+func TestSubmitJobThroughMCP(t *testing.T) {
+	h := newHarness(t)
+
+	var res map[string]any
+	h.useToken(h.submitToken, func() {
+		out := h.callTool(t, "srcos_submit_job", `{"tool":"demo","params":{"ref":"/data","samples":"S1"},"name":"from mcp"}`)
+		res, _ = out.(map[string]any)
+	})
+	if res["jobId"] == "" || res["jobId"] == nil {
+		t.Fatalf("submit result = %v", res)
+	}
+	if res["instanceId"] == nil {
+		t.Errorf("an agent's submit must start the run: %v", res)
+	}
+	// The submission is a real drop-box entry, visible to the read side.
+	if ids, _ := h.callTool(t, "srcos_list_instances", `{}`).(map[string]any); ids == nil {
+		t.Fatalf("list_instances = %v", ids)
+	}
+}
+
+func TestWriteToolRefusedWithoutTheSubmitScope(t *testing.T) {
+	h := newHarness(t)
+	// The read token knows the name (the listing hides it, the name is guessable)
+	// and must still be refused.
+	text := h.callToolError(t, "srcos_submit_job", `{"tool":"demo","params":{"ref":"/data","samples":"S1"}}`)
+	if !strings.Contains(text, "submit") {
+		t.Errorf("refusal = %q", text)
+	}
+}
+
+func TestSubmitHonoursTheToolAllowlist(t *testing.T) {
+	h := newHarness(t)
+	// The submit token's allowlist names only "demo", so "web" is refused — and
+	// "web" is a service anyway, which the execute layer rejects separately.
+	text := h.callToolError(t, "srcos_submit_job", `{"tool":"web","params":{}}`)
+	if text == "" {
+		t.Fatal("no refusal text")
+	}
+}
+
+func TestCancelThroughMCP(t *testing.T) {
+	h := newHarness(t)
+	h.useToken(h.submitToken, func() {
+		text := h.callToolError(t, "srcos_cancel_instance", `{"instance":"alice-demo-nope"}`)
+		if !strings.Contains(text, "not found") {
+			t.Errorf("cancel of an unknown instance = %q", text)
+		}
+	})
 }
