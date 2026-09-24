@@ -1,4 +1,4 @@
-import type { EditorView, Flow, FlowSummary } from './types'
+import type { EditorView, Flow, FlowSummary, Layout } from './types'
 
 // Every write goes through the server's validation: the canvas never decides on
 // its own whether a wire is legal (that rule lives in internal/flow, and a second
@@ -31,3 +31,7 @@ export const saveFlow = (flow: Flow) =>
   request<{ flow: Flow; valid: boolean }>('PUT', `/api/admin/flows/${encodeURIComponent(flow.id)}`, flow)
 export const validateFlow = (flow: Flow) =>
   request<{ valid: boolean; problem?: string }>('POST', '/api/admin/flows/validate', flow)
+// The layout has its own write: dragging a node must not run — or fail — flow
+// validation, because nothing about it is part of the contract (ADR-023).
+export const saveLayout = (id: string, layout: Layout) =>
+  request<{ layout: Layout }>('PUT', `/api/admin/flows/${encodeURIComponent(id)}/layout`, layout)

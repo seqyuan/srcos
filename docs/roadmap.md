@@ -99,15 +99,14 @@
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - 审计日志；`storages` 的 rw 配额
 - `apptainer` sandbox；dsh 集成（ADR-016 一步未做）
-- **Phase 5 剩余**：agent token 自助页、画布的拖拽摆放与 `expose` 自动推导
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
 
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
 **`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
-下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5 的剩余前端件**（agent token 自助页 / 画布拖拽与
-`expose` 自动推导）或 **Phase 5.5（dsh 路 B）**。
+Phase 5 到此收工。下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5.5（dsh 路 B）**——
+把 `srcos://` 协议接成 dsh 插件（路 D 的地址语法已就位）。
 
 ---
 
@@ -669,6 +668,25 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-023：画布布局是旁挂文件；`expose` 由服务端推导
+
+- **背景**：画布的两个「未做」——拖拽摆放与 `expose` 自动推导。前者需要一个落点，而 `flow.yaml`
+  是契约（可手写、可 diff、注册期校验）；ADR-012 已经说了「布局不写进契约」，但没说写到哪。
+- **决策（布局）**：手摆的坐标写在 **`<flows>/<id>/layout.yaml`**（`nodes: {<id>: {x, y}}`），
+  由画布自己的写入口维护：`PUT /api/admin/flows/<id>/layout`，**不跑流程校验**（拖动一个节点
+  不该让一个合法流程看起来坏掉）。文件缺失/损坏 = 「没有摆放记录」，画布退回**拓扑分层推导**
+  （手写的流程照样打开）；只保留 `flow.yaml` 里仍存在的节点（旁挂数据不许无限积累）。
+- **决策（expose）**：`GET /api/admin/flows/<id>` 的编辑器视图带上 `suggestedExpose` ——
+  「必填、无绑定、无 expose、且工具没有默认值」的输入，建议 `from: sample.<输入名>`。
+  规则与注册期校验的第 14 条**互补且写在一起**（`internal/flow.MissingExpose`），所以画布补的
+  正是校验会拒的；它只产出草稿建议，写回仍然只能走「校验通过才保存」那条路。
+- **顺带修正一处实现偏离**：校验的闭环原来**忽略工具默认值**（尽管提示语写着「或给工具一个默认值」，
+  且 `job.Validate` 是按「有效参数」判定的）。现在 `default != nil` 也满足 required 输入 ——
+  与 flow-spec §2.6 的原文一致。
+- **不做**：把坐标写进 `flow.yaml`；在浏览器里重写类型规则（推导与校验都在 Go，画布只展示答案）。
+
+---
+
 ## 6. 路线图
 
 ### Phase 0：基线 ✅
@@ -823,10 +841,11 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       跟随追加 → 终态自动结束；半行不当作一行、静默 15s 心跳、日志未出现时等待、记录消失时收尾）+
       `GET /api/jobs/<id>/logs`（默认纯文本尾部）/`?follow=1`（SSE，事件名 `line`/`state`/`note`/`end`）；
       **产物直接链进 viewer**（`Artifact.Addr` = 沙箱路径 → `srcos://` 地址）
-- [x] **流程编排画布**（2026-09-22）：`/admin/flows/<id>/edit` —— 拓扑分层自动布局（不写布局进契约）、
+- [x] **流程编排画布**（2026-09-22；2026-09-24 补拖拽与 expose 推导）：`/admin/flows/<id>/edit` —— 拓扑分层自动布局（不写布局进契约）、
       两步点连线、**服务端校验**（画布不重复实现类型规则）、检查器编辑取值来源/依赖/when/retry、
       校验通过才写回 `flow.yaml`；只有这一页加载 React（ADR-012）。
-      **未做**：拖拽摆放（布局是推导的）、`expose` 的自动推导（现在是显式选择来源）
+      **拖拽摆放**（2026-09-24，ADR-023）：坐标落在旁挂 `layout.yaml`，单独写、不跑校验；
+      **`expose` 自动推导**（2026-09-24）：服务端算出「必填且无来源」的输入，画布一键补齐
 - [x] **用户自助生成 agent token 的页面**（2026-09-24）：`/tokens`（生成 / 列表 / 撤销）+ `/api/tokens`；
       列表服务端渲染（无 JS 也能看与撤），生成走 JSON API 以免明文进 URL；**只给自己签**、
       白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
@@ -919,3 +938,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-24 | **任务队列消费者（ADR-022）** —— 「目录即队列」终于有了守护进程：`internal/execute/queue.go`（启动即时冲刷 + 提交唤醒 + 周期 tick；按 (用户,工具) 串行、`--task-workers` 全局上限）、`job.Claim`（O_EXCL 认领，网关/CLI/流程执行器互斥）、`pending` 不算资源占用（`State.ConsumesResources`）、队列跳过流程节点、`runtime.ReconcileTasks` 每 tick 结算失去等待者的任务；新增 `--task-workers` / `--no-task-drainer`；已知限制：重启后运行结束的运行拿不回退出码（scope 无 `ExecMainStatus`） |
 | 2026-09-24 | **任务改以 systemd 瞬时 unit 运行 + 判定文件**（ADR-022 收尾）—— `systemd-run --unit --wait`（退出码仍同步返回，unit 给出稳定名字与 `is-active`/`stop` 句柄）、`-p StandardOutput=append:<log>`（**修掉一个一直存在的 bug**：unit 的 stdout 不继承我们的 fd，服务日志此前是空的）、`-p ExecStopPost=...` 把 `$EXIT_STATUS $SERVICE_RESULT` 写进 `<log>.verdict`（`systemctl show` 不能依赖：瞬时 unit 退出后 ~1s 就被回收）、`ReconcileTasks` 读判定文件并用同一个 `applyExitStatus` 落库（**重启后再结束的运行现在有真实退出码**）；顺带修掉每次启动泄漏一个日志 fd（task + service 两条路径） |
 | 2026-09-24 | **agent token 自助页**（ADR-019 的自助那一半）—— `/tokens` 页面 + `/api/tokens`（GET 列表 / POST 新建 / DELETE 撤销）：列表服务端渲染，生成走 JSON 以免明文进 URL/历史；只给自己签、白名单只能收窄自己可见的工具、每次运行仍过 Grant 与配额；**管理凭据只认浏览器 session**（agent token 一律 403 —— 泄露的 submit token 不能给自己续期）；`ParseExpiry` 下沉到 `agenttoken` 供 CLI 与页面共用；每用户 token 上限 20 |
+| 2026-09-24 | **画布：拖拽摆放 + `expose` 自动推导（ADR-023）** —— 坐标旁挂 `<flows>/<id>/layout.yaml`（不进契约、不跑校验、缺失即退回拓扑推导、只留现有节点）+ `PUT /api/admin/flows/<id>/layout`；编辑器视图带 `suggestedExpose`（与第 14 条闭环互补，写在同一个包）→ 画布一键补齐；前端改动见 `webui/src/{Canvas,layout,App}.tsx`（指针捕获拖动、去抖落盘、`touch-action: none`）；**顺带修正一处实现偏离**：校验的闭环原来忽略工具默认值（与 §2.6 原文及 `job.Validate` 不一致）；Playwright 验证：拖动 → 刷新后位置仍在、`layout.yaml` 有坐标而 `flow.yaml` 没有、补齐 expose → 草稿转合法 → 保存写回 |

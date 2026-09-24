@@ -47,8 +47,8 @@
 管理员还能**画流程**：`/admin/flows/<id>/edit`（webui/ Vite+React，只有这一页加载它 —— ADR-012），
 拓扑分层自动布局、两步点连线、**服务端校验**（画布不重复实现类型规则）、校验通过才写回 `flow.yaml`。
 
-下一步：Phase 5 剩余前端件（agent token 自助页 / 画布拖拽与 `expose` 自动推导）、Phase 5.5（dsh 路 B），
-或把任务从 systemd scope 改成瞬时 unit（保住重启后的退出码，见 §2.3）。
+下一步：**Phase 5.5（dsh 路 B）** —— 把 `srcos://` 协议接成 dsh 插件（路 D 的地址语法已就位），
+或 **Phase 6（SGE）** —— 需要一台真正的登录节点（roadmap §8 #12）。
 
 ---
 
@@ -125,6 +125,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 资源协议：srcos:// ＋ /api/resources ＋ /view（自带 viewer）      │
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
+│ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -145,6 +146,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
+| **画布：拖拽 + expose 补齐** | Playwright（headless Chromium）打开 `/admin/flows/scrna/edit` → 拖动节点 `translate(32,28)` → `translate(292,178)` → **刷新后位置不变**（读自 `layout.yaml`）→ 磁盘上 `layout.yaml` 有坐标而 `flow.yaml` **没有**（旁挂，契约不被污染）→ 服务端给出「1 个未接的必填输入」→ 一键补齐 → 草稿转为 `校验通过` → 保存写回 `flow.yaml`（`expose` 多出 `sample_id`） |
 | **agent token 自助页** | Playwright：仪表盘有「令牌」入口 → `/tokens` 勾 `submit` + 工具 `ticker` → 生成 → 明文只显示一次且**不在 URL 里** → 刷新后列表（服务端渲染）显示 `有效` + `read,submit` + `ticker`，且页面里不再出现明文；用这枚 token 跑官方 Python MCP SDK → 12 个工具 → `srcos_submit_job` → 任务成功、日志可读；**撤销后**：行消失、该 token 立即被拒；**一枚活的 submit token** 打 `/api/tokens` 的 GET/POST/DELETE 全部 403「needs a browser session」，而同一个 token 打 `POST /api/jobs` 是 201 |
 | **任务 = systemd 瞬时 unit（判定文件）** | 任务 `succeeded` + 日志里**既有 stdout 也有 stderr**（此前 unit 的日志根本没被捕获）+ `<log>.verdict` = `0 success`；失败任务 `failed` + `exitCode=3` + 「tool exited with code 3」；**运行中重启** → `tasks reconcile: adopted 1` → 进程死后 `settled … as succeeded (exit 0)`（真实判定，不是「no verdict」）；取消 → `stopped` 且 unit `inactive`（判定文件写的是 `TERM success`）；`job run --force` 重跑同一实例正常（`reset-failed` + 旧判定被删）；无 systemd 的降级模式仍能跑并写日志 |
 | **任务队列（提交即自动执行）** | 网关起着：`POST /api/jobs`（带会话 cookie）→ 返回 `pending` + instanceId → **2.5s 后实例已 `succeeded`**（无人敲任何 CLI）；网关**停着**时用 `srcos job submit` 提交 → 启动网关 → `task queue: started 1 run(s) after startup` → 1s 内 `succeeded`；`--no-task-drainer` 时同一提交停 `pending` → `srcos job run` 手动跑成功；**运行中重启**：记录先被 `tasks reconcile: adopted 1`，进程死后下一 tick `settled`（state=stopped + 「no verdict」说明），**不重跑**；流程（`flow run`，2 样本）在队列运行时依然成功且每个 job 只出现一次（队列不偷流程节点）|
@@ -165,8 +167,7 @@ UI 造起来便宜了 → UI 不再是护城河
   什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
 - ⛔ **画布的拖拽摆放与 `expose` 自动推导** —— 布局现在是拓扑推导（不写进契约），
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
-- ⛔ **Phase 5 剩余** —— 画布的拖拽摆放与 `expose` 自动推导（`srcos://` 协议 / viewer / 任务列表 /
-  SSE 日志流 / agent token 自助页都已完成）
+- ⛔ **Phase 5 全部完成** —— 下一步是 Phase 5.5（dsh 路 B）或 Phase 6（SGE，需要真登录节点）
 - ⛔ **降级模式（无 user systemd）下的判定** —— 那种情况下任务是个普通子进程，进程与等待者一起
   消失时没有判定文件可读，`ReconcileTasks` 只能写 `stopped` + 说明（ADR-022 的兜底分支）
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
@@ -196,7 +197,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | ~~7~~ | ~~**Phase 4 收尾**~~：✅ **已完成**（并发、重试、取消、配额） | Phase 4 收工 |
 | ~~8~~ | ~~**MCP 第二期**~~：✅ **已完成**（`submit` / `cancel` / `run_flow` + `submit` scope 与 `submit_tools` 白名单；`internal/execute` 是写入面唯一实现，REST 与 MCP 共用） | agent 真的能"执行用 SRCOS"了 |
 | ~~9~~ | ~~**管理端画布**~~：✅ **已完成**（`webui/` Vite+React，只在该页加载；服务端校验；校验通过才写回） | 顺带补了一条契约规则：连线即依赖 |
-| **10** | **Phase 5 其余前端件**：`srcos://` 资源协议 + 自带 viewer ✅ / 任务列表 + SSE 日志流 ✅ / agent token 自助页 ✅；**剩** 画布拖拽摆放与 `expose` 自动推导 | 不涉架构选择；viewer 是 dsh 路 B 的前置 |
+| ~~10~~ | ~~**Phase 5 其余前端件**~~：✅ **全部完成**（`srcos://` 协议 + viewer、任务列表 + SSE 日志流、agent token 自助页、画布拖拽与 expose 推导） | Phase 5 收工 |
 | ~~11~~ | ~~**任务队列消费者**（ADR-022）~~：✅ **已完成**（提交即自动执行；启动冲刷 + 唤醒 + tick；认领互斥；队列跳过流程节点） | 「目录即队列」终于名副其实；剩下的是「重启后退出码」那条 backend 限制 |
 
 ### 3.2 需要用户提供信息才能做的
@@ -303,6 +304,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 019 | MCP Server 内置网关，第一期 read-only（✅ **已完成**，见 roadmap「MCP 实现契约」）；agent token（✅）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
+| 023 | **画布布局是旁挂文件**（`layout.yaml`，不进契约、不跑校验）；`expose` 由服务端按与校验互补的规则推导，画布只展示答案 |
 | 022 | **任务队列的消费者在网关内**；一次提交自动执行一次（认领互斥、`pending` 不算占用、流程节点不走队列）；任务以 systemd **瞬时 unit** 运行，判定由 `ExecStopPost` 写入 `<日志>.verdict`，所以重启后仍有真实退出码 |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
 
@@ -507,7 +509,9 @@ internal/runtime/           编排层
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/route/             动态路由表（编排层与代理层唯一的耦合点；ParseTarget 只收环回端点）
 webui/                      管理端画布（Vite + React + TS，产物嵌入 internal/web/dist/）
+                            拖动用指针捕获（node 上 pointerdown/move/up），坐标去抖 400ms 写 layout；补齐 expose 一键应用
 internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检测）+ 15 类注册期校验
+  └ canvas.go               画布旁挂数据：layout.yaml（ADR-023）+ MissingExpose（与校验互补）
   ├ plan.go                 样本表解析 + 展开成 (节点×样本) 的 job（参数四种来源）
   ├ layout.go               run 目录布局（/flow 内建挂载；路径由 run id 推导，无模板）
   └ record.go               运行记录（flowrun.yaml）+ .sign 逃生口

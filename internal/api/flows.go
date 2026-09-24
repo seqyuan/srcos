@@ -53,6 +53,13 @@ type flowEditorView struct {
 	Tools   []adminToolView `json:"tools"`
 	Valid   bool            `json:"valid"`
 	Problem string          `json:"problem,omitempty"`
+	// Layout is the flow's hand-placed node coordinates (ADR-023): a sidecar
+	// file, not part of the contract, empty when nothing has been placed yet.
+	Layout flow.Layout `json:"layout"`
+	// SuggestedExpose names the required inputs nothing feeds yet, so the canvas
+	// can offer to fill them in with one click. Derived by the same rule
+	// validation applies (internal/flow), never by the browser.
+	SuggestedExpose []flow.Expose `json:"suggestedExpose,omitempty"`
 }
 
 // adminToolView is one tool as the canvas sees it: enough to offer it in a
@@ -84,7 +91,14 @@ func (h *Handler) adminFlows(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/api/admin/flows/") && r.Method == http.MethodGet:
 		h.adminGetFlow(w, flowsDir, strings.TrimPrefix(r.URL.Path, "/api/admin/flows/"))
 	case strings.HasPrefix(r.URL.Path, "/api/admin/flows/") && r.Method == http.MethodPut:
-		h.adminPutFlow(w, r, flowsDir, strings.TrimPrefix(r.URL.Path, "/api/admin/flows/"))
+		rest := strings.TrimPrefix(r.URL.Path, "/api/admin/flows/")
+		// The layout is a separate document (ADR-023), so it has its own write:
+		// dragging a node must not run — or fail — flow validation.
+		if id, ok := strings.CutSuffix(rest, "/layout"); ok {
+			h.adminPutFlowLayout(w, r, flowsDir, id)
+			return
+		}
+		h.adminPutFlow(w, r, flowsDir, rest)
 	case strings.HasPrefix(r.URL.Path, "/api/admin/flows/") && r.Method == http.MethodDelete:
 		http.Error(w, "deleting a flow is not supported yet", http.StatusMethodNotAllowed)
 	default:
@@ -140,13 +154,58 @@ func (h *Handler) adminGetFlow(w http.ResponseWriter, flowsDir, id string) {
 		return
 	}
 	f.Dir = ""
-	view := flowEditorView{Flow: *f, Tools: h.flowTools()}
-	if err := f.ValidateAgainst(h.flowToolResolver()); err != nil {
+	resolver := h.flowToolResolver()
+	view := flowEditorView{
+		Flow:            *f,
+		Tools:           h.flowTools(),
+		Layout:          flow.LoadLayout(flowsDir, id, nodeIDs(f)),
+		SuggestedExpose: flow.MissingExpose(f, resolver),
+	}
+	if err := f.ValidateAgainst(resolver); err != nil {
 		view.Problem = err.Error()
 	} else {
 		view.Valid = true
 	}
 	writeJSON(w, 200, view)
+}
+
+// adminPutFlowLayout saves the canvas's node coordinates.
+//
+// It is deliberately unable to change the flow: no validation runs, because
+// nothing here is part of the contract (ADR-023). The only checks are the ones
+// that protect the canvas itself — a valid flow id, an existing flow, and
+// coordinates a browser can actually draw.
+func (h *Handler) adminPutFlowLayout(w http.ResponseWriter, r *http.Request, flowsDir, id string) {
+	path, err := flowPath(flowsDir, id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	f, err := flow.Load(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("no flow %s", id)})
+		return
+	}
+	var body flow.Layout
+	if err := parseBody(r, &body); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	known := nodeIDs(f)
+	if err := flow.SaveLayout(flowsDir, id, body, known); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"layout": flow.LoadLayout(flowsDir, id, known)})
+}
+
+// nodeIDs are the flow's node ids, the only keys a layout may carry.
+func nodeIDs(f *flow.Flow) []string {
+	out := make([]string, 0, len(f.Nodes))
+	for _, n := range f.Nodes {
+		out = append(out, n.ID)
+	}
+	return out
 }
 
 // adminValidateFlow validates a candidate without saving it.

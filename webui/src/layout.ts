@@ -1,8 +1,9 @@
-import type { Flow, Node } from './types'
+import type { Flow, Layout, Node, Point } from './types'
 
-// Layout is derived, never stored: a flow's shape *is* its topology, and putting
-// hand-placed coordinates in flow.yaml would put a UI concern into the contract.
-// Columns are the DAG layers (dependencies first), rows are order within a layer.
+// A node's position is either hand-placed (a saved layout, ADR-023) or derived:
+// columns are the DAG layers (dependencies first), rows are order within a layer.
+// Deriving is what makes a flow typed by hand — or one whose layout was never
+// saved — render sanely.
 
 export interface Placed {
   node: Node
@@ -61,7 +62,7 @@ export const ROW_GAP = 28
 export const PAD_X = 32
 export const PAD_Y = 28
 
-export function positionOf(layers: Node[][], nodeId: string): { x: number; y: number; layer: number } {
+export function derivedPosition(layers: Node[][], nodeId: string): { x: number; y: number; layer: number } {
   for (let l = 0; l < layers.length; l++) {
     const i = layers[l].findIndex((n) => n.id === nodeId)
     if (i >= 0) {
@@ -71,13 +72,35 @@ export function positionOf(layers: Node[][], nodeId: string): { x: number; y: nu
   return { x: PAD_X, y: PAD_Y, layer: 0 }
 }
 
-export function canvasSize(layers: Node[][]): { width: number; height: number } {
+// positionOf prefers a hand-placed position and falls back to the derived one,
+// so a flow with a partial layout renders completely.
+export function positionOf(
+  layers: Node[][],
+  nodeId: string,
+  placed?: Layout,
+): { x: number; y: number; layer: number } {
+  const derived = derivedPosition(layers, nodeId)
+  const p: Point | undefined = placed?.nodes?.[nodeId]
+  if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+    return { x: p.x, y: p.y, layer: derived.layer }
+  }
+  return derived
+}
+
+// canvasSize bounds the drawing by what is actually placed: a node dragged far
+// to the right must widen the canvas, not be clipped away.
+export function canvasSize(layers: Node[][], placed?: Layout): { width: number; height: number } {
   const cols = Math.max(1, layers.length)
   const rows = Math.max(1, ...layers.map((l) => l.length))
-  return {
-    width: PAD_X * 2 + cols * NODE_W + (cols - 1) * COL_GAP,
-    height: PAD_Y * 2 + rows * NODE_H + (rows - 1) * ROW_GAP,
+  let width = PAD_X * 2 + cols * NODE_W + (cols - 1) * COL_GAP
+  let height = PAD_Y * 2 + rows * NODE_H + (rows - 1) * ROW_GAP
+  for (const n of layers.flat()) {
+    const p = placed?.nodes?.[n.id]
+    if (!p) continue
+    width = Math.max(width, p.x + NODE_W + PAD_X)
+    height = Math.max(height, p.y + NODE_H + PAD_Y)
   }
+  return { width, height }
 }
 
 // Ports: inputs on the left edge, outputs on the right, evenly spaced.

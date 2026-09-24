@@ -450,6 +450,13 @@ func (f *Flow) ValidateAgainst(resolve func(id, version string) (*tool.Tool, err
 				continue
 			}
 			if !bound && !exposed {
+				if in.Default != nil {
+					// A tool-level default feeds it — exactly as it does for a
+					// plain job, where job.Validate judges satisfiability on the
+					// *effective* params. Demanding a source the tool already has
+					// would make a flow unable to use its own tools' defaults.
+					continue
+				}
 				bad("required input %s has no source: add a binding, an expose entry, or give the tool a default", key)
 			}
 		}

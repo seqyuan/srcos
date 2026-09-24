@@ -36,7 +36,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .node .title { font-size: 13px; font-weight: 650; }
 .node .sub { font-size: 12px; fill: var(--muted); }
 .node .meta { font-size: 11px; fill: var(--muted); }
-.node { cursor: pointer; }
+/* A node is draggable, so the pointer must not scroll the page instead. */
+.node { cursor: grab; touch-action: none; }
+.node.moving { cursor: grabbing; }
 .port { cursor: crosshair; }
 .port circle.in { fill: #fff; stroke: #8a8a8e; stroke-width: 1.5; }
 .port circle.in.ready { fill: #eef3ff; stroke: var(--accent); }

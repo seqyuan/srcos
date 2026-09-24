@@ -336,6 +336,21 @@ React —— ADR-012 的折中）、MCP `run_flow`（第二期，`submit` scope 
 网关侧：`/api/flows`、`/api/flows/<id>`、管理端画布（Phase 5，只在编辑器页面加载 React —— ADR-012 的折中）。
 MCP 第二期加 `run_flow`（`submit` scope 生效之后）。
 
+### 8.1 画布的旁挂文件（不是契约）
+
+管理端画布的**节点坐标**写在 `<flows>/<id>/layout.yaml`，与 `flow.yaml` 分开（ADR-023）：
+
+```yaml
+# <flows>/<id>/layout.yaml —— 由画布写，CLI 与调度器都不读
+nodes:
+  count: {x: 292, y: 178}
+```
+
+- **不是契约的一部分**：`flow.yaml` 里没有坐标，所以它保持可手写、可 diff；拖动节点只写这个文件，
+  不会触发（也不会失败于）流程校验。
+- 文件缺失或损坏 = 「没有摆放记录」：画布按拓扑分层推导位置，手写的流程照样能打开。
+- 只保留 `flow.yaml` 里仍然存在的节点；坐标仅用于显示，任何执行语义都不依赖它。
+
 ---
 
 ## 9. 变更记录
@@ -346,3 +361,4 @@ MCP 第二期加 `run_flow`（`submit` scope 生效之后）。
 | 2026-09-22 | **Phase 4 主体**：补「节点产物由平台按 run id 推导」+ `expose.from: output.<名>`（路径不靠模板、不靠 flow 作者手写）；`/flow` 内建挂载；样本展开、顺序调度、`.sign` 续跑、失败即停与 `when: always` 全部落地并端到端验证 |
 | 2026-09-22 | **管理端画布**（`/admin/flows/<id>/edit`，webui/ Vite+React 包，ADR-012）；同时补一条契约规则：**连线即依赖**（下游必须直接或间接 depends_on 上游，否则调度器可能先读不存在的路径） |
 | 2026-09-22 | **Phase 4 收尾**：并发上限（`--concurrency`，默认 4）、`retry.max` 自动重试+退避（粒度是任务，不是节点）、`flow cancel`（跨进程标志文件 + 停掉在跑的 job）、流程级配额（含本次运行的在跑任务）。并发首次把运行时放到了「两个 unit 同时开工」的场景下，因此顺手修掉两个真 bug：`BwrapProbe` 的缓存没有同步、任务不记录 pid（按引用停不掉） |
+| 2026-09-24 | **画布：拖拽摆放 + `expose` 自动推导**（ADR-023）—— 布局落在旁挂 `layout.yaml`（不进契约），`PUT /api/admin/flows/<id>/layout` 单独写；`GET` 的编辑器视图带上 `layout` 与 `suggestedExpose`（由服务端与校验同一条规则推导）；顺带修正 §2.6 的一处实现偏离：**工具默认值现在真的能满足 required 输入**（与 `job.Validate` 一致，原文只说没做） |

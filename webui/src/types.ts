@@ -81,11 +81,26 @@ export interface ToolView {
   resources: Resources
 }
 
+// Layout is the canvas's hand-placed coordinates for a flow's nodes. It is a
+// sidecar (layout.yaml), not part of the contract: a flow's shape is its
+// topology, and coordinates are a UI concern (ADR-023).
+export interface Point {
+  x: number
+  y: number
+}
+
+export interface Layout {
+  nodes: Record<string, Point>
+}
+
 export interface EditorView {
   flow: Flow
   tools: ToolView[]
   valid: boolean
   problem?: string
+  layout: Layout
+  /** Required inputs nothing feeds yet; the canvas offers to fill them in. */
+  suggestedExpose?: Expose[]
 }
 
 export interface FlowSummary {

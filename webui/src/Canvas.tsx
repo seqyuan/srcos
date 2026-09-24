@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { Binding, Expose, Flow, Node, ToolView } from './types'
+import type { Binding, Expose, Flow, Layout, Node, Point, ToolView } from './types'
 import { NODE_H, NODE_W, canvasSize, portY, positionOf, topology } from './layout'
 
 // The canvas: nodes as cards, wires as curves, ports as click targets.
@@ -8,6 +8,10 @@ import { NODE_H, NODE_W, canvasSize, portY, positionOf, topology } from './layou
 // than a drag: the check of whether the pair is even legal is the server's, and
 // asking it after a drag would mean undoing a gesture. Clicking also works on a
 // trackpad and in a screenshot-driven test.
+//
+// Moving a node *is* a drag, because there is nothing to validate: a position is
+// not part of the flow (ADR-023). It is saved on its own, so a drag can never
+// make a valid flow look broken.
 
 export interface Selection {
   kind: 'node' | 'wire' | 'expose'
@@ -17,16 +21,36 @@ export interface Selection {
 interface Props {
   flow: Flow
   tools: ToolView[]
+  layout: Layout
   selection: Selection | null
   onSelect: (s: Selection | null) => void
   onChange: (flow: Flow) => void
+  /** Called with the full coordinate map after a drag settles. */
+  onLayoutChange: (layout: Layout) => void
+  /** Required inputs nothing feeds yet (the server derived them). */
+  suggested: Expose[]
+  onApplySuggestions: () => void
   /** The server's verdict on the current draft, shown as a banner. */
   problem?: string
 }
 
-export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: Props) {
+// dragState is a node being moved: the pointer offset inside the card, and the
+// live position the card is rendered at.
+interface DragState {
+  id: string
+  offX: number
+  offY: number
+  x: number
+  y: number
+}
+
+export function Canvas({
+  flow, tools, layout, selection, onSelect, onChange, onLayoutChange,
+  suggested, onApplySuggestions, problem,
+}: Props) {
   const { layers } = useMemo(() => topology(flow), [flow])
-  const size = useMemo(() => canvasSize(layers), [layers])
+  const [drag, setDrag] = useState<DragState | null>(null)
+  const size = useMemo(() => canvasSize(layers, layout), [layers, layout])
   const toolOf = useMemo(() => new Map(tools.map((t) => [t.id, t])), [tools])
 
   // The first half of a wire: an output port waiting for its input.
@@ -43,7 +67,10 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
     return toolOf.get(id)
   }
   function pos(nodeId: string) {
-    return positionOf(layers, nodeId)
+    if (drag?.id === nodeId) {
+      return { x: drag.x, y: drag.y, layer: positionOf(layers, nodeId, layout).layer }
+    }
+    return positionOf(layers, nodeId, layout)
   }
 
   function addBinding(toNode: string, input: string) {
@@ -65,6 +92,43 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
 
   function commit(updater: (f: Flow) => Flow) {
     onChange(updater(flow))
+  }
+
+  // ── dragging ──────────────────────────────────────────────────────────
+  // The pointer is captured by the node, so move/up come back to it even when
+  // the cursor leaves the card (or the window). Positions are converted to
+  // canvas coordinates through the SVG's own box, which also survives scrolling.
+  function canvasPoint(e: React.PointerEvent<SVGGElement>): Point {
+    const svg = e.currentTarget.ownerSVGElement
+    if (!svg) return { x: e.clientX, y: e.clientY }
+    const rect = svg.getBoundingClientRect()
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  }
+
+  function startDrag(e: React.PointerEvent<SVGGElement>, id: string) {
+    if (e.button !== 0) return
+    const p = pos(id)
+    const at = canvasPoint(e)
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    setDrag({ id, offX: at.x - p.x, offY: at.y - p.y, x: p.x, y: p.y })
+    onSelect({ kind: 'node', key: id })
+  }
+
+  function moveDrag(e: React.PointerEvent<SVGGElement>) {
+    if (!drag) return
+    const at = canvasPoint(e)
+    setDrag({ ...drag, x: at.x - drag.offX, y: at.y - drag.offY })
+  }
+
+  function endDrag(e: React.PointerEvent<SVGGElement>) {
+    if (!drag) return
+    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    // Round to whole units: sub-pixel positions would make layout.yaml churn on
+    // every drag and read like noise in a diff.
+    const placed = { x: Math.round(drag.x), y: Math.round(drag.y) }
+    const id = drag.id
+    setDrag(null)
+    onLayoutChange({ ...layout, nodes: { ...layout.nodes, [id]: placed } })
   }
 
   return (
@@ -117,9 +181,16 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
           const inputs = tool?.interface.inputs ?? []
           const outputs = tool?.interface.outputs ?? []
           const selected = selection?.kind === 'node' && selection.key === n.id
+          const moving = drag?.id === n.id
           return (
-            <g key={n.id} transform={`translate(${p.x},${p.y})`} className={selected ? 'node selected' : 'node'}
-               onClick={() => onSelect({ kind: 'node', key: n.id })} data-testid={`node-${n.id}`}>
+            <g key={n.id} transform={`translate(${p.x},${p.y})`}
+               className={(selected ? 'node selected' : 'node') + (moving ? ' moving' : '')}
+               onClick={() => onSelect({ kind: 'node', key: n.id })}
+               onPointerDown={(e) => startDrag(e, n.id)}
+               onPointerMove={moveDrag}
+               onPointerUp={endDrag}
+               onPointerCancel={endDrag}
+               data-testid={`node-${n.id}`}>
               <rect width={NODE_W} height={NODE_H} rx="12" />
               <text className="title" x="14" y="22">{n.id}</text>
               <text className="sub" x="14" y="40">{tool ? tool.name : `未知工具 ${n.tool}`}</text>
@@ -134,6 +205,7 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
 
               {inputs.map((inp, i) => (
                 <g key={inp.name} className="port" data-testid={`in-${n.id}-${inp.name}`}
+                   onPointerDown={(e) => e.stopPropagation()}
                    onClick={(e) => { e.stopPropagation(); addBinding(n.id, inp.name) }}>
                   <circle cx="0" cy={portY(i, inputs.length, 0)} r={pending ? 7 : 5} className={pending ? 'in ready' : 'in'} />
                   <text x="8" y={portY(i, inputs.length, 0) + 4} className="port-label">{inp.name}</text>
@@ -141,6 +213,7 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
               ))}
               {outputs.map((out, i) => (
                 <g key={out.name} className="port" data-testid={`out-${n.id}-${out.name}`}
+                   onPointerDown={(e) => e.stopPropagation()}
                    onClick={(e) => { e.stopPropagation(); setPending({ node: n.id, output: out.name }) }}>
                   <circle cx={NODE_W} cy={portY(i, outputs.length, 0)} r="5" className="out" />
                   <text x={NODE_W - 8} y={portY(i, outputs.length, 0) + 4} className="port-label end">{out.name}</text>
@@ -153,6 +226,12 @@ export function Canvas({ flow, tools, selection, onSelect, onChange, problem }: 
 
       <div className="legend">
         <span><b>连线</b>：先点输出端口（右侧圆点），再点下游输入端口；合法性由服务端校验</span>
+        <span className="muted">拖动节点可摆放位置（自动保存到 layout.yaml）</span>
+        {suggested.length > 0 && (
+          <button className="link" data-testid="fill-expose" onClick={onApplySuggestions}>
+            补齐 expose（{suggested.length} 个未接的必填输入）
+          </button>
+        )}
         {bindings.length > 0 && (
           <button className="link" onClick={() => {
             const idx = selection?.kind === 'wire' ? Number(selection.key) : NaN

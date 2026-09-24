@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, type Selection } from './Canvas'
 import { Inspector } from './Inspector'
-import { getFlow, saveFlow, validateFlow } from './api'
-import type { EditorView, Flow, ToolView } from './types'
+import { getFlow, saveFlow, saveLayout, validateFlow } from './api'
+import type { EditorView, Expose, Flow, Layout, ToolView } from './types'
 
 // The console's flow editor: one screen, one job — make the wiring visible and
 // editable, and let the *server* be the judge of whether it is legal.
@@ -27,6 +27,13 @@ export function App() {
   const [status, setStatus] = useState<string>('')
   const [dirty, setDirty] = useState(false)
   const [error, setError] = useState<string | undefined>()
+  // The layout is its own document (ADR-023): dragging a node changes it, not
+  // the flow, so it is saved separately and never makes the flow look dirty.
+  const [layout, setLayout] = useState<Layout>({ nodes: {} })
+  const [suggested, setSuggested] = useState<Expose[]>([])
+
+  const layoutTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (layoutTimer.current) window.clearTimeout(layoutTimer.current) }, [])
 
   useEffect(() => {
     if (!flowId) {
@@ -37,6 +44,8 @@ export function App() {
       .then((view: EditorView) => {
         setDraft(view.flow)
         setTools(view.tools ?? [])
+        setLayout(view.layout ?? { nodes: {} })
+        setSuggested(view.suggestedExpose ?? [])
         setProblem(view.valid ? undefined : view.problem)
       })
       .catch((e: Error) => setError(e.message))
@@ -62,6 +71,31 @@ export function App() {
     setDirty(true)
     setStatus('有未保存的改动')
   }, [])
+
+  // A drag settles into a save a moment later: dragging continuously would
+  // otherwise write the file on every pointer move.
+  const moveNode = useCallback((next: Layout) => {
+    setLayout(next)
+    if (!flowId) return
+    if (layoutTimer.current) window.clearTimeout(layoutTimer.current)
+    layoutTimer.current = window.setTimeout(() => {
+      saveLayout(flowId, next)
+        .then(() => setStatus('布局已保存'))
+        .catch((e: Error) => setProblem(`布局保存失败：${e.message}`))
+    }, 400)
+  }, [flowId])
+
+  // Fill in the inputs nothing feeds yet, with the source the server suggested
+  // (sample.<input> by convention). It stays a draft edit: the flow is written
+  // only by 保存, through the validated path.
+  const fillExpose = useCallback(() => {
+    if (!draft || suggested.length === 0) return
+    const existing = new Set((draft.expose ?? []).map((e) => `${e.node}.${e.input}`))
+    const add = suggested.filter((e) => !existing.has(`${e.node}.${e.input}`))
+    change({ ...draft, expose: [...(draft.expose ?? []), ...add] })
+    setSuggested((s) => s.filter((e) => !add.includes(e)))
+    setStatus(`已补齐 ${add.length} 个 expose —— 检查取值来源后点保存`)
+  }, [draft, suggested, change])
 
   async function save() {
     if (!draft) return
@@ -142,9 +176,13 @@ export function App() {
         <Canvas
           flow={draft}
           tools={tools}
+          layout={layout}
           selection={selection}
           onSelect={setSelection}
           onChange={change}
+          onLayoutChange={moveNode}
+          suggested={suggested}
+          onApplySuggestions={fillExpose}
           problem={undefined}
         />
         <Inspector flow={draft} tools={tools} selection={selection} onChange={change} />
