@@ -82,12 +82,18 @@ dsh 页面的 origin 不是网关的，session cookie 根本不会被带上；�
 
 | 部分 | 怎么验的 |
 |---|---|
-| 地址映射、配置读取 | `npm test`（16 个用例，纯 Node，无 dsh） |
+| 地址映射、配置读取 | `npm test`（纯 Node，无 dsh） |
 | provider 的帧语义（去重、失败帧、abort） | `npm test`（假 gateway） |
+| **打包契约**：manifest 形状、`exports["./client"]`、bundle 的自注册信封 | `npm test`（把产物塞进一个替身 `__ModuleLoader__`，断言 dsh 会找的那个面） |
+| **装配**：`apply()` 是否按文档调 `ctx.resources.register` / `sidebarRightTabs.register` / `slots.register` | `npm test`（给一个假 ctx，断言注册的是 provider / tab 定义 / 面板体） |
 | **真实的 SRCOS API**（roots / 目录 / 文本 / 缺资源 / 401） | `test/live-run.sh`：起一个临时网关、签一个 read token，用真 HTTP 跑同一个 provider |
 | **在 dsh 里实际加载与渲染** | ⛔ **未验证** —— 没有往任何 profile 里装过。dsh 是 developer preview，插件 API 会变；`src/client.js` 里每个 API 都标了它读到的是哪个源文件 |
 
 ```bash
-npm test                              # 16 个用例，不需要网关
-sh test/live-run.sh                   # 起临时网关跑真实 API（需要仓库根目录的 ./srcos）
+cd integrations/dsh-plugin
+npm test                 # 19 个用例 + 2 个 live（未配置网关时自动跳过）
+sh test/live-run.sh      # 起临时网关跑真实 API（需要仓库根目录的 ./srcos）
+
+# 或从仓库根目录：
+make dsh-plugin          # = node build.mjs && node --test test/*.test.mjs
 ```
