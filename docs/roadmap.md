@@ -98,15 +98,16 @@
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - 审计日志；`storages` 的 rw 配额
-- `apptainer` sandbox；dsh 集成（ADR-016 一步未做）
+- `apptainer` sandbox；dsh 路 A（路 B 已落地，见 Phase 5.5；in-dsh 加载未验证）
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
 
 Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
 **`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
-Phase 5 到此收工。下一步见 §6 与 [`handoff.md`](handoff.md) §3：**Phase 5.5（dsh 路 B）**——
-把 `srcos://` 协议接成 dsh 插件（路 D 的地址语法已就位）。
+Phase 5 到此收工。阶段 5.5 的路 B 已落地（见上）。下一步见 §6 与 [`handoff.md`](handoff.md) §3：**路 A**
+（把 dsh 注册成 `kind: service` 工具、实例 workspace 指向 dsh session cwd）、**在真实 dsh 里验证路 B**，
+或 **Phase 6（SGE）**。
 
 ---
 
@@ -464,11 +465,12 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   |---|---|---|
   | **默认** | SRCOS 自带 viewer（Phase 5） | 永远可用，零依赖 |
   | **增强（路 A）** | dsh 作为 `kind: service` 工具实例，SRCOS 前端 iframe 嵌入 | 装了 Node 且管理员上架 dsh 工具 |
-  | **互操作（路 B）** | SRCOS 发布 dsh 插件（`dsh.client` + `ctx.resources.register` 注册 `srcos` protocol provider） | 独立议题，与上面两条不冲突 |
+  | **互操作（路 B）** | ✅ **已完成**（2026-09-25）：`integrations/dsh-plugin/` 发布 `@seqyuan/srcos-dsh`（`dsh.client` + 客户端侧 `ctx.resources.register` 注册 `srcos` protocol provider） | 独立议题，与上面两条不冲突；**in-dsh 加载尚未验证** |
   | **保险（路 D）** | `srcos://` 与 `dsh-resource://` 地址语法同构 | 无条件，写 Phase 5 时顺手做 |
 
 - **关键洞察 —— A 与 B 正交且共享底层**：A 是 `srcos → dsh`（UI 集成，数据流是 SRCOS workspace → dsh session cwd），
-  B 是 `dsh → srcos`（API 集成，数据流是 dsh 经 REST/SSE 读 SRCOS 资源）。
+  B 是 `dsh → srcos`（API 集成，数据流是 dsh 经 REST/SSE 读 SRCOS 资源）—— **B 已实现**，
+  所以 A 只差「把 dsh 注册成工具 + workspace 指向 session cwd」。
   两者共用**同一套 `srcos://` 地址协议 + REST/SSE API**，所以能同时选。
   叠加后：路 A 跑起来的 dsh 实例装上路 B 的插件，就同时是**文件预览器 + SRCOS 控制台**；
   而路 A 又给路 B 提供了天然的分发渠道。
@@ -482,6 +484,27 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   且 client shell（`ui-layout`/`ui-session`/`ui-renderer`/`ui-sidebar`）大概率假设 session 存在，纯预览是逆着设计走；
   dsh 是 developer preview 且明示会有破坏性变更，不能进核心路径。
 - **禁止**：把 dsh 变成硬依赖。没有 dsh 时 SRCOS 必须照常工作（对齐 `ennote` 的 degraded 模式）。
+- **路 B 实现注记（2026-09-25，代码在 `integrations/dsh-plugin/`）** —— 读了 dsh 源码之后，
+  ADR 里几处**措辞要更正**，契约要记牢：
+  - **provider 注册在「客户端」而不是 Host**：契约是
+    `packages/client/resources/src/client/contract.ts` 的 `ResourceProvider`，注册进
+    `ctx.resources`（浏览器侧 Cordis 上下文）。ADR-016 原文写的「Host 侧 `ctx.resources.register`」
+    是当时未知 API 的猜测；真实的分工是「浏览器侧注册 provider，HTTP 直接打 SRCOS REST」。
+  - **地址只在 `dsh-resource://` 一种 scheme 下**：`protocolOf` 只认 `dsh-resource://<type>/…`
+    （host = 协议名），别的 scheme（含原生 `srcos://`）都不是资源地址。所以路 D 的同构落成
+    **一次前缀替换**：`srcos://file/a/b` ⇄ `dsh-resource://srcos/file/a/b`（保留 `file` 段，
+    为将来的 provider 留位）。插件额外用 `patterns: ['srcos://**']` 认领原生写法，方便粘贴。
+  - **失败必须是帧，不是 throw**：`RemoteResult<T> = {ok:true,value} | {ok:false,error}`，
+    `error` 是结构识别的 `RemoteError`（`{code,message,details,isDSHRemoteError:true}`），
+    code 必须在 `RemoteErrorDetailsMap` 里声明（本插件声明 `srcos/unsupported-address`、
+    `srcos/unreachable`、`srcos/missing`）。
+  - **客户端 bundle 的形态**：dsh 按 `exports["./client"]` **读字节**后挂在
+    `/plugins/<id>/client.js`（`packages/client/modules/src/index.ts`），文件本身要
+    `window.__ModuleLoader__.load({id, factory})`，导入经工厂的 `require` 走共享模块表
+    （`react` 在基线里）。因此**不需要 dsh 的构建工具链**：本插件用一个 ~90 行的
+    `build.mjs` 把普通 ESM 拼成那个信封，`src/*.js` 仍然是 `node --test` 能直接 import 的模块。
+  - **凭据是 agent token**：页面 origin 不是网关，session cookie 不会被带上；而且「程序用
+    token」本来就是 ADR-019 的答案。token 只读、可在 `/tokens` 撤销。
 
 ### ADR-017：战略定位 —— AI 平台的确定性执行后端
 - **背景**：生信云平台可能势微，通用 AI 平台上升，但**确定性场景**（企业内部项目管理、非工程师使用、受控输入输出）有独立且持久的价值。
@@ -851,8 +874,12 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
 
 ### Phase 5.5：dsh 集成（先 B 后 A）
-- [ ] **路 B**：SRCOS REST/SSE API 定型 + 发布 `@seqyuan/srcos-dsh` 插件
-      （`dsh.client` 声明 + Host 侧 `ctx.resources.register({protocol:'srcos', open, reload})`）
+- [x] **路 B**（2026-09-25）：`integrations/dsh-plugin/` —— `@seqyuan/srcos-dsh`：`srcos` 协议
+      provider（元数据帧 + 轮询去重 + 失败帧）、侧边栏 tab 类型（认领 `dsh-resource://srcos/**`
+      与原生 `srcos://**`）、面板体（目录浏览 / 文本预览 / 失败原因），`build.mjs` 拼 dsh 的
+      `__ModuleLoader__` 信封（**不需要 dsh 工具链**）；SRCOS 侧顺带给目录条目加上自己的 `addr`
+      （客户端不必自己拼地址）。
+      **未验证**：在真实 dsh 里加载与渲染（没有往任何 profile 装过）—— 见 §8 与 handoff
 - [ ] **路 A**：把 dsh 注册成 `kind: service` 工具（`node: login`），
       实例 workspace 指向 dsh session cwd；前端 iframe 嵌入 `/proxy/<user>/<dsh>/`
 - [ ] 验证 Origin 改写 / polyfill / WS 在真实 dsh 下工作（`docs/dsh-demo.md` 已提供前置经验）
@@ -939,3 +966,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-24 | **任务改以 systemd 瞬时 unit 运行 + 判定文件**（ADR-022 收尾）—— `systemd-run --unit --wait`（退出码仍同步返回，unit 给出稳定名字与 `is-active`/`stop` 句柄）、`-p StandardOutput=append:<log>`（**修掉一个一直存在的 bug**：unit 的 stdout 不继承我们的 fd，服务日志此前是空的）、`-p ExecStopPost=...` 把 `$EXIT_STATUS $SERVICE_RESULT` 写进 `<log>.verdict`（`systemctl show` 不能依赖：瞬时 unit 退出后 ~1s 就被回收）、`ReconcileTasks` 读判定文件并用同一个 `applyExitStatus` 落库（**重启后再结束的运行现在有真实退出码**）；顺带修掉每次启动泄漏一个日志 fd（task + service 两条路径） |
 | 2026-09-24 | **agent token 自助页**（ADR-019 的自助那一半）—— `/tokens` 页面 + `/api/tokens`（GET 列表 / POST 新建 / DELETE 撤销）：列表服务端渲染，生成走 JSON 以免明文进 URL/历史；只给自己签、白名单只能收窄自己可见的工具、每次运行仍过 Grant 与配额；**管理凭据只认浏览器 session**（agent token 一律 403 —— 泄露的 submit token 不能给自己续期）；`ParseExpiry` 下沉到 `agenttoken` 供 CLI 与页面共用；每用户 token 上限 20 |
 | 2026-09-24 | **画布：拖拽摆放 + `expose` 自动推导（ADR-023）** —— 坐标旁挂 `<flows>/<id>/layout.yaml`（不进契约、不跑校验、缺失即退回拓扑推导、只留现有节点）+ `PUT /api/admin/flows/<id>/layout`；编辑器视图带 `suggestedExpose`（与第 14 条闭环互补，写在同一个包）→ 画布一键补齐；前端改动见 `webui/src/{Canvas,layout,App}.tsx`（指针捕获拖动、去抖落盘、`touch-action: none`）；**顺带修正一处实现偏离**：校验的闭环原来忽略工具默认值（与 §2.6 原文及 `job.Validate` 不一致）；Playwright 验证：拖动 → 刷新后位置仍在、`layout.yaml` 有坐标而 `flow.yaml` 没有、补齐 expose → 草稿转合法 → 保存写回 |
+| 2026-09-25 | **Phase 5.5 路 B：`@seqyuan/srcos-dsh`**（`integrations/dsh-plugin/`）—— 读 dsh 源码后实现的 `srcos` 资源协议插件：地址前缀替换（`srcos://X` ⇄ `dsh-resource://srcos/X`）、provider 帧语义（去重/失败帧/abort）、侧边栏 tab 类型 + 面板体、`build.mjs` 拼 `__ModuleLoader__` 信封（零 dsh 工具链）；SRCOS 侧给目录条目加 `addr`；ADR-016 补「路 B 实现注记」（**provider 在客户端侧**与原文措辞的更正、失败帧形状、bundle 形态、token 而非 cookie）；验证：16 个 Node 单测 + `test/live-run.sh` 对真实网关跑通 REST（in-dsh 加载未验证） |

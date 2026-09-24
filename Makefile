@@ -4,7 +4,7 @@
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 
-.PHONY: build test vet fmt webui
+.PHONY: build test vet fmt webui dsh-plugin
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o srcos .
@@ -32,3 +32,8 @@ webui:
 	else \
 	  echo "webui/ 尚未建立，跳过前端构建"; \
 	fi
+
+# dsh 路 B 的插件（ADR-016）：普通 Node 就能构建与测试，不需要 dsh 的工具链。
+# 它不是 Go 构建的一部分，所以 `make build`/`make test` 不依赖 Node。
+dsh-plugin:
+	cd integrations/dsh-plugin && node build.mjs && node --test test/*.test.mjs

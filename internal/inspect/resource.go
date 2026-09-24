@@ -47,8 +47,12 @@ type ResourceEntry struct {
 	// Path is the sandbox path (the contract spelling).
 	Path string `json:"path"`
 	// Rel is the path inside the scope — what an address is built from.
-	Rel     string    `json:"rel"`
-	IsDir   bool      `json:"isDir"`
+	Rel   string `json:"rel"`
+	IsDir bool   `json:"isDir"`
+	// Addr is the entry's own srcos:// address, so a client (a viewer, an agent,
+	// a dsh plugin) never has to compose one from scope + rel and guess the
+	// rules.
+	Addr    string    `json:"addr"`
 	Size    int64     `json:"size,omitempty"`
 	ModTime time.Time `json:"mtime,omitempty"`
 }
@@ -411,11 +415,20 @@ func (r *Reader) listResourceDir(username string, req ResourceRequest) ([]Resour
 			}
 			isDir = info.IsDir()
 		}
+		entryRel := joinSandboxPath(rel, e.Name())
 		entry := ResourceEntry{
 			Name:  e.Name(),
 			Path:  joinSandboxPath(sandboxPath, e.Name()),
-			Rel:   joinSandboxPath(rel, e.Name()),
+			Rel:   entryRel,
 			IsDir: isDir,
+			// The request already names the scope (and the tool), so the child
+			// address is a construction, not a lookup.
+			Addr: resource.Address{
+				Provider: resource.ProviderFile,
+				Scope:    req.Scope,
+				Path:     entryRel,
+				Tool:     req.Tool,
+			}.String(),
 		}
 		if info, err := e.Info(); err == nil {
 			entry.Size = info.Size()

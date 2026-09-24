@@ -126,6 +126,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
+│ ✅ dsh 路 B：integrations/dsh-plugin（srcos 协议 + tab，未在 dsh 验证）│
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -146,6 +147,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | **agent token** | `token create` → `curl -H 'Authorization: Bearer srcos_...' /api/tools` → 200；`POST /api/jobs` → 403（只读 scope）；`token revoke` 后**不重启网关**再请求 → 401；把 `agent-tokens.yaml` 改坏 → 同一 token 立即 401（失败关闭），改回即恢复；`srcos del alice` 连带撤销该用户 token |
 | **流程画布** | Playwright 驱动真实浏览器（headless Chromium）：打开 `/admin/flows/scrna/edit` → 渲染 2 节点 1 连线；点输出端口再点 int 输入端口 → 服务端拒绝：`a file output cannot fill a int input: only paths travel between nodes`；加节点 + 连线 → `校验通过（未保存）` → 保存 → `已保存到 flow.yaml`，文件里出现新节点与连线，且**画布自动补上了 `depends_on`**；刷新后 3 节点 2 连线（读的是文件）；节点几何无重叠、无越界（拓扑分层：count/qc-2 第 1 列、qc 第 2 列）；`srcos flow validate` 读同一份文件 → 3 nodes / 2 layers / 合法 |
 | **资源查看器（`srcos://`）** | `/api/resources` 不带 `src` → 列出三个根（home / workspace·Demo / storage `share`）；带地址 → 元数据（`/home/alice/notes.md`、`mode: rw`、`viewer.kind: markdown`，**不含正文**）；`../../../../etc/passwd` → 403；未声明的 storage → 404；`raw`：`.md`/`.html`/`.csv` 全部 `text/plain`（永不 text/html）；`html` 端点 → `text/html` + `Content-Security-Policy: sandbox …`（**无 `allow-same-origin`**、无 `X-Frame-Options`）；`/view` 页面：Markdown 服务端渲染成 `<h1>Notes</h1>`/`<strong>world</strong>`、CSV 成 `rv-table`、文本带行号、目录可逐级导航、HTML 只出现在 `sandbox="allow-scripts …"` 的 iframe 里且**正文未内联进页面**；headless Chromium 实测：父页读该 iframe 的 `contentDocument` 为 `null`（不透明 origin），框内 `document.cookie` 抛异常 |
+| **dsh 路 B（`integrations/dsh-plugin`）** | `npm test`：16 个用例（地址前缀替换双向、协议归属、目录子地址、provider 的「未变化不重复发帧」「mtime 变了发新帧」「404 → `srcos/missing` 失败帧且流不断」「连不上 → `srcos/unreachable`」「外来地址不打扰网关」「abort 结束流」、配置注入/localStorage 回退）；`sh test/live-run.sh`：起临时网关 + read token，真 HTTP 跑通 `roots` / 目录（**每个条目自带 `addr`**）/ 文本读 / 缺资源失败帧 / 401；`build.mjs` 产物按 dsh 的 `__ModuleLoader__.load({id, factory})` 信封注册（Node 里 fake `window` 加载并检查导出的 `apply`/`inject`/`srcosDefinition`/`SrcosPane`）|
 | **画布：拖拽 + expose 补齐** | Playwright（headless Chromium）打开 `/admin/flows/scrna/edit` → 拖动节点 `translate(32,28)` → `translate(292,178)` → **刷新后位置不变**（读自 `layout.yaml`）→ 磁盘上 `layout.yaml` 有坐标而 `flow.yaml` **没有**（旁挂，契约不被污染）→ 服务端给出「1 个未接的必填输入」→ 一键补齐 → 草稿转为 `校验通过` → 保存写回 `flow.yaml`（`expose` 多出 `sample_id`） |
 | **agent token 自助页** | Playwright：仪表盘有「令牌」入口 → `/tokens` 勾 `submit` + 工具 `ticker` → 生成 → 明文只显示一次且**不在 URL 里** → 刷新后列表（服务端渲染）显示 `有效` + `read,submit` + `ticker`，且页面里不再出现明文；用这枚 token 跑官方 Python MCP SDK → 12 个工具 → `srcos_submit_job` → 任务成功、日志可读；**撤销后**：行消失、该 token 立即被拒；**一枚活的 submit token** 打 `/api/tokens` 的 GET/POST/DELETE 全部 403「needs a browser session」，而同一个 token 打 `POST /api/jobs` 是 201 |
 | **任务 = systemd 瞬时 unit（判定文件）** | 任务 `succeeded` + 日志里**既有 stdout 也有 stderr**（此前 unit 的日志根本没被捕获）+ `<log>.verdict` = `0 success`；失败任务 `failed` + `exitCode=3` + 「tool exited with code 3」；**运行中重启** → `tasks reconcile: adopted 1` → 进程死后 `settled … as succeeded (exit 0)`（真实判定，不是「no verdict」）；取消 → `stopped` 且 unit `inactive`（判定文件写的是 `TERM success`）；`job run --force` 重跑同一实例正常（`reset-failed` + 旧判定被删）；无 systemd 的降级模式仍能跑并写日志 |
@@ -167,7 +169,11 @@ UI 造起来便宜了 → UI 不再是护城河
   什么参数：`flowrun.yaml` 有参数与 job id，但还没有专门的审计流）
 - ⛔ **画布的拖拽摆放与 `expose` 自动推导** —— 布局现在是拓扑推导（不写进契约），
   `expose` 的来源要在检查器里显式选；拖拽摆放需要给布局找个不污染 `flow.yaml` 的落点
-- ⛔ **Phase 5 全部完成** —— 下一步是 Phase 5.5（dsh 路 B）或 Phase 6（SGE，需要真登录节点）
+- ⛔ **Phase 5 全部完成** —— 下一步是在**真实 dsh 里验证路 B**（插件已写、逻辑已测）、
+  Phase 5.5 的**路 A**（dsh 当 service 工具），或 Phase 6（SGE，需要真登录节点）
+- ⛔ **dsh 路 B 的 in-dsh 加载** —— 插件包与构建都在（`integrations/dsh-plugin/`），
+  地址映射 / provider / 真实 REST 都用 Node 验过；但**没有往任何 profile 装过**，
+  所以「dsh 真的加载并渲染它」这件事仍未验证（§3.3）
 - ⛔ **降级模式（无 user systemd）下的判定** —— 那种情况下任务是个普通子进程，进程与等待者一起
   消失时没有判定文件可读，`ReconcileTasks` 只能写 `stopped` + 说明（ADR-022 的兜底分支）
 - ⛔ **申请/审批**（谁能用哪个工具的申请流）—— 现在只有管理员直接 `grant`
@@ -213,6 +219,9 @@ UI 造起来便宜了 → UI 不再是护城河
 - **`runc 1.2.4` + `rootlesskit` 能否做无 root 容器化** —— 两者都已安装且 `/etc/apparmor.d/runc` 的 userns
   profile 已存在，可能零配置可用。这是 ADR-014 的进阶方案，值得实测
 - **`prlimit` 路径下的 RSS 看门狗** —— RLIMIT 无法表达"每单元进程数"，超限只能靠外部轮询
+- **dsh 插件的 in-dsh 加载** —— `integrations/dsh-plugin/` 的逻辑与真实 REST 都已验过，但
+  没有装进任何 profile；dsh 是 developer preview，`src/client.js` 里用到的每个 API 都标了
+  它读到的是哪个源文件（`packages/client/...`），第一次装进 dsh 时以那份源码为准
 
 ---
 
@@ -304,6 +313,7 @@ UI 造起来便宜了 → UI 不再是护城河
 | 019 | MCP Server 内置网关，第一期 read-only（✅ **已完成**，见 roadmap「MCP 实现契约」）；agent token（✅）；**不做** MCP Client |
 | 020 | 存储与路径 provider 化；**闭环：path 可选范围 == 已挂载 storage == `requires_storages`** |
 | 021 | **OS 用户 ≠ SRCOS 注册用户**；虚拟 home/workspace 由 SRCOS 构造；隔离靠 mount namespace 而非 UID |
+| 016 | dsh 集成三层（路 D 同构地址 / 路 B 协议插件 ✅ / 路 A iframe 未做）；**路 B 注记：provider 注册在客户端侧**，bundle 不需要 dsh 工具链，凭据是 agent token |
 | 023 | **画布布局是旁挂文件**（`layout.yaml`，不进契约、不跑校验）；`expose` 由服务端按与校验互补的规则推导，画布只展示答案 |
 | 022 | **任务队列的消费者在网关内**；一次提交自动执行一次（认领互斥、`pending` 不算占用、流程节点不走队列）；任务以 systemd **瞬时 unit** 运行，判定由 `ExecStopPost` 写入 `<日志>.verdict`，所以重启后仍有真实退出码 |
 | — | **Grant 授权：默认拒绝；只有「允许」没有 deny**（见下文） |
@@ -508,6 +518,10 @@ internal/runtime/           编排层
   │                         （Reaper.LastActive：由调用方提供「最近一次流量」）
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/route/             动态路由表（编排层与代理层唯一的耦合点；ParseTarget 只收环回端点）
+integrations/dsh-plugin/    dsh 路 B（`@seqyuan/srcos-dsh`）：srcos 协议 provider + 侧边栏 tab
+                            src/{address,config,api,provider}.js 是 Node 可测的纯逻辑；
+                            src/client.js 是 dsh 胶水（每个 API 标注了上游源文件）；
+                            build.mjs 拼 dsh 的 __ModuleLoader__ 信封（零 dsh 工具链）
 webui/                      管理端画布（Vite + React + TS，产物嵌入 internal/web/dist/）
                             拖动用指针捕获（node 上 pointerdown/move/up），坐标去抖 400ms 写 layout；补齐 expose 一键应用
 internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检测）+ 15 类注册期校验

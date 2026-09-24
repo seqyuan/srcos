@@ -1055,6 +1055,16 @@ srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑�
 - 前端是独立的 Vite 工程（`webui/`，ADR-012：**只有这一页**加载 React）：`make webui` 构建并嵌入二进制；
   没有 Node 的环境照样 `make build`，画布页会提示去构建，CLI 不受影响。
 
+### dsh 集成（可选，ADR-016）
+
+SRCOS 自带 viewer 与 `srcos://` 地址协议（见上），所以 dsh 集成是**可选增强**、不是兼容问题：
+`integrations/dsh-plugin/` 里的 `@seqyuan/srcos-dsh` 把 SRCOS 注册成 dsh 的一个资源协议
+（`dsh-resource://srcos/…` ⇄ `srcos://file/…` 一次前缀替换），于是能在 dsh 里浏览与预览网关上的
+home / 工作区 / 共享数据。它只读、用你自己的 agent token（在 `/tokens` 生成与撤销），
+构建只需 Node（不需要 dsh 的工具链）。安装与配置见该目录的 README。
+
+> 没有 dsh 时 SRCOS 一切照常 —— 这是硬约束（ADR-016）：**dsh 不是依赖**。
+
 ### 工具开发者
 
 工具 = **一个 `work.sh`（函数体）+ 一份 `interface`（类型签名）+ 一份 `tool.yaml`（执行约束）**。
