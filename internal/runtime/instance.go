@@ -313,11 +313,14 @@ type PathView struct {
 	Degraded bool
 	Paths    Paths
 	User     string
+	// APIBase is where SRCOS's own REST API is reachable from inside the unit
+	// (SRCOS_API). Empty means "no gateway is known from here".
+	APIBase string
 }
 
-// NewPathView builds the view for a sandbox mode.
-func NewPathView(mode tool.Sandbox, p Paths) PathView {
-	return PathView{Degraded: mode == tool.SandboxNone, Paths: p, User: p.User}
+// NewPathView builds the view for a sandbox mode. apiBase may be empty.
+func NewPathView(mode tool.Sandbox, p Paths, apiBase string) PathView {
+	return PathView{Degraded: mode == tool.SandboxNone, Paths: p, User: p.User, APIBase: apiBase}
 }
 
 func (v PathView) Workspace() string {
@@ -399,6 +402,11 @@ func (v PathView) Env(t *tool.Tool, j *job.Job) []string {
 	}
 	if j != nil {
 		out = append(out, job.ParamEnv(job.EffectiveParams(j, t))...)
+	}
+	// SRCOS_API: the gateway's REST base, so a tool UI (or an agent hosted by a
+	// service) can talk back. Absent when no gateway is reachable from here.
+	if v.APIBase != "" {
+		out = append(out, "SRCOS_API="+v.APIBase)
 	}
 	// The tool's declared environment goes last so it wins over the defaults
 	// above (a tool that sets PATH means it — e.g. R living in a miniforge

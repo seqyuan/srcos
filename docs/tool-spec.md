@@ -286,6 +286,8 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 | `SRCOS_TOOL` | 如 `cellranger` | 工具 id |
 | `SRCOS_TASK_ID` | 如 `t-01J8…` | 本次任务 id |
 | `SRCOS_TOOL_VERSION` | 如 `1.2.3` | 工具版本，便于脚本记录到产物里 |
+| `SRCOS_INSTANCE_ID` | 如 `alice-web-svc` | 服务实例 id（service 注入，task 不注入） |
+| `SRCOS_API` | 如 `http://127.0.0.1:30152/api` | **SRCOS 自己的 REST 基址**，供工具 UI / 托管 agent 回调平台；**本机无已知网关时不注入**（工具应能区分「没网关」与「调用失败」） |
 | `SRCOS_PARAM_<NAME>` | 参数值 | `name` 大写、`-`→`_`。如 `sample_id` → `SRCOS_PARAM_SAMPLE_ID` |
 | `TMPDIR` | `/tmp` | 沙箱内 tmpfs |
 | `PATH` | 见下 | 含 `/opt/srcos/bin`，供工具自带的二进制 |
@@ -295,6 +297,13 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 1. **宿主环境不会被继承。** SRCOS 用 `--clearenv` 清空后只注入上表的内容——SRCOS 自己的进程环境
    可能含密钥，且工具不应该依赖它没有声明的环境。所以 `PATH`、`LANG`、`LD_LIBRARY_PATH`
    之类**都要显式声明**（`PATH` 由平台给，其余用 `env:` 或 `ro_mounts`）。
+
+   > 注：`env:` 里**不得**出现 `HOME` 或 `SRCOS_*`（平台契约，注册期直接拒绝）。工具声明的条目
+   > 会**追加在最后**，所以同名键以工具的值为准。
+
+2. **托管 agent 的凭据**（ADR-025）：工具声明 `agent: { mcp: [read] }` 后，SRCOS 在实例启动时
+   签发一枚**只读**实例凭据到 **`$HOME/.srcos/agent-token`**（0600），实例停止时撤销。
+   用它调 `$SRCOS_API` 的只读端点——这类调用在审计里记为「这个实例做的」。
 2. **工具自带的二进制放在 `/opt/srcos/bin`。** 它是沙箱 `PATH` 的第一项。
    不要挂到 `/usr/local/bin`、`/usr/bin` 之类的位置——那些目录（`/usr` `/bin` `/sbin` `/lib*`）
    是**只读绑定**的，bubblewrap 无法在其中创建挂载点，会报

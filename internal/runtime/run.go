@@ -100,7 +100,7 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 		return nil, err
 	}
 
-	view := NewPathView(t.Sandbox, paths)
+	view := NewPathView(t.Sandbox, paths, config.GatewayAPIBase(r.opts.ConfigDir))
 
 	spec, err := r.mountSpec(t, paths)
 	if err != nil {

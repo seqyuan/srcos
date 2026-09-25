@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -17,6 +18,30 @@ var gatewayListenPort int
 // hosts pointing back at it can be rejected as self-loops.
 func SetGatewayListenPort(port int) {
 	gatewayListenPort = port
+}
+
+// GatewayAPIBase is the REST base a unit can call back on, or "" when no
+// gateway is known.
+//
+// It resolves the port this process is serving on (the gateway itself), else the
+// port recorded in state.yaml (a CLI-started unit on a host that runs a
+// gateway). It is loopback either way: the gateway is the only entry point, and
+// a sandbox shares the host's network namespace (bwrap does not unshare net), so
+// 127.0.0.1 inside the unit is the gateway outside it.
+//
+// This is the documented `SRCOS_API` channel (roadmap §4.4): a tool UI, or an
+// agent hosted by a service, uses it to talk to SRCOS itself.
+func GatewayAPIBase(configDir string) string {
+	port := gatewayListenPort
+	if port == 0 && configDir != "" {
+		if st, err := LoadState(StatePath(configDir)); err == nil {
+			port = st.Server.Port
+		}
+	}
+	if port == 0 {
+		return ""
+	}
+	return "http://127.0.0.1:" + strconv.Itoa(port) + "/api"
 }
 
 // localInterfaceIPs returns every IP address bound to a local interface
