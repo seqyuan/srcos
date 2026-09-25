@@ -106,16 +106,25 @@ func BwrapArgv(spec *Spec, o BwrapOptions) []string {
 	}
 
 	args = append(args, "--clearenv")
-	env := append([]string{"PATH=" + DefaultPath, "TMPDIR=" + PathTmp}, o.Env...)
-	sort.Strings(env) // deterministic argv, easier to diff in audit logs
-	for _, kv := range env {
+	// Defaults first, then the caller's entries — a tool that sets PATH means
+	// it. Duplicates are impossible here (bwrap would apply them in order and
+	// the LAST wins, which must be the tool's), and the result stays sorted so
+	// the argv is deterministic and diffable in an audit log.
+	envMap := map[string]string{"PATH": DefaultPath, "TMPDIR": PathTmp}
+	keys := []string{"PATH", "TMPDIR"}
+	for _, kv := range o.Env {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || k == "" {
 			continue
 		}
-		// bwrap's signature is `--setenv VAR VALUE` (two arguments), not
-		// `--setenv VAR=VALUE`.
-		args = append(args, "--setenv", k, v)
+		if _, seen := envMap[k]; !seen {
+			keys = append(keys, k)
+		}
+		envMap[k] = v
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--setenv", k, envMap[k])
 	}
 
 	cwd := o.Cwd

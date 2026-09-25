@@ -603,6 +603,21 @@ func (t *Tool) Validate() error {
 		}
 	}
 
+	// ── env ──────────────────────────────────────────────────
+	// The tool's own environment preparation. The platform's own variables
+	// (HOME, SRCOS_*) are set by SRCOS and may not be overridden: a tool that
+	// repointed HOME would step outside its virtual home (ADR-021).
+	for i, kv := range t.Env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			bad("env[%d]: want VAR=VALUE, got %q", i, kv)
+			continue
+		}
+		if k == "HOME" || strings.HasPrefix(k, "SRCOS_") {
+			bad("env[%d]: %s is reserved — the platform sets it (overriding it would break the sandbox contract)", i, k)
+		}
+	}
+
 	// ── ro_mounts ───────────────────────────────────────────────────────
 	for i, m := range t.ROMounts {
 		where := fmt.Sprintf("ro_mounts[%d]", i)

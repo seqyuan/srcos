@@ -494,3 +494,38 @@ lifecycle: {restart: never, max_lifetime: "1h"}
 		t.Fatal("a relative ingress.backend_path must be rejected")
 	}
 }
+
+func TestEnvReservedKeysRejected(t *testing.T) {
+	base := func(env string) string {
+		return `
+schemaVersion: 1
+id: demo
+version: 0.1.0
+name: Demo
+kind: task
+backend: local
+sandbox: bwrap
+entry: work.sh
+` + env + `
+resources: {cpu: 1, memory: "1Gi", walltime: "0:01:00"}
+`
+	}
+	// The platform's own variables may not be repointed.
+	if _, err := Load(writeTool(t, map[string]string{
+		"tool.yaml": base("env: [\"HOME=/tmp\"]"), "work.sh": minimalWork})); err == nil {
+		t.Fatal("overriding HOME must be rejected")
+	}
+	if _, err := Load(writeTool(t, map[string]string{
+		"tool.yaml": base("env: [\"SRCOS_WORKSPACE=/etc\"]"), "work.sh": minimalWork})); err == nil {
+		t.Fatal("overriding a SRCOS_* variable must be rejected")
+	}
+	// A malformed entry is caught too, and a normal one passes.
+	if _, err := Load(writeTool(t, map[string]string{
+		"tool.yaml": base("env: [\"NOVALUE\"]"), "work.sh": minimalWork})); err == nil {
+		t.Fatal("an entry without '=' must be rejected")
+	}
+	if _, err := Load(writeTool(t, map[string]string{
+		"tool.yaml": base("env: [\"PATH=/opt/x/bin:/usr/bin\"]"), "work.sh": minimalWork})); err != nil {
+		t.Fatalf("a plain env entry must be accepted: %v", err)
+	}
+}

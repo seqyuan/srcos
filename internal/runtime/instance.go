@@ -400,6 +400,10 @@ func (v PathView) Env(t *tool.Tool, j *job.Job) []string {
 	if j != nil {
 		out = append(out, job.ParamEnv(job.EffectiveParams(j, t))...)
 	}
+	// The tool's declared environment goes last so it wins over the defaults
+	// above (a tool that sets PATH means it — e.g. R living in a miniforge
+	// prefix). Reserved keys are refused at registration.
+	out = append(out, t.Env...)
 	return out
 }
 

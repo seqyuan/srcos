@@ -241,3 +241,31 @@ func TestHomePathAndJobRootPath(t *testing.T) {
 		t.Errorf("JobRootPath = %q", got)
 	}
 }
+
+// A tool's declared environment must reach the sandbox, and must beat the
+// platform defaults for the same key (a tool that sets PATH means it — e.g. R
+// living in a miniforge prefix). bwrap applies --setenv in order and the last
+// one wins, so duplicates must not be emitted.
+func TestBwrapArgvToolEnvOverridesDefaults(t *testing.T) {
+	args := BwrapArgv(&Spec{}, BwrapOptions{
+		Argv: []string{"true"},
+		Env:  []string{"PATH=/pmo/miniforge3/bin:/usr/bin", "FOO=bar"},
+	})
+
+	setenv := map[string][]string{}
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--setenv" {
+			setenv[args[i+1]] = append(setenv[args[i+1]], args[i+2])
+		}
+	}
+	if got := setenv["PATH"]; len(got) != 1 || got[0] != "/pmo/miniforge3/bin:/usr/bin" {
+		t.Fatalf("PATH setenv = %v, want exactly the tool's value", got)
+	}
+	if got := setenv["FOO"]; len(got) != 1 || got[0] != "bar" {
+		t.Fatalf("FOO setenv = %v, want [bar]", got)
+	}
+	// The platform default is still there when the tool says nothing about it.
+	if got := setenv["TMPDIR"]; len(got) != 1 || got[0] == "" {
+		t.Fatalf("TMPDIR setenv = %v, want the platform default", got)
+	}
+}
