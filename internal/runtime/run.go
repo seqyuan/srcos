@@ -73,9 +73,37 @@ type prepared struct {
 	paths    Paths
 	view     PathView
 	spec     *sandbox.Spec
-	argv     []string
 	limiter  Limiter
 	storages []storage.Storage
+	// env is the unit's environment, without the port: a service appends
+	// SRCOS_PORT once the pool has handed one over, and only then can a
+	// declarative command be resolved.
+	env []string
+	// jobDir is a task's submission directory (a work.sh dropped there wins over
+	// the tool's own declaration).
+	jobDir string
+	// jobCommand is a submission-time argv from job.json, which wins over
+	// everything the tool declares.
+	jobCommand []string
+}
+
+// argvFor resolves the unit's argv against its (now complete) environment.
+//
+// It is lazy because a declarative command may reference ${SRCOS_PORT}, which
+// only exists after the port pool has answered.
+func (p *prepared) argvFor(t *tool.Tool) ([]string, error) {
+	if len(p.jobCommand) > 0 {
+		return p.jobCommand, nil
+	}
+	return ResolveArgv(t, p.view, p.jobDir, p.env)
+}
+
+// jobCommandOf is job.json's explicit argv, if the submission carried one.
+func jobCommandOf(j *job.Job) []string {
+	if j == nil {
+		return nil
+	}
+	return j.Command
 }
 
 // prepare resolves everything that does not depend on the backend: directories,
@@ -107,25 +135,19 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 		return nil, err
 	}
 
-	argv, err := ResolveArgv(t, view, paths.JobDir)
-	if err != nil {
-		return nil, err
-	}
-	if j != nil && len(j.Command) > 0 {
-		argv = j.Command
-	}
-
 	res := t.Resources
 	if j != nil {
 		res = job.EffectiveResources(j, t)
 	}
 	return &prepared{
-		tool:    t,
-		paths:   paths,
-		view:    view,
-		spec:    spec,
-		argv:    argv,
-		limiter: BuildLimiter(res),
+		tool:       t,
+		paths:      paths,
+		view:       view,
+		spec:       spec,
+		env:        view.Env(t, j),
+		jobDir:     paths.JobDir,
+		jobCommand: jobCommandOf(j),
+		limiter:    BuildLimiter(res),
 	}, nil
 }
 
@@ -248,15 +270,19 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 		return fail("%v", err), nil
 	}
 
+	argv, err := prep.argvFor(t)
+	if err != nil {
+		return fail("%v", err), nil
+	}
 	req := StartRequest{
 		Tool:       t,
 		Job:        loaded.Job,
 		Spec:       prep.spec,
 		Paths:      prep.paths,
 		View:       prep.view,
-		Argv:       prep.argv,
+		Argv:       argv,
 		Cwd:        prep.view.Cwd(),
-		Env:        prep.view.Env(t, loaded.Job),
+		Env:        prep.env,
 		Limiter:    prep.limiter,
 		UnitName:   UnitName(inst.ID),
 		LogPath:    prep.paths.LogPath,
@@ -453,8 +479,13 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	inst.Endpoint = route.Target{Host: "127.0.0.1", Port: port}.String()
 
 	// The tool is told which port to bind; without this the port pool and the
-	// tool would have to agree by convention.
-	env := append(prep.view.Env(t, j), "SRCOS_PORT="+strconv.Itoa(port))
+	// tool would have to agree by convention. The environment is completed first
+	// because a declarative command may reference it as ${SRCOS_PORT}.
+	prep.env = append(prep.env, "SRCOS_PORT="+strconv.Itoa(port))
+	argv, err := prep.argvFor(t)
+	if err != nil {
+		return fail("resolve command: %v", err), nil
+	}
 
 	req := StartRequest{
 		Tool:         t,
@@ -462,9 +493,9 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		Spec:         prep.spec,
 		Paths:        prep.paths,
 		View:         prep.view,
-		Argv:         prep.argv,
+		Argv:         argv,
 		Cwd:          prep.view.Cwd(),
-		Env:          env,
+		Env:          prep.env,
 		Limiter:      prep.limiter,
 		UnitName:     UnitName(inst.ID),
 		LogPath:      prep.paths.LogPath,

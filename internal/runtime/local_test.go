@@ -441,3 +441,24 @@ func TestTaskCompletionIsAudited(t *testing.T) {
 		t.Fatalf("params = %+v, want state=succeeded", e.Params)
 	}
 }
+
+// A declarative command runs with no entry script at all, and ${...} is expanded
+// from the unit's own environment (the workspace here).
+func TestDeclarativeCommandRunsForATask(t *testing.T) {
+	h := newHarness(t, "none", okScript, "")
+	tl := h.tool(t)
+	tl.Entry = ""
+	tl.Command = []string{"bash", "-c", "echo cmd-ok ws=${SRCOS_WORKSPACE}"}
+
+	loaded := h.submit(t, "cmd1", `{"schemaVersion":1,"name":"demo"}`)
+	inst, err := h.runner.RunTask(context.Background(), tl, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.State != StateSucceeded {
+		t.Fatalf("state = %s (%s)", inst.State, inst.Error)
+	}
+	if log := readFile(t, inst.LogPath); !strings.Contains(log, "cmd-ok ws=") {
+		t.Fatalf("the command did not run: %s", log)
+	}
+}

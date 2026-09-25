@@ -85,6 +85,15 @@ type Tool struct {
 
 	ROMounts []ROMount `yaml:"ro_mounts,omitempty"`
 	Entry    string    `yaml:"entry"`
+	// Command is a declarative argv, as an alternative to an entry script:
+	// the common "start this app server" case without a work.sh that only
+	// re-derives the port and the interpreter path. argv is exec'd directly (no
+	// shell), so there is no quoting or injection surface. `${NAME}` references
+	// are expanded from the unit's own environment — the values are literally
+	// the ones SRCOS injects, so a command and its environment cannot disagree.
+	//
+	// Exactly one of Command / Entry must be set.
+	Command []string `yaml:"command,omitempty"`
 
 	Interface        Interface `yaml:"interface"`
 	RequiresStorages []string  `yaml:"requires_storages,omitempty"`
@@ -501,10 +510,19 @@ func (t *Tool) Validate() error {
 		}
 	}
 
-	// ── entry ───────────────────────────────────────────────────────────
-	if t.Entry == "" {
-		bad("entry is required")
-	} else if t.Dir != "" {
+	// ── entry / command ─────────────────────────────────────
+	// Exactly one: either a declarative argv (the common case for an app
+	// server) or a script (anything with loops, conditionals or several
+	// processes).
+	switch {
+	case t.Entry != "" && len(t.Command) > 0:
+		bad("entry and command are mutually exclusive (entry is the script escape hatch, command the declarative one)")
+	case t.Entry == "" && len(t.Command) == 0:
+		bad("one of entry or command is required")
+	case len(t.Command) > 0:
+		validateCommand(t.Command, t.Kind, bad)
+	}
+	if t.Entry != "" && t.Dir != "" {
 		if _, err := os.Stat(filepath.Join(t.Dir, t.Entry)); err != nil {
 			bad("entry %q not found in tool directory", t.Entry)
 		}
@@ -735,4 +753,109 @@ func ParseWalltimeOrZero(s string) (int64, error) {
 		secs = secs*60 + n
 	}
 	return secs, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// command（声明式启动命令）
+// ─────────────────────────────────────────────────────────────────────────
+
+// commandVarAllowed reports whether a unit of this kind may reference ${name}.
+//
+// The rule is "the variables SRCOS actually injects for this kind": a service
+// has a port and an instance id, a task has a job root and a task id. Checking
+// it at registration turns a typo — or a kind mismatch — into a registration
+// error instead of a unit that starts and dies with a confusing message.
+func commandVarAllowed(kind Kind, name string) bool {
+	if strings.HasPrefix(name, "SRCOS_PARAM_") {
+		return true
+	}
+	switch name {
+	case "SRCOS_WORKSPACE", "SRCOS_HOME", "HOME", "SRCOS_JOB_DIR",
+		"SRCOS_USER", "SRCOS_TOOL", "SRCOS_TOOL_VERSION", "SRCOS_API":
+		return true
+	case "SRCOS_PORT", "SRCOS_INSTANCE_ID":
+		return kind == KindService
+	case "SRCOS_JOB_ROOT", "SRCOS_TASK_ID":
+		return kind == KindTask
+	}
+	return false
+}
+
+// commandRefs lists the ${NAME} references in one argument, and reports an
+// unterminated one (`${` with no `}`) — a typo that would otherwise reach the
+// program as literal text.
+func commandRefs(arg string) ([]string, error) {
+	var refs []string
+	for i := 0; i < len(arg); {
+		if arg[i] != '$' || i+1 >= len(arg) || arg[i+1] != '{' {
+			i++
+			continue
+		}
+		end := strings.IndexByte(arg[i+2:], '}')
+		if end < 0 {
+			return nil, fmt.Errorf("unterminated ${ in %q", arg)
+		}
+		refs = append(refs, arg[i+2:i+2+end])
+		i += 2 + end + 1
+	}
+	return refs, nil
+}
+
+// validateCommand checks a declared argv at registration time.
+func validateCommand(cmd []string, kind Kind, bad func(string, ...any)) {
+	if strings.TrimSpace(cmd[0]) == "" {
+		bad("command[0] must name the program to run")
+	}
+	for i, arg := range cmd {
+		refs, err := commandRefs(arg)
+		if err != nil {
+			bad("command[%d]: %v", i, err)
+			continue
+		}
+		for _, name := range refs {
+			if !commandVarAllowed(kind, name) {
+				bad("command[%d]: ${%s} is not a variable SRCOS provides to a %s unit", i, name, kind)
+			}
+		}
+	}
+}
+
+// ExpandCommand substitutes ${NAME} in a declared argv from the unit's own
+// environment.
+//
+// A reference the environment does not carry is an error, never a silent empty
+// string: an empty port would look like "the app started but is unreachable",
+// which is the worst failure to debug. The environment is the single source of
+// truth, so an expanded command and the process environment cannot disagree.
+func ExpandCommand(cmd, env []string) ([]string, error) {
+	vars := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			vars[k] = v
+		}
+	}
+	out := make([]string, len(cmd))
+	for i, arg := range cmd {
+		var b strings.Builder
+		for j := 0; j < len(arg); {
+			if arg[j] != '$' || j+1 >= len(arg) || arg[j+1] != '{' {
+				b.WriteByte(arg[j])
+				j++
+				continue
+			}
+			end := strings.IndexByte(arg[j+2:], '}')
+			if end < 0 {
+				return nil, fmt.Errorf("command[%d]: unterminated ${ in %q", i, arg)
+			}
+			name := arg[j+2 : j+2+end]
+			v, ok := vars[name]
+			if !ok {
+				return nil, fmt.Errorf("command[%d]: ${%s} is not set for this unit", i, name)
+			}
+			b.WriteString(v)
+			j += 2 + end + 1
+		}
+		out[i] = b.String()
+	}
+	return out, nil
 }

@@ -501,3 +501,28 @@ func TestRouteBackendPathComesFromIngress(t *testing.T) {
 		t.Fatalf("route BackendPath = %q, want /app (it must not come from the healthcheck path)", e.BackendPath)
 	}
 }
+
+// A service started from a declarative command: ${SRCOS_PORT} must be expanded
+// to the port the pool handed over — the healthcheck only passes if the process
+// actually listened on it.
+func TestDeclarativeCommandRunsForAService(t *testing.T) {
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	tl.Entry = ""
+	tl.Command = []string{"bash", "-c",
+		"python3 -m http.server ${SRCOS_PORT} --bind 127.0.0.1 --directory ${SRCOS_WORKSPACE}"}
+
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+
+	if inst.State != StateRunning {
+		t.Fatalf("state = %s (%s) — ${SRCOS_PORT} probably did not reach the process", inst.State, inst.Error)
+	}
+	e, ok := h.routes.Get("alice", "web")
+	if !ok || e.Target.Port == 0 {
+		t.Fatalf("no route published: %+v", e)
+	}
+}

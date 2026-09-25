@@ -82,7 +82,25 @@ env:                                # 可选，执行前的环境准备（sandbo
 ro_mounts:                          # 可选，只读环境挂载（宿主真实路径 → 沙箱路径）
   - { host: /opt/conda,           sandbox_path: /opt/conda }
   - { host: /share/ref/GRCh38,    sandbox_path: /ref/GRCh38 }
-entry: work.sh                      # 必需，工具目录下的入口文件
+
+# 启动方式：`command` 与 `entry` **二选一**。
+#
+# command：声明式 argv，**直接 exec、不经 shell**。`${NAME}` 从本单元自己的
+# 环境展开（值就是 SRCOS 注入的那些，所以命令与环境不会对不上）。服务类工具的
+# 常见形态——“起一个 app server”——用它就够了，不必写一个只为了读端口/找解释器
+# 的 work.sh。
+command:
+  - "jupyter"
+  - "lab"
+  - "--no-browser"
+  - "--ip"
+  - "127.0.0.1"
+  - "--port"
+  - "${SRCOS_PORT}"
+  - "--notebook-dir"
+  - "${SRCOS_WORKSPACE}"
+# entry：脚本逃生口，工具有循环/条件/多进程时用它（六条硬规范见 §4）
+# entry: work.sh
 
 # ── 契约 ──────────────────────────────────────────────────
 interface:
@@ -255,7 +273,31 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 
 ---
 
-## 4. `work.sh` 六条硬规范
+## 4. 启动方式：`command:` 或 `entry:`，以及六条硬规范
+
+**`command:`（声明式 argv，推荐）**
+
+- argv **直接 exec，不经 shell**：不做引号/展开处理，也就没有注入面。
+- `${NAME}` 只引用 SRCOS 为这个 `kind` 注入的变量（见 §4.1）；引用其它名字、或写错
+  `${` 括号，**注册期就报错**（错误在注册时而不是运行时露出来）。
+- 与 §4.1 的环境同源：展开值就是环境里的值。
+- **服务类必读**：端口是 `${SRCOS_PORT}`（端口池分配的），命令必须监听它、绑 `127.0.0.1`；
+  当开发现在本单元自己的根路径（SRCOS 转发前会剥掉 `/proxy/<用户>/<工具 id>` 前缀，
+  所以应用**不需要** base-path 配置——Shiny 这类从 `location.pathname` 推导 base 的天然可用）。
+
+**`entry:`（脚本逃生口）**
+
+需要循环、条件、多个进程、或自己决定解释器时用它；SRCOS 以 `bash <工具目录>/<entry>` 运行它。
+两者**恰好给一个**，都给或都不给都拒绝注册。
+
+**优先级**（谁覆盖谁）：
+
+1. `job.json` 的 `command`（提交期显式 argv，最高）
+2. job 目录里的 `work.sh`（task 的提交期脚本）
+3. 工具的 `command:`
+4. 工具的 `entry:`
+
+**六条硬规范**（对 `command:` 与 `entry:` 同样适用）：
 
 | # | 规则 | 为什么 |
 |---|---|---|
@@ -583,6 +625,8 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | 规则 | 违反后果 |
 |---|---|
 | `id` 全局唯一且合法 | 拒绝注册 |
+| `command` 与 `entry` **恰好给一个**（都给/都不给都不行） | 拒绝注册 |
+| `command[0]` 非空；`${...}` 只能引用 SRCOS 给这个 `kind` 注入的变量，括号必须闭合 | 拒绝注册（错在注册时，不是运行时） |
 | `kind: service` 必须有 `ingress` + `lifecycle` | 拒绝注册 |
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |

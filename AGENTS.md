@@ -127,8 +127,8 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 ### 工具契约
 
 - **SRCOS 不管工具 UI。** 只提供原语控件（路径选择器、文件预览、进度）与投递/状态契约。
-- **`work.sh` 必须同步阻塞到所有实际工作完成。** `doneWhen` 探针只作逃生口（ADR-006）。
-- **任务粒度 = 一个 `work.sh`。** 样本级并行（`ata` / `annotask`）归工具自己，SRCOS 不感知、不执行；
+- **`work.sh`（或声明式 `command:`）必须同步阻塞到所有实际工作完成。** `doneWhen` 探针只作逃生口（ADR-006）。
+- **任务粒度 = 一个 `work.sh`/`command`。** 样本级并行（`ata` / `annotask`）归工具自己，SRCOS 不感知、不执行；
   节点的资源声明是**聚合需求**（ADR-005）。
 - **`backend` 由工具声明。** `internal.executor: qsubsge` + `backend: sge` 是非法组合，
   注册时交叉校验直接报错（ADR-007）。
@@ -145,7 +145,8 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 - ❌ 条件分支 / 循环 / 动态 DAG / 嵌套子流程
 - ❌ 工具 UI 平台化（表单引擎、拖拽式参数面板）
 - ❌ **SRCOS 作为 MCP Client**（去调工具自己的 MCP server）——
-  工具的执行契约是 `work.sh`（确定性、有退出码），MCP 是"谁可以调它、怎么发现签名"的接口协议，
+  工具的执行契约是一个**同步阻塞、以退出码报状态**的命令（`entry: work.sh` 或声明式 `command:`），
+  MCP 是"谁可以调它、怎么发现签名"的接口协议，
   两者不同层，混在一起会模糊"确定性执行"这个核心卖点
 - ❌ 让 agent 直接改 workspace（**只读**；执行是提交任务，走显式 `submit` scope，见 ADR-019）
 

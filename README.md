@@ -1171,11 +1171,22 @@ srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑�
 
 ### 工具开发者
 
-工具 = **一个 `work.sh`（函数体）+ 一份 `interface`（类型签名）+ 一份 `tool.yaml`（执行约束）**。
+工具 = **一个同步阻塞、以退出码报状态的命令（`work.sh` 或声明式 `command:`）+ 一份 `interface`（类型签名）+ 一份 `tool.yaml`（执行约束）**。
 SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构。最小示例见
 [`srcos-tools/hello-fanout/`](srcos-tools/hello-fanout)，完整契约见 [`docs/tool-spec.md`](docs/tool-spec.md)。
 
-只交付 `work.sh` + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
+**服务类工具**通常只要声明式的一行 `command:`（配 `ingress` + `lifecycle`），不必写脚本：
+
+```yaml
+kind: service
+command: ["jupyter", "lab", "--no-browser", "--ip", "127.0.0.1", "--port", "${SRCOS_PORT}",
+          "--notebook-dir", "${SRCOS_WORKSPACE}"]
+```
+
+`${SRCOS_*}` 由 SRCOS 从本单元自己的环境展开（值就是它注入的那些），argv **直接 exec、不经 shell**。
+需要循环/条件/多进程时再退回 `entry: work.sh`（两者恰好给一个）。
+
+只交付命令 + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
 想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。
 
 ## License

@@ -8,7 +8,14 @@ kind: service                # 长驻单元：跑着，直到被停或空闲回�
 backend: local
 sandbox: bwrap
 
-entry: work.sh
+# 声明式启动命令（argv，不经 shell）。替代了原来那个只为了「找 R、读端口、
+# exec」的 work.sh：${...} 由 SRCOS 从本单元自己的环境展开，值就是环境里的那些，
+# 所以命令与环境不会对不上。端口用 ${SRCOS_PORT}（端口池分配的，代理按它转发）。
+command:
+  - "R"
+  - "--vanilla"
+  - "-e"
+  - "shiny::runApp('${SRCOS_WORKSPACE}', host='127.0.0.1', port=${SRCOS_PORT}, launch.browser=FALSE)"
 
 # R 来自 miniforge 前缀。它**不在**系统路径（/usr、/bin）里，沙箱必须显式挂进来。
 # 注意用**真实路径**：/pmo 是指向 /Volumes/data/pmo 的符号链接，而 R 的启动脚本

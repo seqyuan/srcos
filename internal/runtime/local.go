@@ -65,14 +65,28 @@ func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, arg
 // For a task, a work.sh inside the job directory means the submitter generated
 // this run's script; otherwise the tool package's entry is used. A service has
 // no job directory, so it always uses the tool entry.
-func ResolveArgv(t *tool.Tool, view PathView, jobDir string) ([]string, error) {
+// ResolveArgv decides what to run for one unit.
+//
+// Precedence: a submission-provided script (a work.sh the submitter dropped in
+// the job directory) beats the tool's own declaration — the caller knows more
+// about this run than the manifest does. Otherwise the tool decides: a
+// declarative `command:` (expanded from the unit's own environment) or an
+// `entry:` script.
+func ResolveArgv(t *tool.Tool, view PathView, jobDir string, env []string) ([]string, error) {
 	if jobDir != "" {
 		if _, err := os.Stat(filepath.Join(jobDir, "work.sh")); err == nil {
 			return []string{"bash", "work.sh"}, nil
 		}
 	}
+	if len(t.Command) > 0 {
+		argv, err := tool.ExpandCommand(t.Command, env)
+		if err != nil {
+			return nil, fmt.Errorf("tool %s: %w", t.ID, err)
+		}
+		return argv, nil
+	}
 	if t.Entry == "" {
-		return nil, errors.New("no work.sh in the job directory and the tool declares no entry")
+		return nil, errors.New("no work.sh in the job directory and the tool declares neither command nor entry")
 	}
 	return []string{"bash", view.ToolDir(t) + "/" + t.Entry}, nil
 }

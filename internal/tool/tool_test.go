@@ -529,3 +529,70 @@ resources: {cpu: 1, memory: "1Gi", walltime: "0:01:00"}
 		t.Fatalf("a plain env entry must be accepted: %v", err)
 	}
 }
+
+// 声明式 command：与 entry 二选一，且 ${...} 只能引用平台给这个 kind 的变量。
+func TestCommandValidation(t *testing.T) {
+	base := func(extra string) string {
+		return `
+schemaVersion: 1
+id: demo
+version: 0.1.0
+name: Demo
+kind: service
+backend: local
+sandbox: bwrap
+` + extra + `
+resources: {cpu: 1, memory: "1Gi"}
+ingress: {port: 8080}
+lifecycle: {restart: never, max_lifetime: "1h"}
+`
+	}
+	load := func(extra string) error {
+		_, err := Load(writeTool(t, map[string]string{"tool.yaml": base(extra)}))
+		return err
+	}
+
+	for _, tc := range []struct{ name, extra, want string }{
+		{"both command and entry", "entry: work.sh\ncommand: [\"true\"]\n", "mutually exclusive"},
+		{"neither", "", "one of entry or command is required"},
+		{"empty program", "command: [\"  \"]\n", "command[0]"},
+		{"unknown variable", "command: [\"run\", \"${SRCOS_NOPE}\"]\n", "not a variable SRCOS provides"},
+		{"task-only variable in a service", "command: [\"run\", \"${SRCOS_TASK_ID}\"]\n", "not a variable SRCOS provides"},
+		{"unterminated reference", "command: [\"run\", \"${SRCOS_PORT\"]\n", "unterminated"},
+	} {
+		err := load(tc.extra)
+		if err == nil {
+			t.Fatalf("%s: expected a registration error", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error = %v, want it to mention %q", tc.name, err, tc.want)
+		}
+	}
+
+	// A service may reference its port and workspace; the program is the first
+	// element.
+	if err := load("command: [\"serve\", \"--port\", \"${SRCOS_PORT}\", \"${SRCOS_WORKSPACE}\"]\n"); err != nil {
+		t.Fatalf("a valid command must be accepted: %v", err)
+	}
+}
+
+func TestExpandCommand(t *testing.T) {
+	env := []string{"SRCOS_PORT=20000", "SRCOS_WORKSPACE=/workspace", "PATH=/usr/bin"}
+
+	got, err := ExpandCommand(
+		[]string{"serve", "--port", "${SRCOS_PORT}", "--dir=${SRCOS_WORKSPACE}", "$SRCOS_PORT", "100%"},
+		env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"serve", "--port", "20000", "--dir=/workspace", "$SRCOS_PORT", "100%"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("ExpandCommand = %q, want %q", got, want)
+	}
+
+	// A reference the environment does not carry is an error, never an empty
+	// string (an empty port reads as "started but unreachable").
+	if _, err := ExpandCommand([]string{"serve", "${SRCOS_MISSING}"}, env); err == nil {
+		t.Fatal("a missing variable must be an error")
+	}
+}

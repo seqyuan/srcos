@@ -94,7 +94,11 @@ func validateOneTool(dir string) {
 	}
 	fmt.Printf("ok   %-20s v%-8s %-8s backend=%-6s sandbox=%-10s\n",
 		t.ID, t.Version, t.Kind, t.Backend, t.Sandbox)
-	fmt.Printf("     entry    %s\n", t.Entry)
+	if t.Entry != "" {
+		fmt.Printf("     entry    %s\n", t.Entry)
+	} else {
+		fmt.Printf("     command  %s\n", strings.Join(t.Command, " "))
+	}
 	fmt.Printf("     inputs   %d, outputs %d, storages %v\n",
 		len(t.Interface.Inputs), len(t.Interface.Outputs), t.RequiresStorages)
 
