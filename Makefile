@@ -7,6 +7,11 @@ VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 .PHONY: build test vet fmt webui e2e
 
 build:
+	@if [ ! -f internal/web/dist/index.html ]; then \
+	  printf '\n\033[33m⚠  internal/web/dist/ 没有前端构建产物（缺 index.html）。\033[0m\n'; \
+	  echo '   二进制仍可正常构建（画布页会提示去构建）；要包含管理端画布请先跑：make webui'; \
+	  printf '\n'; \
+	fi
 	go build -ldflags "-X main.version=$(VERSION)" -o srcos .
 
 test:
@@ -22,8 +27,8 @@ fmt:
 # internal/web/dist/，由 //go:embed 打进同一个二进制。只有画布页加载它，
 # 其余页面仍是 Go 模板。
 #
-# `make build` 不依赖这个目标：internal/web/dist/ 里有一个占位 index.html 进版本库，
-# 没有 Node 的环境照样能构建（画布页会提示去跑 make webui）。
+# `make build` 不依赖这个目标：internal/web/dist/ 里只有占位的 .gitkeep 进版本库，
+# 没有 Node 的环境照样能构建（`make build` 会警告，画布页会提示去跑 make webui）。
 webui:
 	@if [ -f webui/package.json ]; then \
 	  cd webui && (pnpm install --frozen-lockfile || pnpm install) && pnpm build && cd ..; \
