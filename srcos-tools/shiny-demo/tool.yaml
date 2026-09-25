@@ -1,0 +1,56 @@
+schemaVersion: 1
+id: shiny-demo
+version: 0.1.0
+name: "Shiny Demo"
+description: "最小的 R Shiny 应用：一个滑块 + 直方图，演示 kind: service 的完整生命周期（端口、探活、路由、空闲回收）"
+
+kind: service                # 长驻单元：跑着，直到被停或空闲回收
+backend: local
+sandbox: bwrap
+
+entry: work.sh
+
+# R 来自 miniforge 前缀。它**不在**系统路径（/usr、/bin）里，沙箱必须显式挂进来。
+# 注意用**真实路径**：/pmo 是指向 /Volumes/data/pmo 的符号链接，而 R 的启动脚本
+# 内部引用的就是真实路径（挂 /pmo 会报 `.../bin/sed: not found`）。
+# 粒度=可见范围：只挂这一个前缀，不挂它的父目录。
+# 换机器时改这里（对齐 hello-fanout 对 `ata` 的做法）。
+ro_mounts:
+  - host: /Volumes/data/pmo/miniforge3
+    sandbox_path: /Volumes/data/pmo/miniforge3
+
+# 沙箱的 PATH 是契约（/opt/srcos/bin 在前），R 不在里面；显式把它的 bin 加进去。
+# LANG/LC_ALL：沙箱是干净环境，没有 locale 时 R 会把中文标签报成
+# "unable to translate to native encoding"。C.UTF-8 由 glibc 自带，不需额外文件。
+env:
+  - "PATH=/opt/srcos/bin:/Volumes/data/pmo/miniforge3/bin:/usr/local/bin:/usr/bin:/bin"
+  - "LANG=C.UTF-8"
+  - "LC_ALL=C.UTF-8"
+
+interface:
+  inputs:
+    - name: title
+      type: string
+      label: "标题"
+      description: "显示在页面顶部的标题（等价于 app.R 里的默认值）"
+      default: "SRCOS Shiny Demo"
+
+resources:
+  cpu: 1
+  memory: "2Gi"
+
+ingress:
+  port: 8080
+  healthcheck:
+    path: "/"                 # Shiny 的首页
+    timeout: "60s"
+    startup_grace: "180s"     # 首次启动 R 要加载一堆包
+
+lifecycle:
+  restart: on-failure
+  max_lifetime: "12h"
+  idle_ttl: "1h"              # 一小时没人访问就回收
+
+# 首次使用时把模板拷进用户的 workspace；之后用户可以自己改 app.R。
+workspace:
+  init_from: workspace-template/

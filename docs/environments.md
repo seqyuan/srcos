@@ -116,6 +116,19 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 > **这是最有价值的发现**：SRCOS 想接管的三个目标工具**已经在这台机器上跑着**。
 > 第一个真实用例可以直接用现状验证，不需要先造工具。
 
+### R / Shiny（做 `shiny-demo` 工具时实测，2026-09-26）
+
+- `R` 与 `shiny` 在 **miniforge 前缀** `/pmo/miniforge3`（`/pmo` 是指向 `/Volumes/data/pmo`
+  的**符号链接**）；`/usr/bin/R` 是另一个 R，**没有 shiny**。
+- **沙箱里必须挂真实路径**：挂 `/pmo/miniforge3` 会让 R 的启动脚本报
+  `.../bin/sed: not found` —— 脚本内部引用的是 `/Volumes/data/pmo/...`。
+  `tool.yaml` 的 `ro_mounts` 写 `host: /Volumes/data/pmo/miniforge3`。
+- 干净环境没有 locale，R 解析中文标签会警告 `unable to translate ... to native encoding`；
+  `env: ["LANG=C.UTF-8", "LC_ALL=C.UTF-8"]` 即可（glibc 自带，不需额外文件）。
+- `shiny` 的客户端从 `window.location.pathname` 推导 base URL 与 WebSocket 路径，因此
+  **在 `/proxy/<用户>/<工具>/` 前缀下可直接工作**（实测：页面 200、前缀下 WebSocket 101、
+  headless Chromium 里直方图渲染成功、无 console 错误）。
+
 ### 环境管理
 
 - ❌ 无 `module`

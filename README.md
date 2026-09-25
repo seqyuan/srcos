@@ -1027,6 +1027,31 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 本身也记一条 `audit.prune`）——不会自动删除。记录里除提交与配置变更外，还包括**平台自己做的决定**：
 任务终态、重启后结算、空闲回收与服务被停（actor 是该实例的用户、kind 为 system）。
 
+## 示例：把一个 Shiny 应用作为服务实例
+
+`srcos-tools/shiny-demo/` 是**第一个真实服务工具**（不是示例玩具）：它把一个 R Shiny 应用
+当作 `kind: service` 实例跑起来，完整地走端口池、探活、路由、代理、空闲回收、审计。
+
+```bash
+# 校验并启动（--user 指定这个实例属于谁）
+./srcos tool validate --tools-dir srcos-tools
+./srcos svc start -d config --tools-dir srcos-tools --tool shiny-demo --user alice
+#   → state running，route=/proxy/alice/shiny-demo
+#   浏览器打开 http://<网关>/proxy/alice/shiny-demo/
+```
+
+**它演示了四件事**：
+
+| | 怎么做的 |
+|---|---|
+| **路径前缀** | Shiny 从 `window.location.pathname` 推导自己的 base，所以挂在 `/proxy/<用户>/<工具 id>/` 下**不需要** base-path 配置：资源与 WebSocket 都落回同一个前缀。工具只监听根路径 |
+| **环境挂载** | R 在 miniforge 前缀里（非系统路径），靠 `ro_mounts` 挂进沙箱 + `env:` 把它的 `bin` 放进 `PATH`。注意用**真实路径**：`/pmo` 是指向 `/Volumes/data/pmo` 的符号链接，而 R 的启动脚本引用真实路径 |
+| **工作区即应用** | `workspace.init_from` 把模板 `app.R` 拷进用户工作区；改完重启实例就生效（`shiny::runApp("/workspace")`） |
+| **实例身份对工具可见** | `SRCOS_USER` / `SRCOS_TOOL` / `SRCOS_INSTANCE_ID` 注入沙箱，应用里直接显示（页脚那行） |
+
+> 启动服务需要**工具自己声明环境**：SRCOS 不知道 R 装在哪，也不应该知道 —— `tool.yaml` 的
+> `ro_mounts` + `env` 就是这份声明，换机器时改这里。
+
 ## 管理控制台（`/admin`，仅管理员）
 
 管理员在仪表盘右上角会看到一个「管理」入口，打开 `/admin`：
