@@ -115,6 +115,20 @@ func (h *Handler) handleCreateToken(w http.ResponseWriter, r *http.Request, iden
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	scopeNames := make([]string, 0, len(rec.Scopes))
+	for _, s := range rec.Scopes {
+		scopeNames = append(scopeNames, string(s))
+	}
+	expires := "never"
+	if !rec.ExpiresAt.IsZero() {
+		expires = rec.ExpiresAt.Format(time.RFC3339)
+	}
+	h.auditChange(r, ident, "token.create", "token", rec.ID, map[string]any{
+		"label":   rec.Label,
+		"scopes":  strings.Join(scopeNames, ","),
+		"tools":   strings.Join(rec.SubmitTools, ","),
+		"expires": expires,
+	})
 	writeJSON(w, http.StatusCreated, createTokenResponse{
 		Token:     rec.View(time.Now(), time.Time{}),
 		Plaintext: plaintext,
@@ -122,7 +136,7 @@ func (h *Handler) handleCreateToken(w http.ResponseWriter, r *http.Request, iden
 }
 
 // handleRevokeToken removes one of the caller's own tokens.
-func (h *Handler) handleRevokeToken(w http.ResponseWriter, ident agenttoken.Identity, id string) {
+func (h *Handler) handleRevokeToken(w http.ResponseWriter, r *http.Request, ident agenttoken.Identity, id string) {
 	if !h.requireSessionOnly(w, ident) {
 		return
 	}
@@ -144,6 +158,7 @@ func (h *Handler) handleRevokeToken(w http.ResponseWriter, ident agenttoken.Iden
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such token"})
 		return
 	}
+	h.auditChange(r, ident, "token.revoke", "token", id, nil)
 	writeJSON(w, 200, map[string]string{"revoked": id})
 }
 

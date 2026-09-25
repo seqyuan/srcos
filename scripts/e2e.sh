@@ -251,6 +251,20 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK" "
 pass "Bearer token accepted (200)"
 code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/api/tools")"
 [ "$code" = "200" ] || fail "session /api/tools = $code"
+pass "session and Bearer both accepted"
+
+# ── 9. 审计流（结构化落盘 + 拒绝事件）───────────────────────────────
+step 9 "审计流（data/audit）"
+# A read-only token must be refused a write — and the refusal is audited.
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' -d "{\"tool\":\"$TOOL\"}" "$BASE/api/jobs")"
+[ "$code" = "403" ] || fail "read-only token write = $code, want 403"
+
+AUDDIR="$DATA/audit"
+grep -rq '"action":"submit"' "$AUDDIR" 2>/dev/null || fail "no submit event in the audit stream"
+grep -rq '"action":"scope"' "$AUDDIR" 2>/dev/null || fail "no scope denial in the audit stream"
+"$BIN" audit list -d "$CFG" | grep -q 'submit' || fail "srcos audit list read nothing"
+pass "submit allow + scope deny recorded and readable"
 
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计\n'

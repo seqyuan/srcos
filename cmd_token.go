@@ -134,6 +134,22 @@ func runTokenCreate(args []string) {
 		fatalf("%v", err)
 	}
 
+	scopeNames := make([]string, 0, len(rec.Scopes))
+	for _, s := range rec.Scopes {
+		scopeNames = append(scopeNames, string(s))
+	}
+	auditExpiry := "never"
+	if !rec.ExpiresAt.IsZero() {
+		auditExpiry = rec.ExpiresAt.Format(time.RFC3339)
+	}
+	cliAudit(*configDir, operatorActor(), "token.create", "token", rec.ID, map[string]any{
+		"owner":   rec.User,
+		"label":   rec.Label,
+		"scopes":  strings.Join(scopeNames, ","),
+		"tools":   strings.Join(rec.SubmitTools, ","),
+		"expires": auditExpiry,
+	})
+
 	expiry := "never"
 	if !rec.ExpiresAt.IsZero() {
 		expiry = fmt.Sprintf("%s (%s)", rec.ExpiresAt.Local().Format("2006-01-02 15:04"), humanUntil(rec.ExpiresAt, time.Now()))
@@ -243,6 +259,7 @@ func runTokenRevoke(args []string) {
 		}
 		for _, t := range removed {
 			fmt.Printf("revoked %s (%s)\n", t.ID, dash(t.Label))
+			cliAudit(*configDir, operatorActor(), "token.revoke", "token", t.ID, map[string]any{"owner": t.User, "bulk": true})
 		}
 		fmt.Printf("%d token(s) revoked for %s; the gateway picks this up on its next request\n", len(removed), *user)
 		return
@@ -260,6 +277,7 @@ func runTokenRevoke(args []string) {
 	if !found {
 		fatalf("no agent token with id %q (see `srcos token list`)", id)
 	}
+	cliAudit(*configDir, operatorActor(), "token.revoke", "token", rec.ID, map[string]any{"owner": rec.User})
 	fmt.Printf("revoked %s (%s, %s)\n", rec.ID, rec.User, dash(rec.Label))
 	fmt.Println("the gateway picks this up on its next request; no restart needed")
 }

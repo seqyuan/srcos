@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -86,20 +87,20 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 		writeJSON(w, 200, map[string]any{"tools": tools})
 
 	case strings.HasPrefix(path, "/grants/") && r.Method == http.MethodPut:
-		h.adminSetGrant(w, r, strings.TrimPrefix(path, "/grants/"))
+		h.adminSetGrant(w, r, username, strings.TrimPrefix(path, "/grants/"))
 
 	case strings.HasPrefix(path, "/grants/") && r.Method == http.MethodDelete:
-		h.adminRemoveGrant(w, strings.TrimPrefix(path, "/grants/"))
+		h.adminRemoveGrant(w, r, username, strings.TrimPrefix(path, "/grants/"))
 
 	case path == "/groups" && r.Method == http.MethodGet:
 		policy := h.opts.Policy.Snapshot()
 		writeJSON(w, 200, map[string]any{"groups": policy.Groups, "admins": policy.Admins})
 
 	case path == "/groups" && r.Method == http.MethodPut:
-		h.adminSetGroup(w, r)
+		h.adminSetGroup(w, r, username)
 
 	case path == "/admins" && r.Method == http.MethodPut:
-		h.adminSetAdmins(w, r)
+		h.adminSetAdmins(w, r, username)
 
 	case path == "/policy" && r.Method == http.MethodGet:
 		policy := h.opts.Policy.Snapshot()
@@ -240,7 +241,7 @@ type grantBody struct {
 }
 
 // adminSetGrant replaces one tool's grant, exactly as `srcos grant set` does.
-func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, toolID string) {
+func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, username, toolID string) {
 	if strings.TrimSpace(toolID) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a tool id is required"})
 		return
@@ -282,10 +283,15 @@ func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, toolID s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	h.auditChange(r, agenttoken.HumanIdentity(username), "grant.set", "grant", toolID, map[string]any{
+		"users":  strings.Join(g.Users, ","),
+		"groups": strings.Join(g.Groups, ","),
+		"public": g.Public,
+	})
 	writeJSON(w, 200, map[string]any{"grant": g})
 }
 
-func (h *Handler) adminRemoveGrant(w http.ResponseWriter, toolID string) {
+func (h *Handler) adminRemoveGrant(w http.ResponseWriter, r *http.Request, username, toolID string) {
 	if !h.opts.Policy.RemoveGrant(toolID) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no grant for " + toolID})
 		return
@@ -294,12 +300,13 @@ func (h *Handler) adminRemoveGrant(w http.ResponseWriter, toolID string) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	h.auditChange(r, agenttoken.HumanIdentity(username), "grant.remove", "grant", toolID, nil)
 	writeJSON(w, 200, map[string]string{"ok": "true"})
 }
 
 // adminSetGroup replaces a group's membership; an empty list removes the group
 // (and with it every grant that named it, which the console warns about).
-func (h *Handler) adminSetGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) adminSetGroup(w http.ResponseWriter, r *http.Request, username string) {
 	var body struct {
 		Name  string   `json:"name"`
 		Users []string `json:"users"`
@@ -333,11 +340,14 @@ func (h *Handler) adminSetGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	h.auditChange(r, agenttoken.HumanIdentity(username), "group.set", "group", body.Name, map[string]any{
+		"users": strings.Join(body.Users, ","),
+	})
 	writeJSON(w, 200, map[string]any{"groups": h.opts.Policy.Snapshot().Groups})
 }
 
 // adminSetAdmins replaces the admin list.
-func (h *Handler) adminSetAdmins(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) adminSetAdmins(w http.ResponseWriter, r *http.Request, username string) {
 	var body struct {
 		Admins []string `json:"admins"`
 	}
@@ -358,6 +368,9 @@ func (h *Handler) adminSetAdmins(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	h.auditChange(r, agenttoken.HumanIdentity(username), "admins.set", "policy", "admins", map[string]any{
+		"admins": strings.Join(body.Admins, ","),
+	})
 	writeJSON(w, 200, map[string]any{"admins": h.opts.Policy.Snapshot().Admins})
 }
 

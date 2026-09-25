@@ -247,7 +247,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	case path == "/api/tokens" && r.Method == "POST":
 		h.handleCreateToken(w, r, ident)
 	case strings.HasPrefix(path, "/api/tokens/") && r.Method == "DELETE":
-		h.handleRevokeToken(w, ident, strings.TrimPrefix(path, "/api/tokens/"))
+		h.handleRevokeToken(w, r, ident, strings.TrimPrefix(path, "/api/tokens/"))
 
 	// Running a flow: the same write scope, checked per tool the flow uses.
 	case strings.HasPrefix(path, "/api/flows/") && r.Method == "POST":
@@ -336,6 +336,20 @@ func (h *Handler) auditDeny(r *http.Request, ident *agenttoken.Identity, action,
 	h.opts.Audit.Record(audit.NewEvent(actor, action).
 		WithRequest(r.Method, r.URL.Path, auth.ClientIP(r), r.UserAgent()).
 		Denied(reason))
+}
+
+// auditChange records a configuration change — a grant, a group, an admin list,
+// a credential. These are the mutations an auditor asks about after the fact:
+// "who opened this tool to whom, and when".
+func (h *Handler) auditChange(r *http.Request, actor agenttoken.Identity, action, targetType, targetID string, params map[string]any) {
+	if h.opts.Audit == nil {
+		return
+	}
+	h.opts.Audit.Record(audit.NewEvent(actor.AuditActor(), action).
+		WithTarget(targetType, targetID, "").
+		WithParams(params).
+		WithRequest(r.Method, r.URL.Path, auth.ClientIP(r), r.UserAgent()).
+		Allowed())
 }
 
 // currentSessionRev returns the per-account session revision derived from the

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/activity"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
@@ -263,6 +264,13 @@ func runJobSubmit(args []string) {
 	}
 
 	fmt.Printf("submitted %s\n", jobID)
+	// The CLI submission is the other door into the drop-box, so it is recorded
+	// too: the actor is the account the submission belongs to (the CLI may act
+	// as --user), and the operator's OS name is the cli kind.
+	cliAudit(*jf.configDir, audit.Actor{User: user, Kind: audit.KindCLI}, "submit", "tool", t.ID, map[string]any{
+		"version": t.Version,
+		"job":     jobID,
+	})
 	fmt.Printf("  tool    %s v%s (%s)\n", t.ID, t.Version, t.Kind)
 	fmt.Printf("  user    %s\n", user)
 	fmt.Printf("  dir     %s\n", dir)

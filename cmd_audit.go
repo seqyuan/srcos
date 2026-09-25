@@ -200,3 +200,34 @@ func sortedKeys(m map[string]string) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// cliAudit records a configuration change made from the command line. The
+// gateway's own mutations are recorded by the API handlers; this is the other
+// door into the same files, and an audit trail that omitted it would have a
+// hole shaped exactly like `srcos grant set`.
+func cliAudit(configDir string, actor audit.Actor, action, targetType, targetID string, params map[string]any) {
+	rec := audit.New(config.DataDir(configDir))
+	defer rec.Close()
+	rec.Record(audit.NewEvent(actor, action).
+		WithTarget(targetType, targetID, "").
+		WithParams(params).
+		Allowed())
+}
+
+// operatorActor is who ran the CLI: the OS account, the only identity a local
+// command has.
+func operatorActor() audit.Actor {
+	return audit.Actor{User: operatorName(), Kind: audit.KindCLI}
+}
+
+// operatorName is who ran the CLI: the OS account, which is the only identity a
+// local command has.
+func operatorName() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("LOGNAME"); u != "" {
+		return u
+	}
+	return "cli"
+}

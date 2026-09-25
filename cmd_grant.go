@@ -78,12 +78,13 @@ func grantPolicy(configDir string) *grant.Policy {
 	return p
 }
 
-func saveGrantPolicy(configDir string, p *grant.Policy) {
+func saveGrantPolicy(configDir string, p *grant.Policy, action, target string) {
 	if err := grant.Save(config.GrantsPath(configDir), p); err != nil {
 		fatalf("%v", err)
 	}
+	cliAudit(configDir, operatorActor(), action, "grant", target, nil)
 	fmt.Printf("saved %s\n", config.GrantsPath(configDir))
-	fmt.Println("restart the gateway for changes to take effect")
+	fmt.Println("the gateway reloads it within a few seconds (no restart needed)")
 }
 
 func runGrantList(sub string, args []string) {
@@ -183,7 +184,7 @@ func runGrantSet(args []string) {
 		},
 	}
 	p.SetGrant(g)
-	saveGrantPolicy(*configDir, p)
+	saveGrantPolicy(*configDir, p, "grant.set", tool)
 }
 
 func runGrantRemove(args []string) {
@@ -199,7 +200,7 @@ func runGrantRemove(args []string) {
 	if !p.RemoveGrant(positional[0]) {
 		fatalf("no grant for %s", positional[0])
 	}
-	saveGrantPolicy(*configDir, p)
+	saveGrantPolicy(*configDir, p, "grant.remove", positional[0])
 }
 
 func runGrantGroup(args []string) {
@@ -226,7 +227,7 @@ func runGrantGroup(args []string) {
 		}
 		p.SetGroup(name, *users)
 	}
-	saveGrantPolicy(*configDir, p)
+	saveGrantPolicy(*configDir, p, "group.set", name)
 }
 
 func runGrantAdmin(args []string) {
@@ -256,7 +257,7 @@ func runGrantAdmin(args []string) {
 		return
 	}
 	p.SetAdmins(admins)
-	saveGrantPolicy(*configDir, p)
+	saveGrantPolicy(*configDir, p, "admins.set", "admins")
 }
 
 // runGrantToggle adds or removes one user, without rewriting the whole grant.
@@ -310,7 +311,7 @@ func runGrantToggle(args []string, allow bool) {
 		fmt.Println("nothing changed")
 		return
 	}
-	saveGrantPolicy(*configDir, p)
+	saveGrantPolicy(*configDir, p, "grant."+name, tool)
 }
 
 func containsStr(list []string, want string) bool {
