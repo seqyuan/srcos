@@ -32,6 +32,10 @@ jobs:
         run: go test ./... -race
       - name: build (no frontend bundle)
         run: make build
+      # The example tools are part of the contract: a manifest that stops
+      # validating should fail CI, not the first person to try it.
+      - name: validate example tools
+        run: ./srcos tool validate --tools-dir srcos-tools
 
   e2e:
     name: end-to-end (degraded sandbox)
