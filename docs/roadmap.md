@@ -97,7 +97,7 @@
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
   `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
-  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）
+  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）
 
 **工程基线**
 
@@ -116,7 +116,7 @@
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
-- 审计流的第二期：防篡改（hash chain / 签名）、生命周期跃迁审计、保留策略（管理端查询页已做）
+- 审计流的第二期：防篡改（hash chain / 签名）、保留策略（管理端查询页与生命周期审计已做）
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
@@ -728,8 +728,10 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
     （API 与 CLI 两条门都记 —— 漏了 CLI 就是漏了一扇门）；CLI `job submit` 也记。
 - **第二期进展**：**管理端查询页已做**（`/admin/audit` + `GET /api/admin/audit`，仅管理员；
   服务端渲染 + GET 筛选表单，与 CLI 共用 `audit.Query`，非管理员 403）。
-- **不做（仍待）**：防篡改（hash chain / 签名）、生命周期跃迁审计（reconcile / reaper）、保留策略。
-  按「先有流，再谈防篡改」的顺序。
+- **生命周期跃迁**（`internal/runtime`）：`instance.done`（任务终态）、`instance.settled`
+  （重启后凭判定文件结算）、`instance.reaped`（回收，带 reason）、`instance.orphaned` / `instance.adopted`
+  （reconcile）、`instance.stopped`（管理端强制停 / CLI `svc stop`）—— actor 是该实例的用户、kind=system。
+- **不做（仍待）**：防篡改（hash chain / 签名）、保留策略。按「先有流，再谈防篡改」的顺序。
 - **为什么不是数据库 / 不是消息队列**：与「文件系统即数据库」一致（AGENTS.md）。
   一行一个 JSON 的文本流能被 `grep`、`jq`、`rsync`，也能在十年后被读懂；
   审计的可用寿命比任何查询 API 都长。
@@ -994,3 +996,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **技术债 T6（拆 config 包）评估后不做** —— `UserConfig` 同时持有 `auth` 与 `services` 卡片是合理的（一个用户记录本就两样都有），不是「两种世界观混在一个包里」；拆包是纯命名 churn、风险大于收益。至此 P0/P1/P2 完成（T6 明确不做） |
 | 2026-09-26 | **CI（`.github/workflows/ci.yml`）** —— 三个独立 job：`vet` + `test -race` + `make build`；`make e2e`（`SRCOS_E2E_SANDBOX=none`，GitHub runner 无 user systemd/bwrap）；前端 `pnpm install --frozen-lockfile` + `pnpm build`（lockfileVersion 9 / pnpm 10）。顺带修 e2e 的判定断言：改为按实例记录的 `limiter` 判断，而不是「systemd-run 二进制是否存在」——runner 上二进制在、user manager 不在，旧写法会误报 ADR-022 回归 |
 | 2026-09-26 | **审计流第二期（1/4）：管理端查询页** —— `/admin/audit`（服务端渲染，GET 筛选表单：user/action/decision/since，最新在前；仅管理员，非管理员 403）+ `GET /api/admin/audit`（同一 `audit.Query`，脚本化）；`web.AuditPage`（自带样式块，与 admin 页同风格）+ 导航入口；`audit.ParseSince` 下沉供 CLI 与 API 共用。e2e 第 10 步：管理员登录 → API 返回 deny → 页面渲染 → 非管理员 403。剩：防篡改 / 生命周期审计 / 保留策略 |
+| 2026-09-26 | **审计流第二期（2/4）：生命周期跃迁审计** —— `runtime.Options.Audit`；记录 `instance.done`（任务终态）、`instance.settled`（重启后凭 verdict 结算）、`instance.reaped`（回收 + reason）、`instance.orphaned`/`instance.adopted`（reconcile）、`instance.stopped`（管理端强制停 + CLI svc stop）；actor = 实例用户、kind=system；一个进程一个 Recorder（main.go 建，传给 supervisor 与 server）。e2e 断言 instance.done；runtime 单测锁定。剩：防篡改 / 保留策略 |

@@ -158,7 +158,7 @@ func buildFlowRunner(a *flowRunnerArgs) (*flowrun.Runner, string, string) {
 	flowsRoot := resolveFlowsDir(*a.flowsDir, *a.configDir)
 	toolsRoot := resolveToolsDir(*a.toolsDir, *a.configDir)
 	user := resolveUser(*a.user)
-	runner, _, err := buildRunner(*a.configDir, toolsRoot, user)
+	runner, _, err := buildRunner(*a.configDir, toolsRoot, user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}

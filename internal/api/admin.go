@@ -63,7 +63,7 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 		writeJSON(w, 200, map[string]any{"instances": instances})
 
 	case strings.HasPrefix(path, "/instances/") && strings.HasSuffix(path, "/stop") && r.Method == http.MethodPost:
-		h.adminStopInstance(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/instances/"), "/stop"))
+		h.adminStopInstance(w, r, username, strings.TrimSuffix(strings.TrimPrefix(path, "/instances/"), "/stop"))
 
 	case strings.HasPrefix(path, "/instances/") && strings.HasSuffix(path, "/logs") && r.Method == http.MethodGet:
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/instances/"), "/logs")
@@ -183,7 +183,7 @@ func (h *Handler) adminInstances(r *http.Request) ([]inspect.AdminInstance, erro
 // operator is responding to something the owner may not know about (a runaway
 // service eating a login node). The record is updated by the same StopService
 // the reaper uses, so what the owner sees stays truthful.
-func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, id string) {
+func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, username, id string) {
 	if h.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "this gateway has no supervisor, so it cannot stop instances",
@@ -210,6 +210,12 @@ func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, id s
 	if err != nil {
 		saved = inst
 	}
+	// Stopping someone else's instance is an operator act on another user's
+	// work: it is exactly what an audit trail exists to record.
+	h.auditChange(r, agenttoken.HumanIdentity(username), "instance.stopped", "instance", id, map[string]any{
+		"tool":  inst.Tool,
+		"owner": inst.User,
+	})
 	writeJSON(w, 200, map[string]any{"instance": inspect.ViewOfInstance(saved)})
 }
 

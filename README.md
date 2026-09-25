@@ -986,7 +986,8 @@ srcos serve -d /opt/srcos/config --no-task-drainer
 审计写在 `data/`（运行态）而不是 `config/`（声明态）—— 备份配置不该连审计一起带走。
 管理员也可以直接在浏览器里看：**`/admin/audit`**（服务端渲染 + GET 筛选，与 CLI 同一份查询，
 仅管理员），或脚本化地读 **`GET /api/admin/audit`**（`?user=&action=&decision=&since=&limit=`）。
-防篡改（hash chain）、生命周期跃迁审计、保留策略属于后续。
+防篡改（hash chain）、保留策略属于后续。记录里除提交与配置变更外，还包括**平台自己做的决定**：
+任务终态、重启后结算、空闲回收与服务被停（actor 是该实例的用户、kind 为 system）。
 
 ## 管理控制台（`/admin`，仅管理员）
 

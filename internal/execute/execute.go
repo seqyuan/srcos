@@ -583,6 +583,7 @@ func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
 		ToolsDir:  c.opts.ToolsDir,
 		User:      user,
 		Storages:  c.opts.Storages,
+		Audit:     c.opts.Audit,
 		Backends:  map[string]runtime.Backend{"local": &runtime.Local{}},
 	}), nil
 }

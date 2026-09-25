@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
@@ -302,6 +303,7 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		return nil, err
 	}
+	r.auditInstance(inst, "instance.done", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
 	return inst, nil
 }
 
@@ -689,6 +691,7 @@ func (rp *Reaper) Sweep(ctx context.Context, now time.Time) ([]string, error) {
 			continue
 		}
 		stopped = append(stopped, inst.ID+" ("+reason+")")
+		rp.Runner.auditInstance(inst, "instance.reaped", map[string]any{"reason": reason})
 	}
 	if len(problems) > 0 {
 		return stopped, errors.New(strings.Join(problems, "; "))
@@ -757,6 +760,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 				})
 			}
 			adopted = append(adopted, inst.ID)
+			r.auditInstance(inst, "instance.adopted", nil)
 
 		case !alive && !inst.State.Terminal():
 			// The record says running but nothing is: mark it stopped so the
@@ -772,6 +776,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 				r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
 			}
 			orphaned = append(orphaned, inst.ID)
+			r.auditInstance(inst, "instance.orphaned", map[string]any{"error": inst.Error})
 		}
 	}
 	sort.Strings(adopted)
@@ -856,6 +861,7 @@ func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string,
 			continue
 		}
 		settled = append(settled, inst.ID)
+		r.auditInstance(inst, "instance.settled", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
 	}
 	sort.Strings(adopted)
 	sort.Strings(settled)
@@ -880,6 +886,21 @@ func applyExitStatus(inst *Instance, status ExitStatus) {
 	if status.Code < 0 && status.Err != nil {
 		inst.Error = status.Err.Error()
 	}
+}
+
+// auditInstance records one lifecycle decision the platform made about an
+// instance (ADR-024). The actor is the instance's user with kind "system": an
+// auditor reading "why did alice's service disappear" wants these next to her
+// own acts. A nil recorder is a no-op.
+func (r *Runner) auditInstance(inst *Instance, action string, params map[string]any) {
+	if inst == nil {
+		return
+	}
+	r.opts.Audit.Record(audit.NewEvent(audit.Actor{User: inst.User, Kind: audit.KindSystem}, action).
+		WithTarget("instance", inst.ID, "").
+		WithParams(params).
+		WithRefs(map[string]string{"tool": inst.Tool}).
+		Allowed())
 }
 
 // TaskProber is implemented by backends that can report how a *finished* task

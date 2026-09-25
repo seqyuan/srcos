@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/execute"
@@ -604,7 +605,11 @@ func runServer(opts options) {
 	if taskWorkers == 0 {
 		taskWorkers = execute.DefaultTaskWorkers
 	}
-	supervisor, routes, err := buildRunner(configDir, toolsDir, "")
+	// One audit recorder for the whole process: the supervisor's lifecycle
+	// decisions, the API handler's requests and the write path all append to the
+	// same stream (ADR-024).
+	auditRec := audit.New(config.DataDir(configDir))
+	supervisor, routes, err := buildRunner(configDir, toolsDir, "", auditRec)
 	if err != nil {
 		log.Fatalf("supervisor: %v", err)
 	}
@@ -616,6 +621,7 @@ func runServer(opts options) {
 		Supervisor:  supervisor,
 		Routes:      routes,
 		TaskWorkers: taskWorkers,
+		Audit:       auditRec,
 	})
 
 	httpServer := &http.Server{

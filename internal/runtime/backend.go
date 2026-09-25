@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/sandbox"
@@ -194,6 +195,11 @@ type Options struct {
 	Backends map[string]Backend
 	// Routes is the dynamic routing table services publish into.
 	Routes *route.Table
+	// Audit records instance lifecycle decisions (ADR-024): adopted, orphaned,
+	// settled, reaped. Nil is a no-op. These are decisions the *platform* made,
+	// not acts a person performed, and they are what "why did my service
+	// disappear" is answered with.
+	Audit *audit.Recorder
 }
 
 // Runner drives a unit through its lifecycle.

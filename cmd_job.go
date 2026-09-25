@@ -304,7 +304,7 @@ func runJobRun(args []string) {
 		fatalf("tool %s is kind %s; use `srcos svc start` for services", t.ID, t.Kind)
 	}
 
-	runner, _, err := buildRunner(*jf.configDir, root, user)
+	runner, _, err := buildRunner(*jf.configDir, root, user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -411,7 +411,12 @@ func grantHint(policy *grant.Policy, user string) string {
 	return ""
 }
 
-func buildRunner(configDir, toolsDir, user string) (*runtime.Runner, *route.Table, error) {
+// buildRunner assembles a Runner (and the routing table it publishes into).
+//
+// auditRec may be nil: a CLI invocation gets its own recorder for the config
+// directory, so the lifecycle decisions it makes (`job run`, `svc stop`,
+// `svc reap`) land in the same stream as the gateway's.
+func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*runtime.Runner, *route.Table, error) {
 	storages, err := storage.Load(config.StoragesPath(configDir))
 	if err != nil {
 		return nil, nil, err
@@ -422,6 +427,9 @@ func buildRunner(configDir, toolsDir, user string) (*runtime.Runner, *route.Tabl
 		}
 	}
 
+	if auditRec == nil {
+		auditRec = audit.New(config.DataDir(configDir))
+	}
 	ports := portpool.New(0, 0)
 	routes := route.NewTable()
 	runner := runtime.NewRunner(runtime.Options{
@@ -430,6 +438,7 @@ func buildRunner(configDir, toolsDir, user string) (*runtime.Runner, *route.Tabl
 		User:      user,
 		Storages:  storages,
 		Routes:    routes,
+		Audit:     auditRec,
 		Backends: map[string]runtime.Backend{
 			"local": &runtime.Local{},
 		},
@@ -495,7 +504,7 @@ func runSvcStart(args []string) {
 		os.Exit(1)
 	}
 
-	runner, routes, err := buildRunner(*jf.configDir, root, user)
+	runner, routes, err := buildRunner(*jf.configDir, root, user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -541,7 +550,7 @@ func runSvcStop(args []string) {
 
 	t, root := mustLoadTool(*toolsDir, *configDir, *toolID)
 	user := resolveUser(*userFlag)
-	runner, _, err := buildRunner(*configDir, root, user)
+	runner, _, err := buildRunner(*configDir, root, user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -556,6 +565,10 @@ func runSvcStop(args []string) {
 	if err := runner.StopService(context.Background(), t, inst); err != nil {
 		fatalf("%v", err)
 	}
+	cliAudit(*configDir, operatorActor(), "instance.stopped", "instance", inst.ID, map[string]any{
+		"tool":  inst.Tool,
+		"owner": inst.User,
+	})
 	_ = runtime.WriteServiceManifest(*configDir, user, t.ID, nil)
 	fmt.Printf("stopped %s\n", inst.ID)
 }
@@ -593,7 +606,7 @@ func runSvcReconcile(args []string) {
 	parseFlagsLoose(fs, args, &positional)
 
 	user := resolveUser(*userFlag)
-	runner, routes, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user)
+	runner, routes, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -615,7 +628,7 @@ func runSvcReap(args []string) {
 	parseFlagsLoose(fs, args, &positional)
 
 	user := resolveUser(*userFlag)
-	runner, _, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user)
+	runner, _, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/sandbox"
@@ -401,4 +402,42 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// The platform's own lifecycle decisions are audited too: a task that finishes
+// records how it ended, so "what happened to this run" is answerable even when
+// the submit event is not the interesting one (ADR-024).
+func TestTaskCompletionIsAudited(t *testing.T) {
+	h := newHarness(t, "none", okScript, "")
+	dir := t.TempDir()
+	rec := audit.New(dir)
+	h.runner.opts.Audit = rec
+	defer rec.Close()
+
+	loaded := h.submit(t, "audit1", `{"schemaVersion":1,"name":"demo"}`)
+	inst, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.State != StateSucceeded {
+		t.Fatalf("state = %s", inst.State)
+	}
+
+	events, err := audit.Query(dir, audit.Filter{Action: "instance.done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("instance.done events = %d, want 1", len(events))
+	}
+	e := events[0]
+	if e.Actor.User != "alice" || e.Actor.Kind != audit.KindSystem {
+		t.Fatalf("actor = %+v, want alice/system", e.Actor)
+	}
+	if e.Target.ID != inst.ID {
+		t.Fatalf("target = %q, want %q", e.Target.ID, inst.ID)
+	}
+	if e.Params["state"] != "succeeded" {
+		t.Fatalf("params = %+v, want state=succeeded", e.Params)
+	}
 }

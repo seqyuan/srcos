@@ -125,6 +125,11 @@ type Options struct {
 	// task queue entirely (the deployment drains the drop-box by hand or from
 	// another process).
 	TaskWorkers int
+	// Audit is the shared audit recorder (ADR-024). The caller supplies it when
+	// it also handed the same recorder to the supervisor Runner it passes in, so
+	// the write path, the lifecycle decisions and the API all append to one
+	// stream. Nil means "build one from configDir", which is what a test wants.
+	Audit *audit.Recorder
 }
 
 // New creates a new Server from state config. configDir is where the shared
@@ -258,10 +263,13 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// disabled rather than half-working.
 	policy, _ := grants.(*grant.Policy)
 
-	// The structured audit stream (internal/audit). One recorder per process,
-	// shared with the API handler so the request path and the write path write
-	// to the same file.
-	auditRec := audit.New(config.DataDir(configDir))
+	// The structured audit stream (internal/audit). Share the caller's recorder
+	// when it gave one (so it also reached the supervisor's Runner); otherwise
+	// build one here. Either way there is exactly one per process.
+	auditRec := opts.Audit
+	if auditRec == nil {
+		auditRec = audit.New(config.DataDir(configDir))
+	}
 
 	apiOpts := api.Options{
 		ConfigDir:   configDir,

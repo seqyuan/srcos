@@ -124,6 +124,8 @@ var auditActions = []string{
 	"csrf", "auth", "scope",
 	"grant.set", "grant.remove", "grant.allow", "grant.deny", "group.set", "admins.set",
 	"token.create", "token.revoke",
+	"instance.done", "instance.settled", "instance.stopped",
+	"instance.reaped", "instance.adopted", "instance.orphaned",
 }
 
 func actionOptions(selected string) string {

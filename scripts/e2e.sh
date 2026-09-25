@@ -271,8 +271,9 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer
 AUDDIR="$DATA/audit"
 grep -rq '"action":"submit"' "$AUDDIR" 2>/dev/null || fail "no submit event in the audit stream"
 grep -rq '"action":"scope"' "$AUDDIR" 2>/dev/null || fail "no scope denial in the audit stream"
+grep -rq '"action":"instance.done"' "$AUDDIR" 2>/dev/null || fail "no instance.done (lifecycle) in the audit stream"
 "$BIN" audit list -d "$CFG" | grep -q 'submit' || fail "srcos audit list read nothing"
-pass "submit allow + scope deny recorded and readable"
+pass "submit allow + scope deny + instance.done recorded and readable"
 
 # ── 10. 管理端审计页 / API（仅管理员）──────────────────────────────
 step 10 "管理端审计流（/admin/audit + /api/admin/audit）"
