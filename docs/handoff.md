@@ -315,6 +315,7 @@ make test       # go test ./...
 make vet        # go vet ./...
 make fmt        # gofmt -w .
 make webui      # Phase 5 起；webui/ 未建时只提示，不阻断
+make e2e        # 端到端回归网：临时配置 + 临时端口，退出时清理（scripts/e2e.sh）
 
 # 提交前必须
 make vet && make test        # 涉及前端时另加 make webui

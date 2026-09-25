@@ -187,7 +187,7 @@ handoff 写"现在到哪了、下一步做什么、哪些坑踩过了"。**
 - Conventional Commits + 范围：`feat(tool):`、`fix(proxy):`、`docs(roadmap):`、`chore:`。一个提交一个逻辑变更。
 - `git add` 限定在本次变更的文件，**不要用 `git add -A` 扫入无关的工作区状态**。
 - 每个提交要能独立 build + test 通过。不通过就不是可提交状态。
-- 提交前跑：`make vet && make test`（涉及前端时另加 `make webui`）。
+- 提交前跑：`make vet && make test`（涉及前端时另加 `make webui`；改到执行链路时跑 `make e2e`）。
 
 ### 不要提交的东西
 
@@ -205,6 +205,7 @@ make test      # go test ./...
 make vet       # go vet ./...
 make fmt       # gofmt -w .
 make webui     # 构建独立前端包到 internal/web/dist/（Phase 5 起）
+make e2e       # 端到端回归网（临时配置+临时端口：提交→队列→执行→判定→日志→资源查看）
 ```
 
 ---

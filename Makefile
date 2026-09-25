@@ -4,7 +4,7 @@
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 
-.PHONY: build test vet fmt webui
+.PHONY: build test vet fmt webui e2e
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o srcos .
@@ -32,3 +32,8 @@ webui:
 	else \
 	  echo "webui/ 尚未建立，跳过前端构建"; \
 	fi
+
+# 端到端回归网：临时配置 + 临时端口跑通 提交→队列→执行→判定→日志→资源查看。
+# 需要本机有 bwrap（或用 SRCOS_E2E_SANDBOX=none）与 curl。
+e2e: build
+	bash scripts/e2e.sh
