@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-25（**Phase 5 全部完成**：`srcos://` 协议 + viewer、任务列表 + SSE 日志流、agent token 自助页、画布拖拽与 expose 推导；**MCP 第二期**完成（submit / cancel / run_flow）；**ADR-022 收尾**完成（任务队列消费者 + 任务以 systemd 瞬时 unit 运行，判定落文件）；**Phase 5.5 路 B** 落地（`integrations/dsh-plugin/`，在 dsh 里加载未验证）。本轮 8 个提交，`go vet` + `go test ./... -race` 全绿）
+> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0（T2→T5→T3→T4）与审计流（范围 A）推进中。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
 
 ---
 
@@ -41,12 +41,12 @@ sandbox HTML）、`/tasks`（实例列表 + 详情 + **SSE 实时日志**）、`
 
 **流程**：`flow run` 把「节点 × 样本」展开成普通任务，并发 / 重试 / 取消 / 续跑 / 配额 / 画布都通。
 
-**与 dsh 的互操作（路 B）**：`integrations/dsh-plugin/`（`@seqyuan/srcos-dsh`）把 SRCOS 注册成 dsh
-的资源协议（`dsh-resource://srcos/…` ⇄ `srcos://file/…` 一次前缀替换），只读、用 agent token；
-地址映射 / provider / 真实 REST 都用 Node 测过，**在 dsh 里实际加载尚未验证**（§3.3）。
+**dsh**：只保留一条已验证用法 —— 作为「本地优先应用」被网关代理（`docs/dsh-demo.md`）；
+曾经探索的「路 B」资源协议插件已于 2026-09-26 移除（未验证 + 逆向 developer preview +
+与自带 viewer 重叠，ADR-016）。`srcos://` 与 `dsh-resource://` 的地址同构作为协议特性保留。
 
-下一步：**在真实 dsh 里验证路 B**（或做路 A：把 dsh 注册成 service 工具），**Phase 6（SGE）**
-（需要一台真登录节点），或收尾 Phase 2/3 的几条（审计流、申请审批、`svc start` 进管理端）。
+下一步：**审计流**（结构化落盘 + 配置变更审计，范围 A）；**Phase 6（SGE）**（需要一台真登录节点）；
+或收尾 Phase 2/3 的几条（申请审批、`svc start` 进管理端）。
 
 ---
 
@@ -124,7 +124,6 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
-│ ✅ dsh 路 B：integrations/dsh-plugin（srcos 协议 + tab，未在 dsh 验证）│
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -163,10 +162,6 @@ UI 造起来便宜了 → UI 不再是护城河
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
-**在 dsh 里加载路 B 插件** —— 包、构建、地址映射、provider、真实 REST 全部就绪并已测（§2.2），
-但没有往任何 dsh profile 装过，所以「dsh 真的加载并渲染它」仍未验证（§3.3）。
-**路 A**（把 dsh 注册成 `kind: service` 工具、实例 workspace 指向 dsh 的 session cwd）一步未做。
-
 **审计流** —— 目前每个被接受的 agent 请求写一行网关日志，每次写入另有一行 `audit submit|cancel|run_flow`；
 但没有独立的审计流、没有结构化落盘、也没有「改配置」的审计（流程级审计同样缺）。
 
@@ -189,11 +184,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 
 | # | 做什么 | 为什么现在做 | 需要什么 |
 |---|---|---|---|
-| **12** | **在真实 dsh 里验证路 B**（装进一个 profile、加载、看协议与 tab 是否真的出现） | 插件已写完并测到位，只差「装一次」；不装就无法宣称路 B 可用 | **用户拍板装哪个 profile**（§3.2），或授权我在独立 profile 里做 |
-| **13** | **Phase 5.5 路 A**：把 dsh 注册成 `kind: service` 工具，实例 workspace 指向 dsh 的 session cwd | 路 B 已通，A 只差「一个 tool.yaml + workspace 映射」；两者叠加后 dsh 既是预览器又是 SRCOS 控制台（ADR-016） | 一台装了 dsh 的机器（node01 上有） |
-| **14** | **审计流**：结构化落盘（谁 / 何时 / 哪个版本的工具 / 什么参数 / 被拒原因）+ 配置变更审计 | 「可审计」是三个支柱之一，现在是散落的日志行；企业内场景会先问这个 | — |
-| **15** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
-| 16 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
+| **12** | **审计流（进行中，范围 A）**：结构化落盘（谁 / 何时 / 哪个版本的工具 / 什么参数 / 被拒原因）+ 配置变更审计 | 「可审计」是三个支柱之一，现在是散落的日志行；企业内场景会先问这个 | — |
+| **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
+| 14 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -202,16 +195,12 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | **真正的 SGE 登录节点主机名** | `backend: sge` 的全部实现细节（`qsub`/`qstat` 路径、共享盘挂载点、`ssh` 免密可行性）。要在那台机器上跑 `scripts/probe-env.sh` |
 | **`storages.yaml` 里除 `/Volumes/data` 外还要哪些根** | 目前只有 `data` → `/Volumes/data`（ro）。需要写区时得声明单独的项目目录 |
 | **Phase 1 首个真实用例选哪个**（dsh 3080 / shiny 3838 / RStudio 8787） | node01 上三个都在跑，可以直接用现状验证 spec，比继续造示例更贴近需求 |
-| **dsh 路 B 装进哪个 profile**（独立 `srcos-test` profile，还是正在用的 `web`） | 「dsh 真的加载它」这一步必须装一次；`web` 是你正在用的环境，我不擅自改。装完要重启 dsh，配置可以走 localStorage（不改 profile 配置） |
 
 ### 3.3 尚未被验证的假设
 
 - **`runc 1.2.4` + `rootlesskit` 能否做无 root 容器化** —— 两者都已安装且 `/etc/apparmor.d/runc` 的 userns
   profile 已存在，可能零配置可用。这是 ADR-014 的进阶方案，值得实测
 - **`prlimit` 路径下的 RSS 看门狗** —— RLIMIT 无法表达"每单元进程数"，超限只能靠外部轮询
-- **dsh 插件的 in-dsh 加载** —— `integrations/dsh-plugin/` 的逻辑与真实 REST 都已验过，但
-  没有装进任何 profile；dsh 是 developer preview，`src/client.js` 里用到的每个 API 都标了
-  它读到的是哪个源文件（`packages/client/...`），第一次装进 dsh 时以那份源码为准
 
 ---
 
@@ -298,7 +287,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | 006 | `work.sh` **必须同步阻塞**；`doneWhen` 探针是逃生口；不做 `qstat` 子作业跟踪 |
 | 007 | `backend` 由工具声明；`internal.executor: qsubsge` + `backend: sge` 是**非法组合**（SGE 禁嵌套 qsub） |
 | 008/018 | `interface` 必须**机器可读**，一份签名派生三个前端（MCP schema / 画布 / 表单） |
-| 011/016 | dsh 集成只借设计不借代码；三层策略（默认自带 viewer / 路 A iframe / **路 B 协议插件 ✅**），**先 B 后 A**；禁止把 dsh 变成硬依赖 |
+| 011/016 | dsh 集成只借设计不借代码；只保留「本地优先应用被代理」（已验证）；**路 B 插件已移除**（未验证 + 逆向 preview + 与自带 viewer 重叠）；禁止把 dsh 变成硬依赖 |
 | 014 | 不用需要 root 的工具（架构偏好）；`bwrap` 优先，`systemd-run --user` 限资源，`prlimit` 兜底 |
 | 015 | HPC 上**实例是 Job 不是 Pod**；资源交给 SGE；闲置回收默认关闭；共享 FS 当控制通道 + `ssh -L` 当数据通道 |
 | 017 | 定位：AI 平台的确定性执行后端；**必须**从 `interface` 自动生成 fallback 表单，否则"不管 UI"自相矛盾 |
@@ -429,16 +418,6 @@ env -i PATH=/tmp/fakebin HOME=/tmp SRCOS_USER=alice SRCOS_TOOLS_DIR=<tools> \
 # 记录里应出现 pid + pid_start；再另起一个同样 PATH 的进程 svc stop → 进程应真的消失
 ```
 
-### 验证 dsh 路 B 插件（不需要 dsh）
-
-```bash
-make dsh-plugin                       # = node build.mjs && node --test test/*.test.mjs
-# 19 个用例：地址前缀替换双向、provider 的帧语义（去重/失败帧/abort）、打包契约、装配（假 ctx）
-# 2 个 live 用例默认跳过；要对真实网关跑：
-sh integrations/dsh-plugin/test/live-run.sh     # 起临时网关 + read token（需要仓库根的 ./srcos）
-# 它自己会杀掉端口上的旧进程 —— 否则会对着上一次启动的旧二进制跑出假绿
-```
-
 ### 清理测试残留（容易漏）
 
 ```bash
@@ -520,10 +499,6 @@ internal/runtime/           编排层
   │                          ReconcileTasks：每 tick 结算失去等待者的任务，判定取 TaskProber）
   └ sge/                    SGE backend：qsub 翻译 / qstat -xml 解析 / rendezvous / ssh -L
 internal/route/             动态路由表（编排层与代理层唯一的耦合点；ParseTarget 只收环回端点）
-integrations/dsh-plugin/    dsh 路 B（`@seqyuan/srcos-dsh`）：srcos 协议 provider + 侧边栏 tab
-                            src/{address,config,api,provider}.js 是 Node 可测的纯逻辑；
-                            src/client.js 是 dsh 胶水（每个 API 标注了上游源文件）；
-                            build.mjs 拼 dsh 的 __ModuleLoader__ 信封（零 dsh 工具链）
 webui/                      管理端画布（Vite + React + TS，产物嵌入 internal/web/dist/）
                             拖动用指针捕获（node 上 pointerdown/move/up），坐标去抖 400ms 写 layout；补齐 expose 一键应用
 internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检测）+ 15 类注册期校验
@@ -564,14 +539,13 @@ scripts/probe-env.sh        无 root 环境探测
 
 ## 9. 待决策
 
-见 [`roadmap.md`](roadmap.md) §8（16 项）。其中与"下一步"直接相关的四条：
+见 [`roadmap.md`](roadmap.md) §8。其中与"下一步"直接相关的三条：
 
 | # | 问题 | 倾向 |
 |---|---|---|
 | 12 | 真正的 SGE 登录节点在哪？ | 阻塞 `backend: sge` 的细节；需要在那台机器上跑 `probe-env.sh` |
 | 13 | `runc` + `rootlesskit` 能否无 root 容器化？ | 值得实测（ADR-014 的进阶方案） |
 | 14 | Phase 1 首个真实用例用哪个（dsh / shiny / RStudio）？ | 三者都在 node01 上运行，建议直接用现状验证 |
-| 16 | **dsh 路 B 装进哪个 profile**（独立 `srcos-test` 还是正在用的 `web`）？ | 需要装一次才能验证「dsh 真的加载它」；`web` 是用户正在用的环境，建议独立 profile |
 
 ---
 
@@ -579,7 +553,7 @@ scripts/probe-env.sh        无 root 环境探测
 
 ```
 读 AGENTS.md、docs/roadmap.md、docs/handoff.md，然后从 handoff §3.1 的第 12 项
-（在真实 dsh 里验证路 B —— 需要先定装哪个 profile）或第 14 项（审计流）开始。
+（审计流，范围 A）开始。
 ```
 
 如果要继续做**已规划的**工作，说「继续」+ 指向 `handoff §3.1` 的编号即可。

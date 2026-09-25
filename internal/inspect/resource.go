@@ -50,8 +50,7 @@ type ResourceEntry struct {
 	Rel   string `json:"rel"`
 	IsDir bool   `json:"isDir"`
 	// Addr is the entry's own srcos:// address, so a client (a viewer, an agent,
-	// a dsh plugin) never has to compose one from scope + rel and guess the
-	// rules.
+	// a script) never has to compose one from scope + rel and guess the rules.
 	Addr    string    `json:"addr"`
 	Size    int64     `json:"size,omitempty"`
 	ModTime time.Time `json:"mtime,omitempty"`

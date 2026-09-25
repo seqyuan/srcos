@@ -12,8 +12,8 @@ import (
 )
 
 // This file is the HTTP spelling of the srcos:// protocol (ADR-011/016). The
-// answers come from package inspect, so the viewer page, this API and any
-// future dsh plugin resolve an address identically.
+// answers come from package inspect, so the viewer page and this API resolve an
+// address identically.
 //
 // Three endpoints, with a deliberate split:
 //
@@ -44,7 +44,7 @@ func resourceAddress(r *http.Request) (resource.Address, inspect.ResourceRequest
 // handleResource returns one address's metadata, or the list of browsable
 // scopes when no address is given.
 //
-// It is the answer a file browser, an agent or a future dsh plugin needs before
+// It is the answer a file browser, an agent or a script needs before
 // it fetches anything: the sandbox path, the size, the access mode, and which
 // viewer claims it.
 func (h *Handler) handleResource(w http.ResponseWriter, r *http.Request, username string) {

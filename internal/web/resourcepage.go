@@ -66,8 +66,8 @@ const resourceCSS = `<style>
 </style>`
 
 // This file renders the resource viewer (roadmap Phase 5). It is the platform's
-// own viewer — the "default" layer of ADR-016, which must work with no dsh, no
-// Node and no build step. Rendering is server-side and every page is a plain Go
+// own viewer — which must work with no external runtime, no Node and no build
+// step. Rendering is server-side and every page is a plain Go
 // template, exactly like the tool pages (ADR-012 keeps React for the canvas
 // alone).
 //

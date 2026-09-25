@@ -47,8 +47,8 @@ type Viewer struct {
 // Registry is an ordered set of viewers.
 //
 // It exists because "what is this file" must have exactly one answer, and the
-// answer must come from one place: the viewer page, the JSON API and the future
-// dsh plugin all ask this registry (ADR-016's 认领优先级).
+// answer must come from one place: the viewer page and the JSON API both ask
+// this registry (ADR-016's 认领优先级).
 type Registry struct {
 	viewers []Viewer
 }

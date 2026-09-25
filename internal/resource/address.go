@@ -3,14 +3,13 @@
 //
 // It is deliberately the shallow half: parsing and claiming are pure functions
 // with no filesystem and no HTTP, so the rules can be tested on their own and
-// reused by every front-end (the viewer page, the REST API, and the dsh plugin
-// of ADR-016's road B). Resolution — turning an address into a host path — lives
-// in package inspect, behind the one jail (AGENTS.md: Jail is the only path
-// resolution entry point).
+// reused by every front-end (the viewer page and the REST API). Resolution —
+// turning an address into a host path — lives in package inspect, behind the one
+// jail (AGENTS.md: Jail is the only path resolution entry point).
 //
 // The address syntax is intentionally isomorphic to dsh's
-// `dsh-resource://<protocol>/<scope>/<path>` (ADR-011/016, the "road D"
-// insurance): an adapter in either direction degrades to a string rewrite.
+// `dsh-resource://<protocol>/<scope>/<path>` (ADR-011/016): an adapter in either
+// direction degrades to a string rewrite.
 //
 //		srcos://<provider>/<scope>/<path>[?tool=<tool-id>]
 //

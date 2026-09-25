@@ -85,7 +85,7 @@
   `/api/flows/<id>/run`、`/api/resources`（+ `raw` / `html`）、`/api/tokens`、`/tools`、`/view`、
   `/tasks`、`/tokens`、`/assets/*`
 - 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
-- **资源协议与 viewer**（ADR-011/016 路 D）：`srcos://<provider>/<scope>/<path>`（与
+- **资源协议与 viewer**（ADR-011/016）：`srcos://<provider>/<scope>/<path>`（与
   `dsh-resource://` 同构）+ viewer 注册表 + `/view`（文本/Markdown/表格/图片/PDF/sandbox HTML/目录）
 - **任务与日志**：`/tasks` + `/tasks/<id>`（产物直链 `/view`）+ `/api/jobs/<id>/logs`（SSE 实时流）
 - **agent token 自助页**：`/tokens`（只给自己签、白名单只能收窄、**只认浏览器 session**）
@@ -95,8 +95,6 @@
   `run_flow`）+ `interface → JSON Schema` 派生
 - **流程画布**（Phase 5）：`/admin/flows/<id>/edit`（Vite+React 只在这一页加载）+ **拖拽摆放**
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
-- **dsh 路 B**（Phase 5.5）：`integrations/dsh-plugin/`（`@seqyuan/srcos-dsh`）把 SRCOS 注册成
-  dsh 的资源协议（地址前缀替换、tab 类型、面板体；零 dsh 工具链构建）
 
 **工程基线**
 
@@ -105,8 +103,7 @@
   `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
 - **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
-  `go vet` + `go test ./... -race` 全绿；`webui/`（889 行 TS/TSX）+ `integrations/dsh-plugin/`
-  （21 个 Node 用例）各自独立构建与测试
+  `go vet` + `go test ./... -race` 全绿；`webui/`（889 行 TS/TSX）独立构建与测试
 
 ### 2.2 尚未实现（**不要误以为有**）
 
@@ -115,9 +112,8 @@
 - ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
-- **dsh 路 B 的 in-dsh 加载**（包/构建/地址映射/provider/真实 REST 都已测，但没装进任何 profile）
 - 审计流（散落的日志行，没有结构化落盘与配置变更审计）；`storages` 的 rw 配额
-- `apptainer` sandbox；dsh 路 A（把 dsh 注册成 service 工具）
+- `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
@@ -126,11 +122,9 @@
 
 | # | 做什么 | 需要什么 |
 |---|---|---|
-| 12 | **在真实 dsh 里验证路 B**（装一次、加载、看协议与 tab 是否出现） | 用户拍板装哪个 profile（§8 #16） |
-| 13 | **Phase 5.5 路 A**：把 dsh 注册成 `kind: service` 工具，实例 workspace 指向 dsh session cwd | 装了 dsh 的机器（node01 有） |
-| 14 | **审计流**：结构化落盘 + 配置变更审计 | — |
-| 15 | **Phase 6 SGE**：真登录节点上 `probe-env.sh`，再接真集群 | 真登录节点主机名（§8 #12） |
-| 16 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | — |
+| 12 | **审计流**：结构化落盘 + 配置变更审计（**进行中**，范围 A） | — |
+| 13 | **Phase 6 SGE**：真登录节点上 `probe-env.sh`，再接真集群 | 真登录节点主机名（§8 #12） |
+| 14 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | — |
 
 ---
 
@@ -480,54 +474,28 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - **实现细节**：SGE 驱动用 `qsub`/`qstat`/`qdel` **命令行**而非 DRMAA（避免 CGO + `libdrmaa` 依赖），`qstat -xml` 解析比文本格式稳定。
 - **合规提醒**：HPC 登录节点通常禁止跑长驻重负载进程。`local` 驱动应只用于轻量工具或管理员明确的例外，重工具一律走 `sge`。
 
-### ADR-016：dsh 集成是「可选增强」而非「兼容问题」，分三层且 A/B 正交
-- **背景**：调研发现 dsh 有四个官方扩展点：① `package.json.dsh.bundle.patch` → `cordis.patch.yml`（第三方发布 bundle，按 id 插入/覆盖 composition 任意行）；② `dsh.profile.bundles`（有序堆叠 bundle + 用户 patch）；③ `package.json.dsh.client`（自动进浏览器 roster，host 经 `/plugins/<id>/client.js` 服务）；④ `dsh plugin --profile X add <pkg>`（官方 out-of-tree 安装）；且 `sdk-minimal` bundle 证明「不 apply `dsh-base` 的独立 bundle」被允许。
-- **决策**：分三层，**默认层不依赖 dsh**：
+### ADR-016：dsh 只保留「本地优先应用被代理」这一条已验证用法
 
-  | 层 | 做法 | 何时启用 |
-  |---|---|---|
-  | **默认** | SRCOS 自带 viewer（Phase 5） | 永远可用，零依赖 |
-  | **增强（路 A）** | dsh 作为 `kind: service` 工具实例，SRCOS 前端 iframe 嵌入 | 装了 Node 且管理员上架 dsh 工具 |
-  | **互操作（路 B）** | ✅ **已完成**（2026-09-25）：`integrations/dsh-plugin/` 发布 `@seqyuan/srcos-dsh`（`dsh.client` + 客户端侧 `ctx.resources.register` 注册 `srcos` protocol provider） | 独立议题，与上面两条不冲突；**in-dsh 加载尚未验证** |
-  | **保险（路 D）** | `srcos://` 与 `dsh-resource://` 地址语法同构 | 无条件，写 Phase 5 时顺手做 |
-
-- **关键洞察 —— A 与 B 正交且共享底层**：A 是 `srcos → dsh`（UI 集成，数据流是 SRCOS workspace → dsh session cwd），
-  B 是 `dsh → srcos`（API 集成，数据流是 dsh 经 REST/SSE 读 SRCOS 资源）—— **B 已实现**，
-  所以 A 只差「把 dsh 注册成工具 + workspace 指向 session cwd」。
-  两者共用**同一套 `srcos://` 地址协议 + REST/SSE API**，所以能同时选。
-  叠加后：路 A 跑起来的 dsh 实例装上路 B 的插件，就同时是**文件预览器 + SRCOS 控制台**；
-  而路 A 又给路 B 提供了天然的分发渠道。
-- **顺序**：**先 B 后 A** —— B 产出的 REST API + `srcos://` 协议是 A 的前置。
-- **路 A 零改造的关键**：让 dsh 的 session cwd 指向 SRCOS 的 workspace，
-  则 `ui-sidebar-files` 的树根与 `@deepseek-ai/dsh-api-workspace-files` 的 jail 边界正好落在 SRCOS workspace 上，
-  viewer 零适配。且 dsh 明确「binding all network interfaces is intentionally not supported」，**只绑回环**
-  —— 与 SRCOS「后端只监听回环」的安全模型天然一致（dsh 天生该待在 SRCOS 后面）。
-- **不做路 C**：定义 SRCOS 专用 dsh bundle/profile（用几十行 `disabled: true` 剥离 agent 栈）——
-  `dsh-base` 有 84 行、`web-app` 又插了几十行，剥离工作量与回归风险都大；
-  且 client shell（`ui-layout`/`ui-session`/`ui-renderer`/`ui-sidebar`）大概率假设 session 存在，纯预览是逆着设计走；
-  dsh 是 developer preview 且明示会有破坏性变更，不能进核心路径。
-- **禁止**：把 dsh 变成硬依赖。没有 dsh 时 SRCOS 必须照常工作（对齐 `ennote` 的 degraded 模式）。
-- **路 B 实现注记（2026-09-25，代码在 `integrations/dsh-plugin/`）** —— 读了 dsh 源码之后，
-  ADR 里几处**措辞要更正**，契约要记牢：
-  - **provider 注册在「客户端」而不是 Host**：契约是
-    `packages/client/resources/src/client/contract.ts` 的 `ResourceProvider`，注册进
-    `ctx.resources`（浏览器侧 Cordis 上下文）。ADR-016 原文写的「Host 侧 `ctx.resources.register`」
-    是当时未知 API 的猜测；真实的分工是「浏览器侧注册 provider，HTTP 直接打 SRCOS REST」。
-  - **地址只在 `dsh-resource://` 一种 scheme 下**：`protocolOf` 只认 `dsh-resource://<type>/…`
-    （host = 协议名），别的 scheme（含原生 `srcos://`）都不是资源地址。所以路 D 的同构落成
-    **一次前缀替换**：`srcos://file/a/b` ⇄ `dsh-resource://srcos/file/a/b`（保留 `file` 段，
-    为将来的 provider 留位）。插件额外用 `patterns: ['srcos://**']` 认领原生写法，方便粘贴。
-  - **失败必须是帧，不是 throw**：`RemoteResult<T> = {ok:true,value} | {ok:false,error}`，
-    `error` 是结构识别的 `RemoteError`（`{code,message,details,isDSHRemoteError:true}`），
-    code 必须在 `RemoteErrorDetailsMap` 里声明（本插件声明 `srcos/unsupported-address`、
-    `srcos/unreachable`、`srcos/missing`）。
-  - **客户端 bundle 的形态**：dsh 按 `exports["./client"]` **读字节**后挂在
-    `/plugins/<id>/client.js`（`packages/client/modules/src/index.ts`），文件本身要
-    `window.__ModuleLoader__.load({id, factory})`，导入经工厂的 `require` 走共享模块表
-    （`react` 在基线里）。因此**不需要 dsh 的构建工具链**：本插件用一个 ~90 行的
-    `build.mjs` 把普通 ESM 拼成那个信封，`src/*.js` 仍然是 `node --test` 能直接 import 的模块。
-  - **凭据是 agent token**：页面 origin 不是网关，session cookie 不会被带上；而且「程序用
-    token」本来就是 ADR-019 的答案。token 只读、可在 `/tokens` 撤销。
+- **背景**：dsh（DeepSeek Harness）是本项目最早的真实使用场景之一 —— 它是典型的本地优先应用
+  （只监听回环、带 Host/Origin 信任栅栏、前端依赖安全上下文 API），经网关代理即可在局域网使用，
+  `docs/dsh-demo.md` 有完整实测记录。此后探索过把 SRCOS 注册成 dsh 的资源协议（「路 B」：
+  `integrations/dsh-plugin/` 的 `@seqyuan/srcos-dsh`）。
+- **决策（路 B 已移除，2026-09-26）**：删除该插件。三条理由：
+  1. **从未验证** —— 没有装进任何 dsh profile，全部测试都用替身，所以「dsh 真的加载它」不成立；
+  2. **逆向 developer preview** —— dsh 明示会有破坏性变更，插件依赖的每个 API 都是读它当时源码得来的，
+     是高度脆弱的依赖；把它挂在路线图里等于把维护成本押在一个会动的靶子上；
+  3. **价值与自带 viewer 重叠** —— SRCOS 已有 `/view`（Phase 5），增量只有「不离开 agent 工作台」。
+  代码可从 git 历史 `93351fc` 恢复；若将来出现真实的 dsh 互操作需求，应以**锁定版本 + 真实验证**重建，
+  而不是让一个未验证的半成品挂在文档里冒充能力。
+- **保留**：
+  - **`srcos://` 地址语法与 `dsh-resource://` 同构**（原「路 D」）—— 这是**协议特性**，写在
+    `internal/resource` 里（纯解析，无 dsh 依赖），对脚本与工具自建 UI 同样有用。
+  - **dsh 作为本地优先应用被代理**（服务卡片）—— 已实测，是网关能力的真实证据；
+    同样的配置思路适用于 Jupyter / code-server 等只认回环的应用。
+- **不做路 A / 路 C**：原「路 A」（dsh 作为 `kind: service` 工具实例 + iframe 嵌入）一步未做，
+  且它退化成「任何应用都可以是 service 工具」，不需要单列；原「路 C」（为 SRCOS 定制 dsh
+  bundle/profile 剥离 agent 栈）回归风险大且逆着 dsh 的设计走。
+- **禁止**：把 dsh 变成硬依赖或核心路径。没有 dsh 时 SRCOS 必须照常工作（对齐 `ennote` 的 degraded 模式）。
 
 ### ADR-017：战略定位 —— AI 平台的确定性执行后端
 - **背景**：生信云平台可能势微，通用 AI 平台上升，但**确定性场景**（企业内部项目管理、非工程师使用、受控输入输出）有独立且持久的价值。
@@ -896,17 +864,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       列表服务端渲染（无 JS 也能看与撤），生成走 JSON API 以免明文进 URL；**只给自己签**、
       白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
 
-### Phase 5.5：dsh 集成（**路 B ✅ 2026-09-25**，路 A 未做）
-- [x] **路 B**（2026-09-25）：`integrations/dsh-plugin/` —— `@seqyuan/srcos-dsh`：`srcos` 协议
-      provider（元数据帧 + 轮询去重 + 失败帧）、侧边栏 tab 类型（认领 `dsh-resource://srcos/**`
-      与原生 `srcos://**`）、面板体（目录浏览 / 文本预览 / 失败原因），`build.mjs` 拼 dsh 的
-      `__ModuleLoader__` 信封（**不需要 dsh 工具链**）；SRCOS 侧顺带给目录条目加上自己的 `addr`
-      （客户端不必自己拼地址）。
-      **未验证**：在真实 dsh 里加载与渲染（没有往任何 profile 装过）—— 见 §8 与 handoff
-- [ ] **路 A**：把 dsh 注册成 `kind: service` 工具（`node: login`），
-      实例 workspace 指向 dsh session cwd；前端 iframe 嵌入 `/proxy/<user>/<dsh>/`
-- [ ] 验证 Origin 改写 / polyfill / WS 在真实 dsh 下工作（`docs/dsh-demo.md` 已提供前置经验）
-
 ### Phase 6：HPC / SGE
 - [ ] `sge` backend（`qsub` / `qstat -xml` / `qdel`）
 - [ ] rendezvous 文件协议 + `ssh -L` 隧道管理（含重连与回收）
@@ -932,8 +889,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | **SRCOS 作为 MCP Client**（去调工具自己的 MCP server） | 工具的执行契约是 `work.sh`，MCP 是接口协议，不同层（ADR-019） |
 | **为每个 SRCOS 注册用户建 OS 账号**（真实 UID 隔离） | 需要 root，与 ADR-014 冲突（ADR-021） |
 | **让 agent 直接改 workspace**（第一期） | 确定性执行 + 可审计优先（ADR-019） |
-| **把 dsh 变成硬依赖** | dsh 是可选增强，没装 Node 时 SRCOS 必须照常工作（ADR-016） |
-| **为 SRCOS 定制 dsh bundle/profile**（路 C） | 剥离 agent 栈的回归风险大，dsh 又是 developer preview（ADR-016） |
+| **把 dsh 变成硬依赖或核心路径** | dsh 只是「本地优先应用被代理」的一个已验证例子，没装 Node 时 SRCOS 必须照常工作（ADR-016） |
+| **逆向 developer preview 写集成插件** | 未验证 + 上游会破坏性变更 + 与自带 viewer 重叠（ADR-016；2026-09-26 移除路 B） |
 | 把 `type: path` 用于**环境**（conda / module / `.sif`） | 环境与数据要分开；`path` 只用于数据 storage（ADR-020/021） |
 
 ---
@@ -949,14 +906,12 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 5 | `Flow` 的 `expose` 是否需要"多比较组"模式（对齐 annopi 的 `${cmp.*}`）？ | 首版不做，只做样本维度 |
 | 6 | `storages.yaml` 的 `rw` 是否允许写共享盘？配额怎么做（XFS project quota / 单独卷 / 目录计数）？ | **数据盘是 ext4 不是 XFS → XFS project quota 排除**；倾向单独卷 + 目录计数（见 `docs/environments.md`） |
 | 7 | `task` 的 `doneWhen` 探针是否需要内置常见类型（`file_exists` / `dir_nonempty` / `exit_code`）？ | 是，先内置这三个，其余留给工具自己写 |
-| 8 | dsh 集成的 Phase 5.5 何时做？集群/登录节点 Node 可用性如何？ | 取决于实际部署环境，路 B 可先于路 A |
 | 9 | ~~MCP 第二期的 `submit` scope 粒度：按工具授权还是全局开关？~~ | ✅ **已决（2026-09-24）**：**工具 × 用户双维度** —— token 需 `submit` scope，`submit_tools` 白名单按工具收窄，owner 的 Grant 与配额仍是外层上界；实现见 ADR-019「第二期实现契约」 |
 | 10 | ~~**「不用 root」是架构偏好还是环境限制？**~~ | ✅ **已决（2026-09-22）**：架构偏好。docker 最多作可选 backend，不得成为 `local` 必需项 |
 | 11 | ~~**是否执行 bwrap 修复**（AppArmor profile）？~~ | ✅ **已执行并验证通过**（2026-09-22）；重跑 `scripts/probe-env.sh` 确认 |
 | 12 | **真正的 SGE 登录节点在哪？** 需要在它上面也跑一次 `scripts/probe-env.sh` | 阻塞 `backend: sge` 的全部实现细节 |
 | 13 | `runc 1.2.4` + `/etc/apparmor.d/runc` 已存在 → 是否能做无 root 容器化（ADR-014 的进阶方案）？ | 值得实测：`rootlesskit` + `runc` |
 | 14 | **Phase 1 首个真实用例用哪个**：dsh(3080) / shiny-server(3838) / RStudio(8787)？ | 它们已在 node01 上运行，建议直接用现状验证，而非另造 `hello-fanout` |
-| 16 | **dsh 路 B 装进哪个 profile 验证**（独立 `srcos-test`，还是用户正在用的 `web`）？ | 需要装一次才能验证「dsh 真的加载它」；`web` 是用户正在用的环境，**建议独立 profile**（配置可走 localStorage，不改 profile 配置） |
 | 15 | **`host_root` 可达性校验怎么做**：SRCOS 在注册 storage 时如何确认 OS 用户能读到（bind 不改变权限）？ | 倾向：注册时试读 + 报错时给 `setfacl` 建议（已实测 `setfacl -m u:$OS_USER:r-x` 有效） |
 
 ---
@@ -993,3 +948,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-25 | **Phase 5.5 路 B：`@seqyuan/srcos-dsh`**（`integrations/dsh-plugin/`）—— 读 dsh 源码后实现的 `srcos` 资源协议插件：地址前缀替换（`srcos://X` ⇄ `dsh-resource://srcos/X`）、provider 帧语义（去重/失败帧/abort）、侧边栏 tab 类型 + 面板体、`build.mjs` 拼 `__ModuleLoader__` 信封（零 dsh 工具链）；SRCOS 侧给目录条目加 `addr`；ADR-016 补「路 B 实现注记」（**provider 在客户端侧**与原文措辞的更正、失败帧形状、bundle 形态、token 而非 cookie）；验证：16 个 Node 单测 + `test/live-run.sh` 对真实网关跑通 REST（in-dsh 加载未验证） |
 | 2026-09-25 | 补 `integrations/dsh-plugin` 的**打包契约与装配测试**（替身 `__ModuleLoader__` 断言 dsh 会找的面、假 ctx 断言 `apply()` 注册 provider/tab/面板体），并加 `make dsh-plugin`；共 19 个 Node 用例 + 2 个 live（未配置网关自动跳过） |
 | 2026-09-25 | **本轮小结（8 个提交）**：Phase 5 收工（`srcos://` 协议 + 自带 viewer、任务列表 + SSE 日志流、agent token 自助页、画布拖拽与 expose 推导）→ MCP 第二期（submit / cancel / run_flow，`submit` scope 工具×用户双维度）→ 任务队列消费者（ADR-022，提交即自动执行）→ 任务改 systemd 瞬时 unit + 判定文件（重启后仍有真实退出码）→ Phase 5.5 路 B（`@seqyuan/srcos-dsh`）。全程 node01 实测（curl / Playwright / 官方 MCP SDK），`go vet` + `go test ./... -race` 全绿。**唯一没验的**：在真实 dsh 里加载路 B 插件（§8 #16） |
+| 2026-09-26 | **移除 dsh 路 B + 文档仓库卫生（技术债 P0）** —— 删除 `integrations/dsh-plugin/`（未验证 + 逆向 developer preview + 与自带 viewer 价值重叠；代码可从 git 历史 `93351fc` 恢复）与 `make dsh-plugin` 目标；**ADR-016 重写**为「dsh 只保留『本地优先应用被代理』这一条已验证用法」（`srcos://` 与 `dsh-resource://` 同构作为协议特性保留）；移除 Phase 5.5、待决策 #8/#16、下一步 #12/#13；goprox 时代的 7 份旧报告与 2 张截图归档到 `docs/archive/`（含 README 说明「不维护、不作为当前契约」） |

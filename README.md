@@ -794,7 +794,7 @@ srcos://<provider>/<scope>/<path>[?tool=<tool-id>]
 # 已声明 storage 里的文件
 /view?src=srcos%3A%2F%2Ffile%2Fshare%2Fref%2Fgenes.tsv
 
-# 同一份解析结果（脚本 / dsh 插件 / 工具自建 UI 可用）
+# 同一份解析结果（脚本 / 工具自建 UI 可用）
 curl -b cj 'http://<gateway>/api/resources?src=srcos%3A%2F%2Ffile%2Fhome%2Fnotes.md'
 curl -b cj -o out.tsv \
   'http://<gateway>/api/resources/raw?src=srcos%3A%2F%2Ffile%2Fshare%2Fref%2Fgenes.tsv'  # 字节（支持 Range）
@@ -1054,16 +1054,6 @@ srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑�
 - 保存写回 `flow.yaml`（校验通过才落盘），CLI 读到的就是画布画的同一份文件。
 - 前端是独立的 Vite 工程（`webui/`，ADR-012：**只有这一页**加载 React）：`make webui` 构建并嵌入二进制；
   没有 Node 的环境照样 `make build`，画布页会提示去构建，CLI 不受影响。
-
-### dsh 集成（可选，ADR-016）
-
-SRCOS 自带 viewer 与 `srcos://` 地址协议（见上），所以 dsh 集成是**可选增强**、不是兼容问题：
-`integrations/dsh-plugin/` 里的 `@seqyuan/srcos-dsh` 把 SRCOS 注册成 dsh 的一个资源协议
-（`dsh-resource://srcos/…` ⇄ `srcos://file/…` 一次前缀替换），于是能在 dsh 里浏览与预览网关上的
-home / 工作区 / 共享数据。它只读、用你自己的 agent token（在 `/tokens` 生成与撤销），
-构建只需 Node（不需要 dsh 的工具链）。安装与配置见该目录的 README。
-
-> 没有 dsh 时 SRCOS 一切照常 —— 这是硬约束（ADR-016）：**dsh 不是依赖**。
 
 ### 工具开发者
 
