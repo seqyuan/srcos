@@ -629,3 +629,37 @@ func TestToolViewHidesHostPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Requestable exposes existence without access: a tool a user cannot use but
+// may ask for shows up here, and one they already have does not (B3).
+func TestRequestableTools(t *testing.T) {
+	// demo: usable by everyone. web: usable by carol only, but requestable.
+	// other: no grant at all (not requestable).
+	p, err := grant.New(nil, nil, []grant.Grant{
+		{Tool: "demo", Public: true},
+		{Tool: "web", Users: []string{"carol"}, Requestable: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, p)
+	f.Requestable = p
+
+	got, err := f.RequestableTools("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "web" {
+		t.Fatalf("RequestableTools(bob) = %+v, want [web]", got)
+	}
+	// carol already has it: nothing to request.
+	if mine, err := f.RequestableTools("carol"); err != nil || len(mine) != 0 {
+		t.Fatalf("RequestableTools(carol) = %+v (%v), want empty", mine, err)
+	}
+
+	// Without a requestability source nothing is advertised.
+	f.Requestable = nil
+	if again, err := f.RequestableTools("bob"); err != nil || len(again) != 0 {
+		t.Fatalf("no policy should advertise nothing: %+v (%v)", again, err)
+	}
+}

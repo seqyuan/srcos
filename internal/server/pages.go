@@ -555,7 +555,19 @@ func (s *Server) reader() *inspect.Reader {
 		ToolsDir:  s.toolsDir,
 		Storages:  s.storages,
 		Grants:    s.grants,
+		// "Can this tool be requested?" is only answerable by the policy
+		// itself; a policy-less deployment advertises nothing for request (B3).
+		Requestable: requestabilityOf(s.grants),
 	}
+}
+
+// requestabilityOf narrows a grant checker to the requestability question, when
+// the concrete policy can answer it.
+func requestabilityOf(g api.GrantChecker) inspect.Requestability {
+	if p, ok := g.(*grant.Policy); ok {
+		return p
+	}
+	return nil
 }
 
 // visibleTools applies the grant filter through the shared read side.

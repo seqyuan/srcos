@@ -64,6 +64,14 @@ type Grants interface {
 	Allowed(username, toolID string) bool
 }
 
+// Requestability is the extra question the catalogue asks when it wants to
+// offer "request access" for a tool the user cannot use (B3). It is a separate
+// interface from Grants on purpose: a deployment with no policy (single user)
+// compiles unchanged, and the read side stays usable without one.
+type Requestability interface {
+	Requestable(toolID string) bool
+}
+
 // Reader answers the read-only questions for a deployment.
 //
 // It holds no state of its own: every call reads the filesystem, which is where
@@ -80,6 +88,10 @@ type Reader struct {
 	// Grants filters the catalogue. Nil means authorization is not wired (a
 	// single-user deployment) and every tool is visible.
 	Grants Grants
+	// Requestable answers whether a tool's *existence* may be shown to users who
+	// cannot use it, so they can ask for access (B3). Nil means "nothing is
+	// requestable", which is also the default when no policy is wired.
+	Requestable Requestability
 	// Viewers decides which viewer claims a srcos:// resource (ADR-016's
 	// registry). Nil uses the built-in first batch.
 	Viewers *resource.Registry
@@ -149,6 +161,34 @@ func (r *Reader) Tools(username string) ([]ToolView, error) {
 	for _, t := range manifests {
 		out = append(out, viewOf(t, r.storageViewsFor(t)))
 	}
+	return out, nil
+}
+
+// RequestableTools returns the tools a user cannot use but may ask for: the
+// administrator marked them requestable, and this user does not have them.
+//
+// It is deliberately a *separate* list from Tools — the catalogue shows what
+// you can run, this shows what you may ask to run; mixing them would blur
+// "authorized" and "advertised for requests".
+func (r *Reader) RequestableTools(username string) ([]ToolView, error) {
+	if r.Requestable == nil || r.ToolsDir == "" {
+		return nil, nil
+	}
+	manifests, err := tool.Discover(r.ToolsDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []ToolView
+	for _, t := range manifests {
+		if !r.Requestable.Requestable(t.ID) {
+			continue
+		}
+		if r.Grants != nil && r.Grants.Allowed(username, t.ID) {
+			continue // already usable: nothing to request
+		}
+		out = append(out, viewOf(t, nil))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
