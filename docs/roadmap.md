@@ -71,24 +71,42 @@
 
 - 工具契约：`tool.yaml` + 13 类注册期校验 + **机器可读 `interface`**（ADR-008/018）
 - 任务契约：`job.json` + **目录即队列** + 对工具的校验（参数子集、资源只能降、`doneWhen`）
-- 运行时：`Backend`/`Handle` 抽象；`local`（bwrap 沙箱 + `systemd-run --user` 限额，`prlimit` 兜底）
-  与 `sge`（qsub 翻译 / `qstat -xml` 解析 / rendezvous / `ssh -L`）两个 backend
-- 生命周期：`RunTask` / `StartService` / `StopService` / `Reconcile` / `Reaper`
+- 运行时：`Backend`/`Handle` 抽象；`local`（bwrap 沙箱；**task 与 service 都是 systemd 瞬时 unit**，
+  `prlimit` 兜底）与 `sge`（qsub 翻译 / `qstat -xml` 解析 / rendezvous / `ssh -L`）两个 backend
+- 生命周期：`RunTask` / `StartService` / `StopService` / `Reconcile` / `Reaper` / **`ReconcileTasks`**
+  （每 tick 结算失去等待者的任务；判定由 systemd 的 `ExecStopPost` 落下，见 ADR-022）
+- **任务队列消费者**（ADR-022）：提交即自动执行（启动冲刷 + 提交唤醒 + tick；认领互斥）
+- **写入面**（ADR-019 第二期）：`internal/execute` 是 `submit` / `cancel` / `run_flow` 的唯一实现，
+  REST 与 MCP 共用；授权 = scope × `submit_tools` × Grant 双维度 + 配额
 - 存储：`StorageProvider`（ADR-020 闭环：path 范围 == 已挂载 storage == `requires_storages`）
 - 路由与端口：动态路由表（非回环拒绝、归属栅栏）+ loopback 端口池（真 bind 探测）
 - 授权：`Grant`（**默认拒绝**、只有「允许」没有 deny、组/用户/public/通配、**聚合配额**）
-- HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`、`/tools`、`/tools/<id>`、`/assets/*`
+- HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs`（+ `/cancel`、`<id>/logs`）、
+  `/api/flows/<id>/run`、`/api/resources`（+ `raw` / `html`）、`/api/tokens`、`/tools`、`/view`、
+  `/tasks`、`/tokens`、`/assets/*`
 - 界面：**生成式表单**（从 `interface` 派生）+ **`srcos-path-picker` 原语控件**
+- **资源协议与 viewer**（ADR-011/016 路 D）：`srcos://<provider>/<scope>/<path>`（与
+  `dsh-resource://` 同构）+ viewer 注册表 + `/view`（文本/Markdown/表格/图片/PDF/sandbox HTML/目录）
+- **任务与日志**：`/tasks` + `/tasks/<id>`（产物直链 `/view`）+ `/api/jobs/<id>/logs`（SSE 实时流）
+- **agent token 自助页**：`/tokens`（只给自己签、白名单只能收窄、**只认浏览器 session**）
 - CLI：`tool` / `job` / `svc` / `grant` / `token` / `flow`（list/validate/run/resume/status）/
   `serve` / `user` / `passwd` / `del` / `2fa-reset` / `sso`
-- **MCP Server**（`/mcp`，read-only，agent token 认证）：9 个只读工具 + `interface → JSON Schema` 派生
+- **MCP Server**（`/mcp`，agent token 认证）：9 个只读工具 + 3 个写工具（`submit` / `cancel` /
+  `run_flow`）+ `interface → JSON Schema` 派生
+- **流程画布**（Phase 5）：`/admin/flows/<id>/edit`（Vite+React 只在这一页加载）+ **拖拽摆放**
+  （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
+- **dsh 路 B**（Phase 5.5）：`integrations/dsh-plugin/`（`@seqyuan/srcos-dsh`）把 SRCOS 注册成
+  dsh 的资源协议（地址前缀替换、tab 类型、面板体；零 dsh 工具链构建）
 
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
-- 建立 `AGENTS.md`（不变式与定位）+ 21 条 ADR + `docs/tool-spec.md`（契约冻结）
+- 建立 `AGENTS.md`（不变式与定位）+ **23 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
+  `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- 23 个包 / 约 3.6 万行 / 约 560 个测试用例 / 46 个测试文件，`go vet` + `go test` 全绿
+- **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
+  `go vet` + `go test ./... -race` 全绿；`webui/`（889 行 TS/TSX）+ `integrations/dsh-plugin/`
+  （21 个 Node 用例）各自独立构建与测试
 
 ### 2.2 尚未实现（**不要误以为有**）
 
@@ -97,17 +115,22 @@
 - ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
-- 审计日志；`storages` 的 rw 配额
-- `apptainer` sandbox；dsh 路 A（路 B 已落地，见 Phase 5.5；in-dsh 加载未验证）
+- **dsh 路 B 的 in-dsh 加载**（包/构建/地址映射/provider/真实 REST 都已测，但没装进任何 profile）
+- 审计流（散落的日志行，没有结构化落盘与配置变更审计）；`storages` 的 rw 配额
+- `apptainer` sandbox；dsh 路 A（把 dsh 注册成 service 工具）
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
 ### 2.3 下一步
 
-Phase 3.5（MCP）、代理层的动态路由、冷启动/自动回收、管理端、流程（含画布）、
-**`srcos://` 资源协议与自带 viewer**、**任务列表 + SSE 日志流**都已完成。
-Phase 5 到此收工。阶段 5.5 的路 B 已落地（见上）。下一步见 §6 与 [`handoff.md`](handoff.md) §3：**路 A**
-（把 dsh 注册成 `kind: service` 工具、实例 workspace 指向 dsh session cwd）、**在真实 dsh 里验证路 B**，
-或 **Phase 6（SGE）**。
+按 [`handoff.md`](handoff.md) §3.1 的顺序：
+
+| # | 做什么 | 需要什么 |
+|---|---|---|
+| 12 | **在真实 dsh 里验证路 B**（装一次、加载、看协议与 tab 是否出现） | 用户拍板装哪个 profile（§8 #16） |
+| 13 | **Phase 5.5 路 A**：把 dsh 注册成 `kind: service` 工具，实例 workspace 指向 dsh session cwd | 装了 dsh 的机器（node01 有） |
+| 14 | **审计流**：结构化落盘 + 配置变更审计 | — |
+| 15 | **Phase 6 SGE**：真登录节点上 `probe-env.sh`，再接真集群 | 真登录节点主机名（§8 #12） |
+| 16 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | — |
 
 ---
 
@@ -747,7 +770,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `Tool` / `RunUnit` / `Instance` 的 Go 类型定义 + `tool.yaml` 校验器（Phase 1）
 - [x] `job.json` 落盘扫描器（目录即队列）+ `srcos job submit/run/list/status/logs` CLI（Phase 1）
 - [x] `MountSpec` + `Jail` + **内建挂载**（`/workspace`、虚拟 `/home/<user>`）+ 模板初始化（Phase 1）
-- [x] `Backend` / `Handle` 抽象 —— 一个原语两个 flavor（task 用 systemd scope，service 用 systemd 瞬时 unit）
+- [x] `Backend` / `Handle` 抽象 —— 一个原语两个 flavor（2026-09-24 起 task 也用 systemd 瞬时 unit，见 ADR-022）
 - [x] `local` backend，含 cgroup（`systemd-run --user`）与 prlimit 降级路径
 - [x] **`kind: service` 全链路**：端口池 → 物化 → 启动 → 探活 → 发布路由
 - [x] **代理层接入动态路由表**（2026-09-22）：网关从 `data/instances/` 重建路由表
@@ -774,7 +797,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] **「启动中」进度页**（2026-09-22）：未就绪实例在浏览器里给出 503 + `Retry-After` +
       自动刷新的进度页（含日志末尾），失败/已停止给出 502 + 原因与日志 + 重启命令；
       程序客户端只拿状态码（按 `Accept: text/html` 区分）
-- [ ] `/api/paths` + `srcos-path-picker` 原语控件（provider 已就绪，缺 HTTP 面）
+- [x] `/api/paths` + `srcos-path-picker` 原语控件（Phase 3 完成）
 - [x] **`svc reap` 定时调度 + 启动 reconcile**（2026-09-22）：网关启动时 reconcile
       （收养活着的、标记死掉的），每次扫描 tick（10s）执行一次回收；
       `idleTTL` 改为按**流量**判定（代理写 `data/service-activity.yaml`，`Reaper.LastActive` 读），
@@ -933,6 +956,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 12 | **真正的 SGE 登录节点在哪？** 需要在它上面也跑一次 `scripts/probe-env.sh` | 阻塞 `backend: sge` 的全部实现细节 |
 | 13 | `runc 1.2.4` + `/etc/apparmor.d/runc` 已存在 → 是否能做无 root 容器化（ADR-014 的进阶方案）？ | 值得实测：`rootlesskit` + `runc` |
 | 14 | **Phase 1 首个真实用例用哪个**：dsh(3080) / shiny-server(3838) / RStudio(8787)？ | 它们已在 node01 上运行，建议直接用现状验证，而非另造 `hello-fanout` |
+| 16 | **dsh 路 B 装进哪个 profile 验证**（独立 `srcos-test`，还是用户正在用的 `web`）？ | 需要装一次才能验证「dsh 真的加载它」；`web` 是用户正在用的环境，**建议独立 profile**（配置可走 localStorage，不改 profile 配置） |
 | 15 | **`host_root` 可达性校验怎么做**：SRCOS 在注册 storage 时如何确认 OS 用户能读到（bind 不改变权限）？ | 倾向：注册时试读 + 报错时给 `setfacl` 建议（已实测 `setfacl -m u:$OS_USER:r-x` 有效） |
 
 ---
@@ -968,3 +992,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-24 | **画布：拖拽摆放 + `expose` 自动推导（ADR-023）** —— 坐标旁挂 `<flows>/<id>/layout.yaml`（不进契约、不跑校验、缺失即退回拓扑推导、只留现有节点）+ `PUT /api/admin/flows/<id>/layout`；编辑器视图带 `suggestedExpose`（与第 14 条闭环互补，写在同一个包）→ 画布一键补齐；前端改动见 `webui/src/{Canvas,layout,App}.tsx`（指针捕获拖动、去抖落盘、`touch-action: none`）；**顺带修正一处实现偏离**：校验的闭环原来忽略工具默认值（与 §2.6 原文及 `job.Validate` 不一致）；Playwright 验证：拖动 → 刷新后位置仍在、`layout.yaml` 有坐标而 `flow.yaml` 没有、补齐 expose → 草稿转合法 → 保存写回 |
 | 2026-09-25 | **Phase 5.5 路 B：`@seqyuan/srcos-dsh`**（`integrations/dsh-plugin/`）—— 读 dsh 源码后实现的 `srcos` 资源协议插件：地址前缀替换（`srcos://X` ⇄ `dsh-resource://srcos/X`）、provider 帧语义（去重/失败帧/abort）、侧边栏 tab 类型 + 面板体、`build.mjs` 拼 `__ModuleLoader__` 信封（零 dsh 工具链）；SRCOS 侧给目录条目加 `addr`；ADR-016 补「路 B 实现注记」（**provider 在客户端侧**与原文措辞的更正、失败帧形状、bundle 形态、token 而非 cookie）；验证：16 个 Node 单测 + `test/live-run.sh` 对真实网关跑通 REST（in-dsh 加载未验证） |
 | 2026-09-25 | 补 `integrations/dsh-plugin` 的**打包契约与装配测试**（替身 `__ModuleLoader__` 断言 dsh 会找的面、假 ctx 断言 `apply()` 注册 provider/tab/面板体），并加 `make dsh-plugin`；共 19 个 Node 用例 + 2 个 live（未配置网关自动跳过） |
+| 2026-09-25 | **本轮小结（8 个提交）**：Phase 5 收工（`srcos://` 协议 + 自带 viewer、任务列表 + SSE 日志流、agent token 自助页、画布拖拽与 expose 推导）→ MCP 第二期（submit / cancel / run_flow，`submit` scope 工具×用户双维度）→ 任务队列消费者（ADR-022，提交即自动执行）→ 任务改 systemd 瞬时 unit + 判定文件（重启后仍有真实退出码）→ Phase 5.5 路 B（`@seqyuan/srcos-dsh`）。全程 node01 实测（curl / Playwright / 官方 MCP SDK），`go vet` + `go test ./... -race` 全绿。**唯一没验的**：在真实 dsh 里加载路 B 插件（§8 #16） |
