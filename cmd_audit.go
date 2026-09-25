@@ -1,0 +1,202 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/seqyuan/srcos/internal/audit"
+	"github.com/seqyuan/srcos/internal/config"
+)
+
+// srcos audit ... reads the structured audit stream (data/audit/audit-*.jsonl).
+//
+// This is the read half of the audit surface: the gateway and the CLI write it
+// (who / when / which tool version / what params / allowed or denied), and this
+// command answers "what happened" without grepping a log file.
+func runAuditCmd(args []string) {
+	sub := "tail"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		args = args[1:]
+	}
+	switch sub {
+	case "tail":
+		runAuditTail(args)
+	case "list", "ls":
+		runAuditList(args)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown audit subcommand: %s\n", sub)
+		printAuditUsage()
+		os.Exit(1)
+	}
+}
+
+func printAuditUsage() {
+	fmt.Fprintln(os.Stderr, "usage: srcos audit <tail|list> [options]")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  tail [-n 20]             the most recent events, oldest first")
+	fmt.Fprintln(os.Stderr, "  list                     all matching events (filter below)")
+	fmt.Fprintln(os.Stderr, "      --user <name>        only this user's acts")
+	fmt.Fprintln(os.Stderr, "      --action <name>      submit | cancel | run_flow | login | csrf | scope | ...")
+	fmt.Fprintln(os.Stderr, "      --decision <d>       allow | deny")
+	fmt.Fprintln(os.Stderr, "      --since <when>       24h | 7d | 2h30m | RFC3339 (default: all)")
+	fmt.Fprintln(os.Stderr, "      --limit <n>          keep only the newest n after filtering")
+	fmt.Fprintln(os.Stderr, "      --json               raw JSON, one event per line")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Events live in data/audit/audit-YYYY-MM-DD.jsonl (append-only, 0600).")
+}
+
+func runAuditTail(args []string) {
+	fs := newFlagSet("audit tail")
+	configDir := configDirFlag(fs)
+	n := fs.Int("n", 20, "number of events")
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	events, err := audit.Tail(config.DataDir(*configDir), audit.Filter{}, *n)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	printAuditEvents(events, false)
+}
+
+func runAuditList(args []string) {
+	fs := newFlagSet("audit list")
+	configDir := configDirFlag(fs)
+	user := fs.String("user", "", "filter by user")
+	action := fs.String("action", "", "filter by action")
+	decision := fs.String("decision", "", "allow | deny")
+	since := fs.String("since", "", "e.g. 24h, 7d, or an RFC3339 timestamp")
+	limit := fs.Int("limit", 0, "keep only the newest n after filtering")
+	asJSON := fs.Bool("json", false, "raw JSON lines")
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	filter := audit.Filter{User: *user, Action: *action, Decision: *decision}
+	if *since != "" {
+		at, err := parseSince(*since)
+		if err != nil {
+			fatalf("--since: %v", err)
+		}
+		filter.Since = at
+	}
+	events, err := audit.Query(config.DataDir(*configDir), filter)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if *limit > 0 && len(events) > *limit {
+		events = events[len(events)-*limit:]
+	}
+	printAuditEvents(events, *asJSON)
+}
+
+// parseSince turns "7d" / "2h30m" / an RFC3339 timestamp into a cutoff time.
+func parseSince(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		if days, err := time.ParseDuration(strings.TrimSuffix(s, "d") + "h"); err == nil {
+			return time.Now().Add(-days * 24), nil
+		}
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("not a duration or RFC3339 timestamp: %q", s)
+}
+
+func printAuditEvents(events []audit.Event, asJSON bool) {
+	if len(events) == 0 {
+		fmt.Println("no audit events")
+		return
+	}
+	for _, e := range events {
+		if asJSON {
+			data, err := json.Marshal(e)
+			if err != nil {
+				fatalf("%v", err)
+			}
+			fmt.Println(string(data))
+			continue
+		}
+		fmt.Println(formatAuditEvent(e))
+	}
+}
+
+func formatAuditEvent(e audit.Event) string {
+	var b strings.Builder
+	b.WriteString(e.TS.Format(time.RFC3339))
+	b.WriteString("  ")
+	b.WriteString(fmt.Sprintf("%-5s", e.Decision))
+	b.WriteString("  ")
+	b.WriteString(e.Action)
+	b.WriteString("  ")
+	b.WriteString(auditActor(e.Actor))
+	if e.Target.ID != "" {
+		b.WriteString("  ")
+		b.WriteString(e.Target.Type)
+		b.WriteString(" ")
+		b.WriteString(e.Target.ID)
+		if e.Target.Version != "" {
+			b.WriteString("@" + e.Target.Version)
+		}
+	}
+	for _, k := range sortedKeys(e.Refs) {
+		b.WriteString("  " + k + "=" + e.Refs[k])
+	}
+	if e.Reason != "" {
+		b.WriteString("  reason: " + e.Reason)
+	}
+	if len(e.Params) > 0 {
+		var ps []string
+		for _, k := range sortedKeys(e.Params) {
+			ps = append(ps, k+"="+e.Params[k])
+		}
+		b.WriteString("  {" + strings.Join(ps, " ") + "}")
+	}
+	if e.Outcome != nil && !e.Outcome.OK && e.Outcome.Error != "" {
+		b.WriteString("  error: " + e.Outcome.Error)
+	}
+	return b.String()
+}
+
+func auditActor(a audit.Actor) string {
+	who := a.User
+	if who == "" {
+		who = "anonymous"
+	}
+	switch a.Kind {
+	case audit.KindAgentToken:
+		who += " (agent_token"
+		if a.TokenID != "" {
+			who += " " + a.TokenID
+		}
+		if a.Label != "" {
+			who += " " + a.Label
+		}
+		who += ")"
+	case audit.KindCLI:
+		who += " (cli)"
+	case audit.KindSystem:
+		who += " (system)"
+	}
+	return who
+}
+
+func sortedKeys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}

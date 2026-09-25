@@ -38,6 +38,8 @@ const usage = `Usage:
                                 agent / MCP surface): create | list | revoke
   srcos flow <cmd>             Inspect flows (the orchestration contract):
                                 list | validate
+  srcos audit <cmd>            Read the structured audit stream (who did what,
+                                which tool version, what params): tail | list
   srcos sso [options]          Show or configure lightweight SSO (identity
                                 header forwarded to backends; see below)
 
@@ -180,6 +182,10 @@ func main() {
 	}
 	if cmd == "flow" {
 		runFlowCmd(args)
+		return
+	}
+	if cmd == "audit" {
+		runAuditCmd(args)
 		return
 	}
 
