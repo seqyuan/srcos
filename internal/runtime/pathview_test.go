@@ -23,12 +23,12 @@ func TestPathViewEnvIncludesSRCOSAPI(t *testing.T) {
 	p := PathsFor("/cfg", "alice", "demo", "")
 	tl := &tool.Tool{ID: "demo", Version: "0.1.0"}
 
-	with := NewPathView(tool.SandboxBwrap, p, "http://127.0.0.1:30152/api").Env(tl, nil)
+	with := NewPathView(tool.SandboxBwrap, p, "http://127.0.0.1:30152/api", nil).Env(tl, nil)
 	if !envHas(with, "SRCOS_API=http://127.0.0.1:30152/api") {
 		t.Fatalf("SRCOS_API missing from %v", with)
 	}
 
-	without := NewPathView(tool.SandboxBwrap, p, "").Env(tl, nil)
+	without := NewPathView(tool.SandboxBwrap, p, "", nil).Env(tl, nil)
 	for _, kv := range without {
 		if strings.HasPrefix(kv, "SRCOS_API=") {
 			t.Fatalf("SRCOS_API must be absent when no gateway is known: %v", without)
@@ -40,7 +40,7 @@ func TestPathViewEnvIncludesSRCOSAPI(t *testing.T) {
 // platform defaults for the same key (a tool that sets PATH means it).
 func TestPathViewEnvAppendsToolEnvLast(t *testing.T) {
 	tl := &tool.Tool{ID: "demo", Version: "1", Env: []string{"PATH=/opt/x/bin:/usr/bin", "LANG=C.UTF-8"}}
-	env := NewPathView(tool.SandboxBwrap, PathsFor("/cfg", "alice", "demo", ""), "").Env(tl, nil)
+	env := NewPathView(tool.SandboxBwrap, PathsFor("/cfg", "alice", "demo", ""), "", nil).Env(tl, nil)
 
 	if !envHas(env, "PATH=/opt/x/bin:/usr/bin") || !envHas(env, "LANG=C.UTF-8") {
 		t.Fatalf("the tool's env did not reach the unit: %v", env)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
@@ -123,12 +124,30 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 			t.ID, t.RequiresStorages)
 	}
 
+	// The named environment: its root is mounted read-only (in mountSpec) and
+	// its variables go between the platform defaults and the tool's own. An
+	// undeclared reference is a hard error — the alternative is a unit that
+	// starts and then cannot find its interpreter.
+	var envEnv []string
+	if t.Environment != "" {
+		if r.opts.Environments == nil {
+			return nil, fmt.Errorf("tool %s declares environment %q but no environment provider is configured on this host",
+				t.ID, t.Environment)
+		}
+		e, ok := r.opts.Environments.Get(t.Environment)
+		if !ok {
+			return nil, fmt.Errorf("tool %s declares environment %q, which is not declared in %s",
+				t.ID, t.Environment, config.EnvironmentsPath(r.opts.ConfigDir))
+		}
+		envEnv = e.Env
+	}
+
 	paths := PathsFor(r.opts.ConfigDir, r.opts.User, t.ID, jobID)
 	if err := paths.EnsureDirs(t); err != nil {
 		return nil, err
 	}
 
-	view := NewPathView(t.Sandbox, paths, config.GatewayAPIBase(r.opts.ConfigDir))
+	view := NewPathView(t.Sandbox, paths, config.GatewayAPIBase(r.opts.ConfigDir), envEnv)
 
 	spec, err := r.mountSpec(t, paths)
 	if err != nil {
@@ -153,7 +172,21 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 
 // mountSpec builds the sandbox view for one unit.
 func (r *Runner) mountSpec(t *tool.Tool, p Paths) (*sandbox.Spec, error) {
-	return BuildSpec(t, p, r.opts.Storages)
+	spec, err := BuildSpec(t, p, r.opts.Storages)
+	if err != nil {
+		return nil, err
+	}
+	// The named environment's root: read-only, at its own host path. Added here
+	// rather than inside BuildSpec because the read side never resolves into it
+	// (see environment.MountsFor).
+	if t.Environment != "" && r.opts.Environments != nil {
+		if e, ok := r.opts.Environments.Get(t.Environment); ok {
+			if err := environment.MountsFor(spec, []environment.Environment{e}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return spec, nil
 }
 
 // BuildSpec is the mount table for one unit: builtin (workspace, virtual home,

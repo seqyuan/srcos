@@ -1,6 +1,9 @@
 # 统一的服务实例化 —— 设计
 
-> **状态:待确认(未实现)。** 日期 2026-09-26。
+> **状态:实现中。** 日期 2026-09-26。
+>
+> 进度:步骤 1(声明式 `command:`)✅ · 步骤 2/3(`environment:` 具名环境 + 沙箱装配 + shiny-demo 迁移)✅ ·
+> 其余(ingress 补齐 / `external` backend / content digest / 文档收尾)待做。
 > 目标服务类型:R Shiny / Python Shiny / Jupyter / dsh(+ RStudio,见 §2.5)。
 >
 > 相关:ADR-002(backend 与 isolation 正交)、ADR-003(一个运行原语)、

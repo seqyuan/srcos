@@ -1,0 +1,53 @@
+# SRCOS 具名环境声明（EnvironmentProvider）
+#
+# 复制为 config/environments.yaml 后生效。缺失时视为"没有具名环境"，这是合法的：
+# 引用了 `environment:` 的工具会在启动时**明确报错**，而不是找不到解释器。
+#
+# ── 它解决什么 ──────────────────────────────────────────────────────────
+#
+# 解释器与依赖装在**这台机器**的哪里，是**管理端的事实**，不是工具的属性。
+# 工具只写 `environment: r-miniforge`；这里说那是什么意思。否则每个工具包都要
+# 抄一份 `/Volumes/data/pmo/miniforge3`，换一台机器就得改工具包。
+#
+# ── 两条硬要求（违反了工具会以误导性的方式失败）────────────────────────
+#
+# 1. root 会**按宿主路径本身**只读挂进沙箱（不做重定位）。
+#    解释器内部到处用绝对路径：实测 R 的启动脚本引用
+#    /Volumes/data/…/bin/sed，把前缀挂到别的路径会让它报 "not found"。
+#    所以 root 必须是**真实路径**：如果它是符号链接（例如 /pmo →
+#    /Volumes/data/pmo），写真实路径，不要写链接。
+#
+# 2. 只读挂载：这是【环境】，不是【数据】。用户能选的路径走 storages.yaml
+#    （见 AGENTS.md：环境与数据要分开）。
+#
+# ── env 的顺序 ──────────────────────────────────────────────────────────
+#
+# 单元的最终环境是：平台默认 → 本环境 → 工具自己的 env:
+# 所以工具可以覆盖环境，环境可以覆盖平台默认。若声明了 PATH，它**必须**包含
+# /opt/srcos/bin —— 那是平台自己的二进制目录，也是工具找到 SRCOS 挂载的东西的
+# 唯一途径（注册期会校验这一点）。
+#
+# ── provides ────────────────────────────────────────────────────────────
+#
+# 必须是 <root>/bin 下的可执行文件名。它们把"R 装了但没有 shiny"从运行时的
+# 意外变成注册期的警告（实测：PATH 上先找到的那个 /usr/bin/R 没有 shiny）。
+
+environments:
+  - id: r-miniforge
+    name: "R 4.4 (miniforge)"
+    root: /Volumes/data/pmo/miniforge3
+    env:
+      - "PATH=/opt/srcos/bin:/Volumes/data/pmo/miniforge3/bin:/usr/local/bin:/usr/bin:/bin"
+      # 沙箱是干净环境：没有 locale 时 R 解析中文标签会报
+      # "unable to translate ... to native encoding"。C.UTF-8 由 glibc 自带。
+      - "LANG=C.UTF-8"
+      - "LC_ALL=C.UTF-8"
+    provides: [R, Rscript]
+
+  - id: py-3.11
+    name: "Python 3.11 (conda)"
+    root: /opt/conda/envs/py311
+    env:
+      - "PATH=/opt/srcos/bin:/opt/conda/envs/py311/bin:/usr/local/bin:/usr/bin:/bin"
+      - "LANG=C.UTF-8"
+    provides: [python3, jupyter, shiny]

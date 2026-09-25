@@ -15,6 +15,7 @@ import (
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
@@ -44,6 +45,14 @@ func runToolCmd(args []string) {
 	parseFlagsLoose(fs, args, &positional)
 
 	root := resolveToolsDir(*toolsDir, *configDir)
+	// The environment provider answers "is this tool's `environment:` declared
+	// here" — a declaration check, so it works on a host that cannot run that
+	// environment (CI has no R). Whether *this* machine can run it is a warning.
+	envPath := config.EnvironmentsPath(*configDir)
+	envs, err := environment.Load(envPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
 
 	switch sub {
 	case "list":
@@ -62,7 +71,7 @@ func runToolCmd(args []string) {
 
 	case "validate":
 		if len(positional) > 0 {
-			validateOneTool(positional[0])
+			validateOneTool(positional[0], envs, envPath)
 			return
 		}
 		tools, err := tool.Discover(root)
@@ -74,7 +83,7 @@ func runToolCmd(args []string) {
 			return
 		}
 		for _, t := range tools {
-			validateOneTool(t.Dir)
+			validateOneTool(t.Dir, envs, envPath)
 		}
 		fmt.Printf("\n%d tool(s) valid under %s\n", len(tools), root)
 
@@ -86,7 +95,7 @@ func runToolCmd(args []string) {
 
 // validateOneTool loads a tool and reports its contract plus whether the
 // declared sandbox can actually run on this host.
-func validateOneTool(dir string) {
+func validateOneTool(dir string, envs environment.Provider, envPath string) {
 	t, err := tool.Load(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -109,9 +118,26 @@ func validateOneTool(dir string) {
 		} else {
 			fmt.Printf("     sandbox  ready (%s)\n", why)
 		}
+	} else {
+		fmt.Printf("     sandbox  NOT usable: %s\n", why)
+	}
+
+	// The named environment: referencing one that is not declared is a
+	// declaration-level error (host-independent, so CI catches it); not being
+	// reachable on this host is a warning.
+	if t.Environment == "" {
 		return
 	}
-	fmt.Printf("     sandbox  NOT usable: %s\n", why)
+	e, ok := envs.Get(t.Environment)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "     environment  %s: NOT declared in %s\n", t.Environment, envPath)
+		fmt.Fprintf(os.Stderr, "\u2192 copy config/environments.example.yaml to %s and declare it there\n", envPath)
+		os.Exit(1)
+	}
+	fmt.Printf("     environment  %s (%s)\n", e.ID, e.Root)
+	for _, problem := range environment.CheckOne(e) {
+		fmt.Printf("     \u26a0  %s\n", problem)
+	}
 }
 
 // sandboxStatus reports whether the declared sandbox can run here, returning
@@ -433,6 +459,19 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 		}
 	}
 
+	// Named environments (interpreter / dependency trees). A tool that
+	// references one which is not declared here fails at start; whether this
+	// host can actually run it is a warning, like storages.
+	environments, err := environment.Load(config.EnvironmentsPath(configDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	if checker, ok := environments.(environment.ReachabilityChecker); ok {
+		for _, problem := range checker.CheckReachable() {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", problem)
+		}
+	}
+
 	if auditRec == nil {
 		auditRec = audit.New(config.DataDir(configDir))
 	}
@@ -445,13 +484,14 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 	ports := portpool.New(0, 0)
 	routes := route.NewTable()
 	runner := runtime.NewRunner(runtime.Options{
-		ConfigDir:   configDir,
-		ToolsDir:    toolsDir,
-		User:        user,
-		Storages:    storages,
-		Routes:      routes,
-		Audit:       auditRec,
-		AgentTokens: runtimeTokens,
+		ConfigDir:    configDir,
+		ToolsDir:     toolsDir,
+		User:         user,
+		Storages:     storages,
+		Environments: environments,
+		Routes:       routes,
+		Audit:        auditRec,
+		AgentTokens:  runtimeTokens,
 		Backends: map[string]runtime.Backend{
 			"local": &runtime.Local{},
 		},

@@ -35,6 +35,7 @@ import (
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/flow"
 	"github.com/seqyuan/srcos/internal/flowrun"
 	"github.com/seqyuan/srcos/internal/grant"
@@ -84,6 +85,9 @@ type Options struct {
 	FlowsDir string
 	// Storages is the StorageProvider the runtime mounts.
 	Storages storage.Provider
+	// Environments resolves a tool's `environment:` to a host prefix and its
+	// variables (config/environments.yaml).
+	Environments environment.Provider
 	// Grants is the policy. Nil means every tool is usable.
 	Grants Grants
 	// Supervisor stops instances: the gateway's own runner, which owns the
@@ -616,12 +620,13 @@ func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
 		return nil, fmt.Errorf("%w: no tool directory is configured", ErrUnavailable)
 	}
 	return runtime.NewRunner(runtime.Options{
-		ConfigDir: c.opts.ConfigDir,
-		ToolsDir:  c.opts.ToolsDir,
-		User:      user,
-		Storages:  c.opts.Storages,
-		Audit:     c.opts.Audit,
-		Backends:  map[string]runtime.Backend{"local": &runtime.Local{}},
+		ConfigDir:    c.opts.ConfigDir,
+		ToolsDir:     c.opts.ToolsDir,
+		User:         user,
+		Storages:     c.opts.Storages,
+		Environments: c.opts.Environments,
+		Audit:        c.opts.Audit,
+		Backends:     map[string]runtime.Backend{"local": &runtime.Local{}},
 	}), nil
 }
 

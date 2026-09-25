@@ -316,11 +316,16 @@ type PathView struct {
 	// APIBase is where SRCOS's own REST API is reachable from inside the unit
 	// (SRCOS_API). Empty means "no gateway is known from here".
 	APIBase string
+	// EnvBase is the named environment's variables. They sit between the
+	// platform defaults and the tool's own `env:` — so a tool can override an
+	// environment, and an environment can override the platform.
+	EnvBase []string
 }
 
-// NewPathView builds the view for a sandbox mode. apiBase may be empty.
-func NewPathView(mode tool.Sandbox, p Paths, apiBase string) PathView {
-	return PathView{Degraded: mode == tool.SandboxNone, Paths: p, User: p.User, APIBase: apiBase}
+// NewPathView builds the view for a sandbox mode. apiBase and envBase may be
+// empty.
+func NewPathView(mode tool.Sandbox, p Paths, apiBase string, envBase []string) PathView {
+	return PathView{Degraded: mode == tool.SandboxNone, Paths: p, User: p.User, APIBase: apiBase, EnvBase: envBase}
 }
 
 func (v PathView) Workspace() string {
@@ -408,6 +413,9 @@ func (v PathView) Env(t *tool.Tool, j *job.Job) []string {
 	if v.APIBase != "" {
 		out = append(out, "SRCOS_API="+v.APIBase)
 	}
+	// The named environment's variables, then the tool's own: a tool may
+	// override an environment, an environment the platform defaults.
+	out = append(out, v.EnvBase...)
 	// The tool's declared environment goes last so it wins over the defaults
 	// above (a tool that sets PATH means it — e.g. R living in a miniforge
 	// prefix). Reserved keys are refused at registration.

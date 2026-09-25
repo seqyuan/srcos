@@ -77,6 +77,15 @@ func InstanceTokensPath(configDir string) string {
 	return filepath.Join(DataDir(configDir), "agent-tokens.yaml")
 }
 
+// EnvironmentsPath is the admin-declared interpreter/dependency trees
+// (config/environments.yaml).
+//
+// Declaration state, like storages.yaml: where R or a conda env lives on this
+// host is the administrator's fact, not the tool package's.
+func EnvironmentsPath(configDir string) string {
+	return filepath.Join(configDir, "environments.yaml")
+}
+
 // ServiceActivityPath is the proxy-written record of when each service
 // instance was last used.
 //

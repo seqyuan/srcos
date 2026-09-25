@@ -1186,6 +1186,16 @@ command: ["jupyter", "lab", "--no-browser", "--ip", "127.0.0.1", "--port", "${SR
 `${SRCOS_*}` 由 SRCOS 从本单元自己的环境展开（值就是它注入的那些），argv **直接 exec、不经 shell**。
 需要循环/条件/多进程时再退回 `entry: work.sh`（两者恰好给一个）。
 
+**解释器/依赖用 `environment:` 引用**，不要在工具包里写宿主路径 ——
+那个路径是管理端在 `config/environments.yaml` 里声明的事实（同 `storages` 之于数据）：
+
+```yaml
+environment: r-miniforge          # 管理端声明 root / PATH / provides
+```
+
+它的 `root` 只读挂进沙箱（按宿主路径本身，因为解释器内部用绝对路径），`env` 插在
+平台默认与工具自己的 `env:` 之间。换机器只改 `environments.yaml`，工具包不变。
+
 只交付命令 + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
 想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。
 

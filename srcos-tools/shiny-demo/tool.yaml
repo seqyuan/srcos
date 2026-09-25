@@ -17,22 +17,10 @@ command:
   - "-e"
   - "shiny::runApp('${SRCOS_WORKSPACE}', host='127.0.0.1', port=${SRCOS_PORT}, launch.browser=FALSE)"
 
-# R 来自 miniforge 前缀。它**不在**系统路径（/usr、/bin）里，沙箱必须显式挂进来。
-# 注意用**真实路径**：/pmo 是指向 /Volumes/data/pmo 的符号链接，而 R 的启动脚本
-# 内部引用的就是真实路径（挂 /pmo 会报 `.../bin/sed: not found`）。
-# 粒度=可见范围：只挂这一个前缀，不挂它的父目录。
-# 换机器时改这里（对齐 hello-fanout 对 `ata` 的做法）。
-ro_mounts:
-  - host: /Volumes/data/pmo/miniforge3
-    sandbox_path: /Volumes/data/pmo/miniforge3
-
-# 沙箱的 PATH 是契约（/opt/srcos/bin 在前），R 不在里面；显式把它的 bin 加进去。
-# LANG/LC_ALL：沙箱是干净环境，没有 locale 时 R 会把中文标签报成
-# "unable to translate to native encoding"。C.UTF-8 由 glibc 自带，不需额外文件。
-env:
-  - "PATH=/opt/srcos/bin:/Volumes/data/pmo/miniforge3/bin:/usr/local/bin:/usr/bin:/bin"
-  - "LANG=C.UTF-8"
-  - "LC_ALL=C.UTF-8"
+# 解释器来自**具名环境**：宿主路径（R 装在哪儿）写在 config/environments.yaml，
+# 不再写进工具包 —— 这样工具包换一台机器不用改。环境的 root 只读挂进沙箱，
+# 且按宿主路径本身挂（解释器内部用绝对路径），PATH/LANG 也由它提供。
+environment: r-miniforge
 
 interface:
   inputs:

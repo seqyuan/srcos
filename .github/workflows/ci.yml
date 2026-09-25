@@ -33,9 +33,15 @@ jobs:
       - name: build (no frontend bundle)
         run: make build
       # The example tools are part of the contract: a manifest that stops
-      # validating should fail CI, not the first person to try it.
+      # validating should fail CI, not the first person to try it. A tool may
+      # reference a named environment; CI declares it from the example so the
+      # reference resolves (the host cannot run it — that is a warning, not a
+      # failure: declaration and reachability are different questions).
       - name: validate example tools
-        run: ./srcos tool validate --tools-dir srcos-tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/srcos-ci/config"
+          cp config/environments.example.yaml "$RUNNER_TEMP/srcos-ci/config/environments.yaml"
+          ./srcos tool validate -d "$RUNNER_TEMP/srcos-ci/config" --tools-dir srcos-tools
 
   e2e:
     name: end-to-end (degraded sandbox)

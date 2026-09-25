@@ -13,6 +13,7 @@ import (
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -46,6 +47,9 @@ type Options struct {
 	ToolsDir string
 	// Storages is the StorageProvider behind /api/paths.
 	Storages storage.Provider
+	// Environments resolves a tool's `environment:` (config/environments.yaml).
+	// It is handed to the write path so a submission's runner can mount it.
+	Environments environment.Provider
 	// Grants filters the catalogue and gates execution. Nil means "authorization
 	// is not wired" (a single-user deployment); the server substitutes a
 	// deny-by-default policy when a grants file is expected but absent.
@@ -107,13 +111,14 @@ func NewHandlerWithOptions(registry *config.UserRegistry, sessionSecret string, 
 		// write must be serialized across requests, so it cannot be rebuilt per
 		// call.
 		opts.Execute = execute.New(execute.Options{
-			ConfigDir:  opts.ConfigDir,
-			ToolsDir:   opts.ToolsDir,
-			FlowsDir:   opts.FlowsDir,
-			Storages:   opts.Storages,
-			Grants:     opts.Grants,
-			Supervisor: opts.Runner,
-			Audit:      opts.Audit,
+			ConfigDir:    opts.ConfigDir,
+			ToolsDir:     opts.ToolsDir,
+			FlowsDir:     opts.FlowsDir,
+			Storages:     opts.Storages,
+			Environments: opts.Environments,
+			Grants:       opts.Grants,
+			Supervisor:   opts.Runner,
+			Audit:        opts.Audit,
 		})
 	}
 	return &Handler{

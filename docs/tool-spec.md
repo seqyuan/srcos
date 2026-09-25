@@ -83,6 +83,11 @@ ro_mounts:                          # 可选，只读环境挂载（宿主真实
   - { host: /opt/conda,           sandbox_path: /opt/conda }
   - { host: /share/ref/GRCh38,    sandbox_path: /ref/GRCh38 }
 
+# 解释器/依赖从哪来：引用 config/environments.yaml 里的一个具名环境。
+# root 按宿主路径本身只读挂进沙箱（解释器内部用绝对路径），它的 env 插在
+# 平台默认与工具自己的 env: 之间。宿主路径因此不再写进工具包。
+environment: r-miniforge
+
 # 启动方式：`command` 与 `entry` **二选一**。
 #
 # command：声明式 argv，**直接 exec、不经 shell**。`${NAME}` 从本单元自己的
@@ -513,6 +518,21 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 `/etc` 下的白名单文件），否则 bubblewrap 无法创建挂载点。工具自带二进制请用
 `/opt/srcos/bin/<name>`（沙箱 `PATH` 第一项）。
 
+**推荐用 `environment:` 而不是手写 `ro_mounts` + `env:`。** 宿主路径是**管理端的事实**，不是
+工具的属性；写进工具包就意味着换一台机器要改工具包（包变成这台机器的副本）。两者同构：
+
+| | `requires_storages`（数据） | `environment`（环境） |
+|---|---|---|
+| 声明处 | 管理端 `storages.yaml` | 管理端 `config/environments.yaml` |
+| 工具侧 | `requires_storages: [id]` | `environment: id` |
+| 挂载 | `host_root` → `sandbox_path`（可不同） | `root` → **同一路径**（解释器内部用绝对路径） |
+| 环境变量 | — | 环境的 `env:` 插在平台默认与工具 `env:` 之间 |
+| 注册期断言 | 声明的 storage 必须存在 | `provides: [R, Rscript]` 必须可执行 |
+| 宿主不可达时 | 警告 + 启动硬失败 | 警告 + 启动硬失败 |
+
+`ro_mounts` + `env:` 仍保留为**逃生口**（单机、临时、工具自带二进制）。
+完整示例与三条硬要求见 [`config/environments.example.yaml`](../config/environments.example.yaml)。
+
 ### 5.4.2 HTTP 面（工具 UI 与 agent 共用）
 
 平台把工具契约和路径浏览暴露成三个只读 GET 与一个提交 POST。工具自建 UI 直接调它们即可，
@@ -627,6 +647,8 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `id` 全局唯一且合法 | 拒绝注册 |
 | `command` 与 `entry` **恰好给一个**（都给/都不给都不行） | 拒绝注册 |
 | `command[0]` 非空；`${...}` 只能引用 SRCOS 给这个 `kind` 注入的变量，括号必须闭合 | 拒绝注册（错在注册时，不是运行时） |
+| `environment` 必须是 `config/environments.yaml` 里已声明的 id | 拒绝注册（机器无关，所以 CI 能拦） |
+| `environment` 的 `root` 在本机不可读 / `provides` 缺失 | **警告**（不阻断）；启动实例时硬失败 |
 | `kind: service` 必须有 `ingress` + `lifecycle` | 拒绝注册 |
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |

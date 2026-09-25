@@ -529,6 +529,8 @@ internal/audit/             结构化审计流水（Event/Actor/Target/Request/O
                             data/audit/audit-YYYY-MM-DD.jsonl；按天轮转、nil no-op、参数脱敏）
   ├ forward.go              外发：Sink（HTTPSink）+ Forwarder（本地 spool → 按序发送 → 上限丢弃计数）
 internal/accessrequest/     工具访问申请的数据层（data/requests/*.yaml；幂等、状态机、原子写）
+internal/environment/       具名环境 provider（config/environments.yaml）：root 按宿主路径只读挂载 +
+                            env 插在平台与工具之间 + provides 注册期断言；与 storage 同构
 internal/runtime/usage.go   资源快照（systemd cgroup / /proc）—— UnitSampler 后端接口
 internal/rate/              令牌桶限速（登录 + 带宽）
 

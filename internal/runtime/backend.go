@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/audit"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/sandbox"
@@ -204,6 +205,10 @@ type Options struct {
 	// Nil means this host cannot host agents: a tool that declares `agent` fails
 	// loudly rather than starting without a credential.
 	AgentTokens AgentTokenIssuer
+	// Environments resolves a tool's `environment:` to a host prefix and its
+	// variables. Nil means this deployment declares none, and a tool that
+	// references one then fails loudly.
+	Environments environment.Provider
 }
 
 // AgentTokenIssuer is the credential lifecycle a hosted agent needs (A1).

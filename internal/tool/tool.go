@@ -111,6 +111,12 @@ type Tool struct {
 	// revoked when it ends.
 	Agent *AgentSpec `yaml:"agent,omitempty"`
 
+	// Environment is the id of a named environment declared in
+	// config/environments.yaml: where the interpreter and its libraries live on
+	// *this* host. Naming it instead of writing host paths keeps the tool
+	// package portable.
+	Environment string `yaml:"environment,omitempty"`
+
 	// Dir is the tool package directory this manifest was loaded from. It is
 	// not part of tool.yaml.
 	Dir string `yaml:"-"`
@@ -508,6 +514,14 @@ func (t *Tool) Validate() error {
 			bad("internal.executor: qsubsge with backend: sge is illegal — " +
 				"most SGE sites forbid nested qsub, so a submitter must run on the login node (backend: local)")
 		}
+	}
+
+	// ── environment ──────────────────────────────────────
+	// Only the shape is checkable here; "is it declared in
+	// config/environments.yaml" needs the deployment, and is answered where a
+	// provider is available (tool validate, and the unit's prepare).
+	if t.Environment != "" && !idRe.MatchString(t.Environment) {
+		bad("environment %q must match %s (an id declared in config/environments.yaml)", t.Environment, idRe)
 	}
 
 	// ── entry / command ─────────────────────────────────────
