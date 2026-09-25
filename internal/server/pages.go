@@ -11,6 +11,7 @@ import (
 )
 
 import (
+	"github.com/seqyuan/srcos/internal/accessrequest"
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/api"
 	"github.com/seqyuan/srcos/internal/audit"
@@ -304,7 +305,28 @@ func (s *Server) handleToolsPage(w http.ResponseWriter, r *http.Request) {
 		sendHTML(w, 500, web.NotFoundPage(s.siteTitle))
 		return
 	}
-	sendHTML(w, 200, web.ToolsPage(s.siteTitle, username, tools))
+	// Tools the user cannot use but may ask for (B3). A read failure here must
+	// not hide the tools they *can* use, so it is logged and the list is empty.
+	requestable, rerr := s.reader().RequestableTools(username)
+	if rerr != nil {
+		log.Printf("[srcos] requestable tools: %v", rerr)
+	}
+	sendHTML(w, 200, web.ToolsPage(s.siteTitle, username, tools, requestable))
+}
+
+// handleRequestsPage shows a user their own access requests and their outcome.
+func (s *Server) handleRequestsPage(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.requireUserPage(w, r)
+	if !ok {
+		return
+	}
+	reqs, err := accessrequest.ListFor(s.dataDir(), username)
+	if err != nil {
+		log.Printf("[srcos] requests: %v", err)
+		sendHTML(w, 500, web.NotFoundPage(s.siteTitle))
+		return
+	}
+	sendHTML(w, 200, web.RequestsPage(s.siteTitle, username, reqs))
 }
 
 // handleToolFormPage renders a tool's generated form.

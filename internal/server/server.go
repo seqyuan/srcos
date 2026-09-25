@@ -514,7 +514,8 @@ func (s *Server) Handler() http.Handler {
 	// Tool catalogue and the generated fallback form (ADR-017).
 	mux.HandleFunc("/tools", s.handleToolsPage)
 	mux.HandleFunc("/tools/", s.handleToolFormPage)
-
+	// A user's own access requests and their outcome (B3).
+	mux.HandleFunc("/requests", s.handleRequestsPage)
 	// The built-in resource viewer (srcos:// + the first batch of viewers,
 	// ADR-011/016). A page, not JSON, because it is the platform's own fallback
 	// UI and must work with JavaScript disabled.

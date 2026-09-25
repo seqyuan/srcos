@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -21,33 +22,85 @@ import (
 // any per-surface work (ADR-018).
 
 // ToolsPage lists the tools a user may use.
-func ToolsPage(siteTitle, username string, tools []*tool.Tool) string {
-	if len(tools) == 0 {
-		return PageShell(siteTitle, "工具", `<main class="wrap">
-  <h1>工具</h1>
-  <p class="muted">当前没有已注册且对你授权的工具。</p>
-  <p class="muted">管理员可以查看 <code>docs/tool-spec.md</code> 了解如何注册一个工具。</p>
-</main>`)
-	}
-
+func ToolsPage(siteTitle, username string, tools []*tool.Tool, requestable []inspect.ToolView) string {
 	var b strings.Builder
-	b.WriteString(`<main class="wrap"><h1>工具</h1><div class="cards">`)
-	for _, t := range tools {
-		kind := string(t.Kind)
-		if t.Description == "" {
-			t.Description = t.Name
+	b.WriteString(`<main class="wrap"><h1>工具</h1>`)
+
+	if len(tools) == 0 {
+		b.WriteString(`<p class="muted">当前没有已注册且对你授权的工具。</p>`)
+		if len(requestable) == 0 {
+			b.WriteString(`<p class="muted">管理员可以查看 <code>docs/tool-spec.md</code> 了解如何注册一个工具。</p></main>`)
+			return PageShell(siteTitle, "工具", b.String())
 		}
-		fmt.Fprintf(&b, `<a class="card" href="/tools/%s">
+	} else {
+		b.WriteString(`<div class="cards">`)
+		for _, t := range tools {
+			kind := string(t.Kind)
+			if t.Description == "" {
+				t.Description = t.Name
+			}
+			fmt.Fprintf(&b, `<a class="card" href="/tools/%s">
   <div class="card-head"><span class="card-name">%s</span><span class="badge">%s</span></div>
   <div class="card-desc">%s</div>
   <div class="card-meta">%s v%s · backend=%s · sandbox=%s</div>
 </a>`,
-			esc(t.ID), esc(t.Name), esc(kind), esc(t.Description),
-			esc(t.ID), esc(t.Version), esc(string(t.Backend)), esc(string(t.Sandbox)))
+				esc(t.ID), esc(t.Name), esc(kind), esc(t.Description),
+				esc(t.ID), esc(t.Version), esc(string(t.Backend)), esc(string(t.Sandbox)))
+		}
+		b.WriteString(`</div>`)
 	}
-	b.WriteString(`</div></main>`)
+
+	// Tools the user cannot use but may ask for (B3). A separate section on
+	// purpose: "you can run this" and "you may ask for this" are different
+	// facts, and blending them would misrepresent what the catalogue is.
+	if len(requestable) > 0 {
+		b.WriteString(toolsRequestableSection(requestable))
+		b.WriteString(toolsRequestScript)
+	}
+	b.WriteString(`</main>`)
 	return PageShell(siteTitle, "工具", b.String())
 }
+
+func toolsRequestableSection(rs []inspect.ToolView) string {
+	var b strings.Builder
+	b.WriteString(`<h2 style="margin-top:34px">可申请的工具</h2>`)
+	b.WriteString(`<p class="muted">管理员开放了这些工具的申请：你现在没有权限，但可以提交一个申请，由管理员审批。`)
+	b.WriteString(`已有的申请与结果见 <a href="/requests">我的申请</a>。</p><div class="cards">`)
+	for _, t := range rs {
+		desc := t.Description
+		if desc == "" {
+			desc = t.Name
+		}
+		fmt.Fprintf(&b, `<div class="card">
+  <div class="card-head"><span class="card-name">%s</span><span class="badge">可申请</span></div>
+  <div class="card-desc">%s</div>
+  <div class="card-meta">%s v%s</div>
+  <button type="button" class="btn" style="margin-top:10px" onclick="reqAsk('%s')">申请访问</button>
+</div>`, esc(t.Name), esc(desc), esc(t.ID), esc(t.Version), esc(t.ID))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+// toolsRequestScript posts a request and sends the user to their list, where
+// the outcome will appear.
+const toolsRequestScript = `<script>
+function reqAsk(tool) {
+  var reason = prompt('申请 ' + tool + ' 的访问权限，请说明用途：');
+  if (reason === null) { return; }
+  fetch('/api/requests', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tool: tool, reason: reason})
+  }).then(function(r) {
+    return r.json().catch(function(){ return {}; }).then(function(d) {
+      if (!r.ok) { alert(d.error || ('HTTP ' + r.status)); return; }
+      location.href = '/requests';
+    });
+  });
+}
+</script>`
 
 // ToolFormPage renders a form for one tool, built entirely from its interface.
 func ToolFormPage(siteTitle, username string, t *tool.Tool, storages []storage.Storage) string {
