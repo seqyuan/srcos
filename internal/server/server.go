@@ -169,7 +169,21 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	if mcpVersion == "" {
 		mcpVersion = "dev"
 	}
+	// The routing table is the one place the orchestration layer and the proxy
+	// meet: the supervisor publishes endpoints into it and this proxy reads
+	// them (ADR-003). They must be the *same* table — a proxy reading a table
+	// nobody writes makes every service unreachable. Derive it from the runner
+	// when the caller passed none, and say so if the caller passed a different
+	// one, so the two cannot silently drift.
 	routes := opts.Routes
+	if opts.Supervisor != nil {
+		if own := opts.Supervisor.Options().Routes; own != nil {
+			if routes != nil && routes != own {
+				log.Printf("[srcos] Options.Routes is not the supervisor's routing table; using the supervisor's (the one that gets written)")
+			}
+			routes = own
+		}
+	}
 	if routes == nil {
 		routes = route.NewTable()
 	}
