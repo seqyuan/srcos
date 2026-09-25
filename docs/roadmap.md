@@ -97,7 +97,7 @@
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
   `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
-  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）
+  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）
 
 **工程基线**
 
@@ -116,7 +116,7 @@
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
-- 审计流的第二期：防篡改（hash chain / 签名）（管理端查询页、生命周期审计、保留策略已做）
+- ~~审计流第二期~~ —— ✅ **完成**（2026-09-26）：管理端查询页（`/admin/audit` + `/api/admin/audit`）+ 生命周期跃迁审计 + 保留策略（`srcos audit prune`）+ hash chain（`srcos audit verify`）；仅真实签名未做
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
@@ -733,7 +733,13 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - **生命周期跃迁**（`internal/runtime`）：`instance.done`（任务终态）、`instance.settled`
   （重启后凭判定文件结算）、`instance.reaped`（回收，带 reason）、`instance.orphaned` / `instance.adopted`
   （reconcile）、`instance.stopped`（管理端强制停 / CLI `svc stop`）—— actor 是该实例的用户、kind=system。
-- **不做（仍待）**：防篡改（hash chain / 签名）。
+- **不做（仍待）**：真实签名（外部信任锚）；hash chain 已做（见下）。
+- **防篡改（hash chain，第二期收尾）**：每行带 `prev`/`hash`（`hash = SHA-256(prev + 该行字节)`），
+  **每文件**一条链（不跨文件 —— 保留策略会合法删掉整天文件，跨文件链会被正常 prune 打断）。
+  `srcos audit verify` 与管理页横幅都校验：能发现改行 / 删行 / 乱序 / 剥掉链字段；**不能**证明
+  某个整文件从未被删除，也挡不住能重写全部文件的人。
+- **实现要点（e2e 抓到的真 bug）**：网关与 CLI 是**两个进程**同时写同一日文件，各持一条链必断；
+  所以每次追加要 `flock` + 重读文件尾再串链 —— 链属于文件，不属于进程。
 - **为什么不是数据库 / 不是消息队列**：与「文件系统即数据库」一致（AGENTS.md）。
   一行一个 JSON 的文本流能被 `grep`、`jq`、`rsync`，也能在十年后被读懂；
   审计的可用寿命比任何查询 API 都长。
@@ -1000,3 +1006,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **审计流第二期（1/4）：管理端查询页** —— `/admin/audit`（服务端渲染，GET 筛选表单：user/action/decision/since，最新在前；仅管理员，非管理员 403）+ `GET /api/admin/audit`（同一 `audit.Query`，脚本化）；`web.AuditPage`（自带样式块，与 admin 页同风格）+ 导航入口；`audit.ParseSince` 下沉供 CLI 与 API 共用。e2e 第 10 步：管理员登录 → API 返回 deny → 页面渲染 → 非管理员 403。剩：防篡改 / 生命周期审计 / 保留策略 |
 | 2026-09-26 | **审计流第二期（2/4）：生命周期跃迁审计** —— `runtime.Options.Audit`；记录 `instance.done`（任务终态）、`instance.settled`（重启后凭 verdict 结算）、`instance.reaped`（回收 + reason）、`instance.orphaned`/`instance.adopted`（reconcile）、`instance.stopped`（管理端强制停 + CLI svc stop）；actor = 实例用户、kind=system；一个进程一个 Recorder（main.go 建，传给 supervisor 与 server）。e2e 断言 instance.done；runtime 单测锁定。剩：防篡改 / 保留策略 |
 | 2026-09-26 | **审计流第二期（3/4）：保留策略** —— `audit.Stale`/`audit.Prune`/`audit.ParseKeep` + `srcos audit prune --keep 90d [--dry-run]`；**显式、不自动**（删除审计是运维的决定，不是 tick 的副作用；`keep<=0` 不删任何东西），删除这件事本身记 `audit.prune`（谁、keep、删了几个、oldest/newest）。单测锁定「只删过期整天文件」与 keep=0 no-op。剩：防篡改 |
+| 2026-09-26 | **审计流第二期（4/4）：防篡改 hash chain** —— 每行 `prev`/`hash`（SHA-256(prev+该行字节)），**每文件**一条链；`srcos audit verify` + `/admin/audit` 横幅；能发现改行/删行/乱序/剥链字段，不能证明整文件未删、挡不住重写全部文件。**e2e 抓到的真 bug**：网关与 CLI 两个进程各持自己的「上一行」，交错写同一日文件链必断 —— 改为每次追加 `flock` + 重读文件尾（链属于文件不属于进程），单测 `TestChainSurvivesInterleavedRecorders` 锁定。审计流第二期完成；仅真实签名未做 |

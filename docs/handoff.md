@@ -166,11 +166,13 @@ UI 造起来便宜了 → UI 不再是护城河
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
-**审计流** —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）：`internal/audit` 把「谁 / 何时 /
+**审计流** —— ✅ **第一期与第二期完成**（2026-09-26，ADR-024）：`internal/audit` 把「谁 / 何时 /
 哪个版本的工具 / 什么参数 / 允许还是拒绝」写进 `data/audit/audit-YYYY-MM-DD.jsonl`（只追加、
-按天轮转、参数脱敏），`srcos audit tail|list` 读；覆盖写入面（submit/cancel/run_flow）、
-拒绝事件（CSRF/未认证/只读试写）与配置变更（grant/group/admins/token，API 与 CLI 两条门）。
-**剩**：防篡改（hash chain）（管理端查询页、生命周期审计、保留策略已做）。
+按天轮转、参数脱敏）；写入面（submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、
+配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/
+orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `/admin/audit`（+ API）。
+防篡改：每文件 hash chain（`srcos audit verify`，多进程串链靠 flock + 重读文件尾）。
+保留：`srcos audit prune --keep 90d`（显式）。**仅真实签名（外部信任锚）未做。**
 
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。

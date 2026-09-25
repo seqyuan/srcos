@@ -31,6 +31,8 @@ func runAuditCmd(args []string) {
 		runAuditList(args)
 	case "prune":
 		runAuditPrune(args)
+	case "verify":
+		runAuditVerify(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown audit subcommand: %s\n", sub)
 		printAuditUsage()
@@ -54,6 +56,32 @@ func printAuditUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  prune --keep 90d         remove whole day-files older than the retention window")
 	fmt.Fprintln(os.Stderr, "      --dry-run            show what would be removed")
+	fmt.Fprintln(os.Stderr, "  verify                   check the per-file hash chain (non-zero exit if broken)")
+}
+
+func runAuditVerify(args []string) {
+	fs := newFlagSet("audit verify")
+	configDir := configDirFlag(fs)
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	problems, err := audit.Verify(config.DataDir(*configDir))
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(problems) == 0 {
+		fmt.Println("ok: every chained line verifies")
+		return
+	}
+	for _, p := range problems {
+		where := p.File
+		if p.Line > 0 {
+			where = fmt.Sprintf("%s:%d", p.File, p.Line)
+		}
+		fmt.Printf("%s  %s\n", where, p.Reason)
+	}
+	fmt.Printf("\n%d problem(s)\n", len(problems))
+	os.Exit(1)
 }
 
 func runAuditPrune(args []string) {

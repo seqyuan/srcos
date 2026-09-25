@@ -983,13 +983,19 @@ srcos serve -d /opt/srcos/config --no-task-drainer
 ./srcos audit list --json | jq .               原始 JSON（喂给日志 / 审计系统）
 ./srcos audit prune --keep 90d                 删除 90 天前的整天文件（显式；删除本身也入流）
 ./srcos audit prune --keep 90d --dry-run       只看会删什么
+./srcos audit verify                           校验每文件 hash 链（异常时非零退出）
 ```
 
 审计写在 `data/`（运行态）而不是 `config/`（声明态）—— 备份配置不该连审计一起带走。
 管理员也可以直接在浏览器里看：**`/admin/audit`**（服务端渲染 + GET 筛选，与 CLI 同一份查询，
 仅管理员），或脚本化地读 **`GET /api/admin/audit`**（`?user=&action=&decision=&since=&limit=`）。
-防篡改（hash chain）属于后续。保留策略是**显式**的 `srcos audit prune --keep 90d`
-（`keep=0` 不删任何东西；删除这件事本身也记一条 `audit.prune`）——不会自动删除。记录里除提交与配置变更外，还包括**平台自己做的决定**：
+**防篡改**：每行带 `prev`/`hash`，每个日文件自成一条链；`srcos audit verify`（或 `/admin/audit`
+顶部的横幅）会重算并报出异常位置。它能发现改行 / 删行 / 乱序 / 剥掉链字段，**不能**证明某个整
+文件从未被删除（保留策略会合法地删整天文件），也挡不住能重写全部文件的人 —— 只是“这个文件
+没被就地改过”，不是“这台机器可信”。真实签名（外部信任锚）属于后续。
+
+**保留策略**是**显式**的 `srcos audit prune --keep 90d`（`keep=0` 不删任何东西；删除这件事
+本身也记一条 `audit.prune`）——不会自动删除。记录里除提交与配置变更外，还包括**平台自己做的决定**：
 任务终态、重启后结算、空闲回收与服务被停（actor 是该实例的用户、kind 为 system）。
 
 ## 管理控制台（`/admin`，仅管理员）

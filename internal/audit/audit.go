@@ -19,8 +19,11 @@ package audit
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,6 +94,31 @@ type Event struct {
 	Outcome  *Outcome          `json:"outcome,omitempty"`
 	// Refs names the things an investigator follows: job / instance / run.
 	Refs map[string]string `json:"refs,omitempty"`
+
+	// Prev is the previous line's Hash in the same day-file (empty at the start
+	// of a file), and Hash is chainHash over this event with Hash cleared.
+	//
+	// The chain is per-file on purpose: retention deletes whole day-files, so a
+	// chain that crossed files would be broken by ordinary pruning. What it
+	// proves is that *this file* was not edited or re-ordered after the fact —
+	// not that a whole file was never removed. See Verify.
+	Prev string `json:"prev,omitempty"`
+	Hash string `json:"hash,omitempty"`
+}
+
+// chainHash is the tamper-evidence link: SHA-256 over the previous line's hash
+// and this event's own bytes. Marshaling is deterministic (struct field order),
+// so the verifier recomputes it the same way.
+func chainHash(e Event) string {
+	e.Hash = ""
+	data, err := json.Marshal(e)
+	if err != nil {
+		// Cannot happen for this struct; refuse to produce a chain link that
+		// would not verify rather than emit a wrong one.
+		return ""
+	}
+	sum := sha256.Sum256(append([]byte(e.Prev+"\x00"), data...))
+	return hex.EncodeToString(sum[:])
 }
 
 // NewEvent starts an event that is allowed unless it is marked Deny.
@@ -190,11 +218,20 @@ func isSensitive(key string) bool {
 //
 // A nil *Recorder is valid and records nothing, so callers can hold one
 // unconditionally.
+// Recorder appends events to data/audit/audit-YYYY-MM-DD.jsonl.
+//
+// A nil *Recorder is valid and records nothing, so callers can hold one
+// unconditionally.
+//
+// Each append opens the day-file, takes an exclusive lock, re-reads its tail to
+// learn the current chain head, then writes — because more than one process
+// appends to the same file (the gateway, and a CLI invocation running
+// alongside it). Two writers chaining from their own idea of "the last line"
+// would break the chain; the lock makes the chain global to the file rather
+// than to the process.
 type Recorder struct {
-	dir  string
-	mu   sync.Mutex
-	file *os.File
-	day  string
+	dir string
+	mu  sync.Mutex
 	// warned suppresses repeat logging when the sink is unwritable.
 	warned bool
 }
@@ -213,9 +250,9 @@ func (r *Recorder) Dir() string {
 	return r.dir
 }
 
-// Record appends one event. It is safe for concurrent use, on a nil receiver,
-// and never returns an error: an audit failure must not take down the act it
-// was describing.
+// Record appends one event. It is safe for concurrent use and for multiple
+// processes, on a nil receiver, and never returns an error: an audit failure
+// must not take down the act it was describing.
 func (r *Recorder) Record(e Event) {
 	if r == nil {
 		return
@@ -223,59 +260,82 @@ func (r *Recorder) Record(e Event) {
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
 	}
-	line, err := json.Marshal(e)
-	if err != nil {
-		r.warn("marshal: %v", err)
-		return
-	}
-	line = append(line, '\n')
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := r.writeLocked(e.TS, line); err != nil {
+	if err := r.appendLocked(e); err != nil {
 		r.warn("%v", err)
 	}
 }
 
-// writeLocked appends to today's file, rotating when the day changes.
-func (r *Recorder) writeLocked(ts time.Time, line []byte) error {
-	day := ts.Format("2006-01-02")
-	if r.file != nil && r.day == day {
-		_, err := r.file.Write(line)
-		return err
-	}
-	if r.file != nil {
-		r.file.Close()
-		r.file = nil
-	}
+// appendLocked writes one event under an exclusive file lock, chaining it to
+// whatever the file currently ends with.
+func (r *Recorder) appendLocked(e Event) error {
 	if err := os.MkdirAll(r.dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(r.dir, "audit-"+day+".jsonl")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	path := filepath.Join(r.dir, "audit-"+e.TS.Format("2006-01-02")+".jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	r.file, r.day = f, day
+	defer f.Close()
+	if err := lockFile(f); err != nil {
+		return err
+	}
+	defer unlockFile(f)
+
+	last, err := lastHashInFile(f)
+	if err != nil {
+		return err
+	}
+	e.Prev = last
+	e.Hash = chainHash(e)
+	line, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
 	r.warned = false
 	_, err = f.Write(line)
 	return err
 }
 
-// Close releases the open file, if any.
-func (r *Recorder) Close() error {
-	if r == nil {
-		return nil
+// lastHashInFile returns the Hash of the last well-formed line in f, reading
+// only the tail (audit lines are small). "" means the file has no chain yet.
+func lastHashInFile(f *os.File) (string, error) {
+	end, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.file == nil {
-		return nil
+	if end == 0 {
+		return "", nil
 	}
-	err := r.file.Close()
-	r.file = nil
-	return err
+	const tail = 64 * 1024
+	start := end - tail
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, end-start)
+	if _, err := f.ReadAt(buf, start); err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var e Event
+		if err := json.Unmarshal([]byte(line), &e); err == nil && e.Hash != "" {
+			return e.Hash, nil
+		}
+	}
+	return "", nil
 }
+
+// Close exists for callers that defer it. Writes open and close the file per
+// event, so there is nothing to release.
+func (r *Recorder) Close() error { return nil }
 
 func (r *Recorder) warn(format string, a ...any) {
 	if r.warned {
@@ -334,6 +394,93 @@ func (f Filter) Matches(e Event) bool {
 		return false
 	}
 	return true
+}
+
+// Problem is one place where the stream does not verify.
+type Problem struct {
+	File   string
+	Line   int
+	Reason string
+}
+
+// Verify walks every day-file in order and checks the per-file hash chain,
+// returning everything that does not add up.
+//
+// What it proves and what it does not: it detects an edited line, a re-ordered
+// line, a deleted line (the next line's Prev stops matching), and a line whose
+// chain fields were stripped. It does **not** prove a whole file was never
+// removed (retention removes files legitimately), and it cannot stop someone
+// who can rewrite every file after the edit. Tamper-evidence here means "this
+// file was not quietly altered in place", not "this machine is trusted".
+// Lines written before the chain existed are reported as unchained, once per
+// file, rather than silently passed.
+func Verify(dataDir string) ([]Problem, error) {
+	files, err := listFiles(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	var problems []Problem
+	for _, path := range files {
+		problems = append(problems, verifyFile(path)...)
+	}
+	return problems, nil
+}
+
+func verifyFile(path string) []Problem {
+	name := filepath.Base(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return []Problem{{File: name, Reason: err.Error()}}
+	}
+	defer f.Close()
+
+	var problems []Problem
+	prev, unchained := "", 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineno := 0
+	for sc.Scan() {
+		lineno++
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var e Event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			problems = append(problems, Problem{name, lineno, "malformed JSON: " + err.Error()})
+			continue
+		}
+		if e.Hash == "" {
+			unchained++
+			continue
+		}
+		if e.Prev != prev {
+			problems = append(problems, Problem{name, lineno,
+				"chain broken (prev=" + shortHash(e.Prev) + ", want=" + shortHash(prev) + ")"})
+		}
+		if want := chainHash(e); e.Hash != want {
+			problems = append(problems, Problem{name, lineno, "hash mismatch (line altered)"})
+		}
+		prev = e.Hash
+	}
+	if err := sc.Err(); err != nil {
+		problems = append(problems, Problem{File: name, Reason: err.Error()})
+	}
+	if unchained > 0 {
+		problems = append(problems, Problem{name, lineno, fmt.Sprintf(
+			"%d unchained line(s) — written before tamper-evidence existed", unchained)})
+	}
+	return problems
+}
+
+func shortHash(h string) string {
+	if h == "" {
+		return "(none)"
+	}
+	if len(h) > 10 {
+		return h[:10]
+	}
+	return h
 }
 
 // Query reads the matching events, oldest first. A missing audit directory is

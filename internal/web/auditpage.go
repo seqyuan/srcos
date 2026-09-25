@@ -12,7 +12,7 @@ import (
 // AuditPage renders the audit console: the structured stream, newest first,
 // with the same filters the CLI has. It is server-rendered (a plain GET form,
 // no JavaScript) so an operator can read it from anything that speaks HTML.
-func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter) string {
+func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter, problems []audit.Problem) string {
 	var b strings.Builder
 
 	b.WriteString(auditCSS)
@@ -25,6 +25,26 @@ func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter)
 	b.WriteString(`<a class="btn" href="/admin">管理控制台</a>`)
 	b.WriteString(`<span class="audit-muted">` + esc(username) + `</span>`)
 	b.WriteString(`</div></div>`)
+
+	// Tamper-evidence status (ADR-024): the per-file hash chain. An admin should
+	// see at a glance whether the stream they are reading still verifies.
+	if len(problems) == 0 {
+		b.WriteString(`<div class="audit-verified">链校验通过（每行 hash 与前一行相连）</div>`)
+	} else {
+		b.WriteString(`<div class="audit-broken">链校验发现 ` + fmt.Sprint(len(problems)) + ` 处异常：`)
+		for i, p := range problems {
+			if i == 5 {
+				b.WriteString(` …`)
+				break
+			}
+			where := p.File
+			if p.Line > 0 {
+				where = fmt.Sprintf("%s:%d", p.File, p.Line)
+			}
+			b.WriteString(`<code>` + esc(where) + ` ` + esc(p.Reason) + `</code> `)
+		}
+		b.WriteString(`</div>`)
+	}
 
 	// Filter form. GET so the query string is bookmarkable and shareable.
 	b.WriteString(`<form class="audit-filter" method="get" action="/admin/audit">`)
@@ -207,4 +227,6 @@ const auditCSS = `<style>
   .audit-reason { color: #d33; }
   .audit-muted { color: var(--text-muted); }
   .audit-empty { padding: 22px 12px; color: var(--text-muted); font-size: 13px; }
+  .audit-verified { color: #1a7f37; font-size: 12.5px; margin-bottom: 12px; }
+  .audit-broken { color: #d33; font-size: 12.5px; margin-bottom: 12px; }
 </style>`

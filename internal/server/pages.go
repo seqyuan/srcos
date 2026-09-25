@@ -193,7 +193,12 @@ func (s *Server) handleAdminAuditPage(w http.ResponseWriter, r *http.Request, us
 			err.Error(), "/admin/audit", "返回审计流"))
 		return
 	}
-	sendHTML(w, 200, web.AuditPage(s.siteTitle, username, events, filter))
+	// Tamper-evidence status for the banner: does the stream still verify?
+	problems, verr := audit.Verify(s.dataDir())
+	if verr != nil {
+		log.Printf("[srcos] audit verify: %v", verr)
+	}
+	sendHTML(w, 200, web.AuditPage(s.siteTitle, username, events, filter, problems))
 }
 
 // dataDir is where runtime state lives (data/), a sibling of config/. The

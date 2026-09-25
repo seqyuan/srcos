@@ -303,3 +303,121 @@ func TestParseKeep(t *testing.T) {
 		t.Error("ParseKeep(nonsense) should fail")
 	}
 }
+
+func TestHashChainVerifiesAcrossRecorderRestarts(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir)
+	r.Record(NewEvent(Actor{User: "alice"}, "submit").Allowed())
+	r.Record(NewEvent(Actor{User: "alice"}, "cancel").Allowed())
+	r.Close()
+
+	// A second recorder (a restarted process) must continue the chain, not
+	// start a fresh one.
+	r2 := New(dir)
+	r2.Record(NewEvent(Actor{User: "bob"}, "submit").Allowed())
+	r2.Close()
+
+	problems, err := Verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Fatalf("an untouched chain must verify, got %+v", problems)
+	}
+}
+
+func TestVerifyDetectsAlteredLine(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir)
+	r.Record(NewEvent(Actor{User: "alice"}, "submit").Allowed())
+	r.Close()
+
+	files, err := listFiles(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("listFiles: %v (%d)", err, len(files))
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same length, different value: the line no longer hashes to its own Hash.
+	altered := strings.Replace(string(data), `"action":"submit"`, `"action":"cancll"`, 1)
+	if err := os.WriteFile(files[0], []byte(altered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	problems, err := Verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) == 0 {
+		t.Fatal("an altered line must be detected")
+	}
+}
+
+func TestVerifyDetectsDeletedLine(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir)
+	for i := 0; i < 3; i++ {
+		r.Record(NewEvent(Actor{User: "alice"}, "submit").Allowed())
+	}
+	r.Close()
+
+	files, err := listFiles(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("listFiles: %v (%d)", err, len(files))
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	// Drop the middle line: the third line's Prev no longer matches.
+	if err := os.WriteFile(files[0], []byte(lines[0]+"\n"+lines[2]+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	problems, err := Verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) == 0 {
+		t.Fatal("a deleted line must break the chain and be detected")
+	}
+}
+
+func TestVerifyEmptyStreamIsFine(t *testing.T) {
+	problems, err := Verify(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Fatalf("empty stream should verify, got %+v", problems)
+	}
+}
+
+// Two recorders appending to the same file is what the gateway and a CLI
+// invocation look like. Each must chain onto what the file actually ends with,
+// not onto its own memory — otherwise interleaved writers break the chain
+// (caught by make e2e before the lock was added).
+func TestChainSurvivesInterleavedRecorders(t *testing.T) {
+	dir := t.TempDir()
+	a, b := New(dir), New(dir)
+	for i := 0; i < 10; i++ {
+		a.Record(NewEvent(Actor{User: "gateway"}, "submit").Allowed())
+		b.Record(NewEvent(Actor{User: "cli"}, "token.create").Allowed())
+	}
+	problems, err := Verify(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Fatalf("interleaved writers broke the chain: %+v", problems)
+	}
+	if events, err := Query(dir, Filter{}); err != nil || len(events) != 20 {
+		t.Fatalf("events = %d (%v), want 20", len(events), err)
+	}
+}

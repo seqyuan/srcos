@@ -273,7 +273,8 @@ grep -rq '"action":"submit"' "$AUDDIR" 2>/dev/null || fail "no submit event in t
 grep -rq '"action":"scope"' "$AUDDIR" 2>/dev/null || fail "no scope denial in the audit stream"
 grep -rq '"action":"instance.done"' "$AUDDIR" 2>/dev/null || fail "no instance.done (lifecycle) in the audit stream"
 "$BIN" audit list -d "$CFG" | grep -q 'submit' || fail "srcos audit list read nothing"
-pass "submit allow + scope deny + instance.done recorded and readable"
+"$BIN" audit verify -d "$CFG" | grep -q '^ok' || fail "audit hash chain does not verify"
+pass "submit allow + scope deny + instance.done recorded, readable, chain verifies"
 
 # ── 10. 管理端审计页 / API（仅管理员）──────────────────────────────
 step 10 "管理端审计流（/admin/audit + /api/admin/audit）"
@@ -289,7 +290,9 @@ pass "admin audit API returns the denial"
 
 curl -fsS -b "$CJ2" "$BASE/admin/audit?decision=deny" | grep -q '审计流' \
   || fail "/admin/audit page did not render"
-pass "admin audit page renders"
+curl -fsS -b "$CJ2" "$BASE/admin/audit" | grep -q '链校验通过' \
+  || fail "/admin/audit did not report a verified chain"
+pass "admin audit page renders, chain verified"
 
 # A non-admin must not read the audit stream.
 code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/api/admin/audit")"
