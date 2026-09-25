@@ -1029,6 +1029,25 @@ curl -b cj -X POST http://gw:30152/api/admin/instances/<id>/stop # 等价于 src
 curl -b cj http://gw:30152/api/admin/instances/<id>/logs?tail=200
 ```
 
+### 工具访问申请（`/tools` → `/requests` → `/admin`）
+
+默认拒绝意味着用户看不见未授权的工具。如果某个工具应当「可以被申请」，管理员在它的 grant 上打开
+`requestable`（只公开**存在性**，不授权）：
+
+```bash
+srcos grant set scrna_qc --user alice --requestable   # 也可以完全不带 --user，只标可申请
+```
+
+于是：
+
+- 用户在 `/tools` 页的「可申请的工具」区看到它，点「申请访问」填用途 → `POST /api/requests`；
+- 自己的申请与结果在 **`/requests`**；
+- 管理员在 `/admin` 顶部的「待审申请」里批准或拒绝（批准 = 写一条普通 grant，立即可用）；
+- 两步都进审计流（`request.create` / `request.approve` / `request.deny`）。
+
+**申请不是权限。** 它只是「问」；批准走的仍是 `AddUserToGrant`，所以「为什么 alice 能用」
+永远指向 grants.yaml 的一行。批准即永久（与 CLI `grant` 一致，没有有效期）。
+
 ### 流程（`flow.yaml`，Phase 4）
 
 流程 = **把已注册工具按 `output → input` 连成一张 DAG**：管理员不写命令、不写代码，

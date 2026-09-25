@@ -98,6 +98,9 @@
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
   `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
   （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）
+- **工具访问申请/审批**（B3）：`grant.requestable` 显式开关 + `internal/accessrequest`
+  （`data/requests/*.yaml`）+ `/api/requests`（用户）+ `/api/admin/requests`（approve/deny）
+  + `/requests` 页 + `/admin` 待审区；批准 = `AddUserToGrant` + 落盘，审计 `request.*`
 
 **工程基线**
 
@@ -117,6 +120,7 @@
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
 - ~~审计流第二期~~ —— ✅ **完成**（2026-09-26）：管理端查询页（`/admin/audit` + `/api/admin/audit`）+ 生命周期跃迁审计 + 保留策略（`srcos audit prune`）+ hash chain（`srcos audit verify`）；仅真实签名未做
+- ~~工具访问申请/审批流~~ —— ✅ 完成（2026-09-26，B3；设计见 `docs/plans/2026-09-26-tool-access-request-design.md`）
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
@@ -129,7 +133,7 @@
 |---|---|---|
 | 12 | ~~**审计流**~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，范围 A）；第二期（防篡改/管理页/生命周期/保留）见 handoff §3.1 #12 | — |
 | 13 | **Phase 6 SGE**：真登录节点上 `probe-env.sh`，再接真集群 | 真登录节点主机名（§8 #12） |
-| 14 | `storages.yaml` 编辑 / 申请审批流（管理端起服务已做） | — |
+| 14 | 下一步候选：agent 端到端 runner 身份（A1）、agent 提交幂等键（A2）；`storages.yaml` 热加载评估后不做 | — |
 
 ---
 
@@ -1009,5 +1013,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **审计流第二期（3/4）：保留策略** —— `audit.Stale`/`audit.Prune`/`audit.ParseKeep` + `srcos audit prune --keep 90d [--dry-run]`；**显式、不自动**（删除审计是运维的决定，不是 tick 的副作用；`keep<=0` 不删任何东西），删除这件事本身记 `audit.prune`（谁、keep、删了几个、oldest/newest）。单测锁定「只删过期整天文件」与 keep=0 no-op。剩：防篡改 |
 | 2026-09-26 | **审计流第二期（4/4）：防篡改 hash chain** —— 每行 `prev`/`hash`（SHA-256(prev+该行字节)），**每文件**一条链；`srcos audit verify` + `/admin/audit` 横幅；能发现改行/删行/乱序/剥链字段，不能证明整文件未删、挡不住重写全部文件。**e2e 抓到的真 bug**：网关与 CLI 两个进程各持自己的「上一行」，交错写同一日文件链必断 —— 改为每次追加 `flock` + 重读文件尾（链属于文件不属于进程），单测 `TestChainSurvivesInterleavedRecorders` 锁定。审计流第二期完成；仅真实签名未做 |
 | 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |
+| 2026-09-26 | **B3：工具访问申请/审批流**（设计已确认 → 已实现）—— `grant.requestable` 显式开关（只公开存在性，默认 false；`Policy.Requestable` 里具体 grant 优先于 `*`）+ `internal/accessrequest`（`data/requests/*.yaml`，幂等/状态机/原子写/0600）+ API（`GET/POST /api/requests` 只认 session；`GET /api/admin/requests`、`POST /api/admin/requests/<id>/approve|deny`；批准先写 grant 并落盘再标记 decided）+ UI（`/tools` 可申请区 + `/requests` 用户页 + `/admin` 待审区）+ 审计 `request.*`。**e2e 抓到一处遗漏**：`/api/requests` 未注册进 server mux 的 srcos API 路径表 → 请求掉进 `/api/` 代理回退 404；第 12 步现覆盖 申请→待审→批准→可见→审计 |
 | 2026-09-26 | **专题指南 `docs/agent-mcp-positioning.md`**（D）—— 把 agent/dsh/MCP 的定位讨论落成文件：agent 的三层含义（外部/托管/dsh 内）、两条通道（MCP vs `srcos://`+REST）、三条不做（MCP Client / 直改 workspace / 推理循环）、优缺点表（A1 托管 agent 无实例身份、A2 agent 无幂等键、M1 `srcos://` 而非 MCP resources…）与建议；dsh 四个接触点与「为什么删路 B」。结论指向 ADR-011/016/017/019/024，不新增决策 |
 | 2026-09-26 | **B2（`storages.yaml` 管理端编辑）评估后不做** —— 网关在**构造时**把 storage provider 交给 api/execute/runtime，要即时生效需先把它做成可原地替换的（同 grants 的 `ReplaceWith`）；是可行的，但**价值偏低**（storages 很少变，重启一次可接受），而 UI 编辑会碰**安全边界**（`host_root` 的粒度就是数据可见范围，表单无法知道正确粒度）。结论：保留「手写文件 + 重启」；若将来真需要，做「编辑 + 明确提示需重启」而不做热加载 |

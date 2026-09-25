@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0（T2 删路 B/归档 · T5 `make e2e` · T3 sandbox 规则 · T4 构建守卫）完成；**审计流第一期完成**（ADR-024，scope A：`internal/audit` 结构化 JSONL + 写入面/拒绝/配置变更埋点 + `srcos audit`）。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
+> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0/P2 完成（删路 B + 归档 · `make e2e` · sandbox 规则 · 构建守卫 · 路由表派生 · 拆 server.go；T6 评估后不做）；**审计流第一期+第二期完成**（ADR-024）；**CI**（`.github/workflows/ci.yml`）；**管理端可启动服务**；**工具访问申请/审批流**（B3）；**`docs/agent-mcp-positioning.md`**。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
 
 ---
 
@@ -128,6 +128,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
+│ ✅ 管理与申请：/admin（含待审申请）· /requests · grant requestable     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -177,8 +178,8 @@ orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
 
-**其它**：申请/审批流（现在只有管理员直接 `grant`）；`storages.yaml` 的管理端编辑**评估后不做**
-（价值低 + 遇安全边界，见 roadmap 变更记录）；`apptainer` sandbox（Phase 6，
+**其它**：`storages.yaml` 的管理端编辑**评估后不做**（价值低 + 遇安全边界，见 roadmap 变更记录）；
+`apptainer` sandbox（Phase 6，
 声明了会明确报错）；`prlimit` 路径下的 RSS 看门狗；降级模式（无 user systemd）下失去等待者的任务
 只能写 `stopped` + 说明（没有判定文件可读，ADR-022 的兜底分支）。
 
@@ -195,7 +196,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 |---|---|---|---|
 | **12** | **审计流第二期**：防篡改（hash chain / 签名）+ `/admin/audit` 查询页 + 生命周期审计 + 保留策略 | 第一期（scope A）已完成：结构化落盘 + 写入面/拒绝/配置变更埋点 + CLI 读取 | — |
 | **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
-| 14 | 申请审批流（管理端起服务已做；`storages.yaml` 编辑评估后不做） | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
+| 14 | agent 端到端 runner 身份（A1）/ agent 提交幂等键（A2）—— 见 `docs/agent-mcp-positioning.md` | 让托管 agent 成为可能；让 agent 能安全重试 | — |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -525,6 +526,7 @@ internal/flowrun/           流程执行器：并发窗口、AND 依赖、when: 
 internal/activity/          write-behind 时间戳日志（token 使用时间 / 服务活跃时间共用）
 internal/audit/             结构化审计流水（Event/Actor/Target/Request/Outcome + Recorder 追加写
                             data/audit/audit-YYYY-MM-DD.jsonl；按天轮转、nil no-op、参数脱敏）
+internal/accessrequest/     工具访问申请的数据层（data/requests/*.yaml；幂等、状态机、原子写）
 internal/runtime/usage.go   资源快照（systemd cgroup / /proc）—— UnitSampler 后端接口
 internal/rate/              令牌桶限速（登录 + 带宽）
 
