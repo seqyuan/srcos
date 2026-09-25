@@ -325,7 +325,9 @@ make webui      # Phase 5 起；webui/ 未建时只提示，不阻断
 make e2e        # 端到端回归网：临时配置 + 临时端口，退出时清理（scripts/e2e.sh）
 
 # 提交前必须
-make vet && make test        # 涉及前端时另加 make webui
+make vet && make test        # 涉及前端时另加 make webui（改到执行链路时另加 make e2e）
+
+# CI（.github/workflows/ci.yml）跑同样的三件事（vet + test -race / make e2e 降级沙箱 / pnpm build）
 
 # 环境探测（换主机时重跑，结果追加到 docs/environments.md）
 bash scripts/probe-env.sh

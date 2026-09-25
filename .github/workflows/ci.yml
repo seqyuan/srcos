@@ -1,0 +1,70 @@
+name: CI
+
+# Three independent checks, matching what a developer is asked to run locally
+# (AGENTS.md §开发命令): vet + test -race, the end-to-end path, and the frontend
+# bundle. They are separate jobs so a frontend breakage never hides a Go one.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: vet + test (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test ./... -race
+      - name: build (no frontend bundle)
+        run: make build
+
+  e2e:
+    name: end-to-end (degraded sandbox)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # A GitHub runner has no user systemd and no bwrap promise, so the run
+      # takes the degraded path (prlimit, no sandbox). The script judges the
+      # verdict assertion by the limiter the instance actually used, so that is
+      # a real pass, not a skipped one.
+      - name: make e2e
+        env:
+          SRCOS_E2E_SANDBOX: none
+        run: make e2e
+
+  webui:
+    name: frontend bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: pnpm install
+        working-directory: webui
+        run: pnpm install --frozen-lockfile
+      - name: pnpm build
+        working-directory: webui
+        run: pnpm build

@@ -209,6 +209,10 @@ make webui     # 构建独立前端包到 internal/web/dist/（Phase 5 起）
 make e2e       # 端到端回归网（临时配置+临时端口：提交→队列→执行→判定→日志→资源查看）
 ```
 
+CI（`.github/workflows/ci.yml`）跑同样的三件事：`vet` + `test -race`、`make e2e`
+（降级沙箱：`SRCOS_E2E_SANDBOX=none`）、前端 `pnpm build`。**本地提交前仍要自己跑** ——
+CI 是防回退，不是代替品。
+
 ---
 
 ## 当前阶段

@@ -205,14 +205,19 @@ pass "instance $INSTANCE succeeded (state from its own record)"
 step 6 "校验 systemd 判定文件与日志"
 LOGDIR="$DATA/logs/$USER_NAME/$TOOL"
 VERDICT_FILE="$(ls "$LOGDIR"/*.log.verdict 2>/dev/null | head -1 || true)"
+# Judge by the limiter the instance actually used, not by whether the
+# systemd-run binary exists: on a CI runner the binary is present but there is
+# no user manager, so the runtime legitimately falls back to prlimit and
+# writes no verdict.
+LIMITER="$(grep -m1 '^limiter:' "$DATA/instances/$INSTANCE.yaml" | awk '{print $2}')"
 if [ -n "$VERDICT_FILE" ]; then
   verdict="$(cat "$VERDICT_FILE")"
   [ "$verdict" = "0 success" ] || fail "verdict = '$verdict' (want '0 success')"
-  pass "verdict: $verdict"
-elif command -v systemd-run >/dev/null 2>&1; then
-  fail "no <log>.verdict although systemd-run exists (ADR-022 regression)"
+  pass "verdict: $verdict (limiter=$LIMITER)"
+elif [ "$LIMITER" = "systemd-run" ]; then
+  fail "limiter=systemd-run but no <log>.verdict (ADR-022 regression)"
 else
-  info "  (no systemd-run — degraded mode, verdict assertion skipped)"
+  info "  (limiter=${LIMITER:-none} — degraded mode, verdict assertion skipped)"
 fi
 
 grep -q 'tick 3' "$LOGDIR"/*.log 2>/dev/null || fail "log does not contain 'tick 3'"
