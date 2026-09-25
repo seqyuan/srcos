@@ -240,3 +240,66 @@ func TestFilePermissionsArePrivate(t *testing.T) {
 		t.Fatalf("unexpected file name %s", files[0])
 	}
 }
+
+func TestPruneRemovesOnlyOldFiles(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir)
+	oldEvent := NewEvent(Actor{User: "alice"}, "submit").Allowed()
+	oldEvent.TS = time.Now().UTC().AddDate(0, 0, -100)
+	r.Record(oldEvent)
+	recentEvent := NewEvent(Actor{User: "alice"}, "submit").Allowed()
+	recentEvent.TS = time.Now().UTC()
+	r.Record(recentEvent)
+	r.Close()
+
+	now := time.Now().UTC()
+	keep := 30 * 24 * time.Hour
+	stale, err := Stale(dir, keep, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 {
+		t.Fatalf("stale = %v, want exactly the 100-day-old file", stale)
+	}
+
+	// Keep == 0 must never remove anything.
+	if removed, err := Prune(dir, 0, now); err != nil || len(removed) != 0 {
+		t.Fatalf("keep=0 removed %v (%v)", removed, err)
+	}
+
+	removed, err := Prune(dir, keep, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %v, want 1", removed)
+	}
+	events, err := Query(dir, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("after prune, events = %d, want only the recent one", len(events))
+	}
+}
+
+func TestParseKeep(t *testing.T) {
+	cases := map[string]time.Duration{
+		"90d": 90 * 24 * time.Hour,
+		"48h": 48 * time.Hour,
+		"0":   0,
+		"":    0,
+	}
+	for in, want := range cases {
+		got, err := ParseKeep(in)
+		if err != nil {
+			t.Fatalf("ParseKeep(%q): %v", in, err)
+		}
+		if got != want {
+			t.Errorf("ParseKeep(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if _, err := ParseKeep("nonsense"); err == nil {
+		t.Error("ParseKeep(nonsense) should fail")
+	}
+}

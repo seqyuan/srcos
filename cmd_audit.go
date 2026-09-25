@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,8 @@ func runAuditCmd(args []string) {
 		runAuditTail(args)
 	case "list", "ls":
 		runAuditList(args)
+	case "prune":
+		runAuditPrune(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown audit subcommand: %s\n", sub)
 		printAuditUsage()
@@ -48,6 +51,61 @@ func printAuditUsage() {
 	fmt.Fprintln(os.Stderr, "      --json               raw JSON, one event per line")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Events live in data/audit/audit-YYYY-MM-DD.jsonl (append-only, 0600).")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  prune --keep 90d         remove whole day-files older than the retention window")
+	fmt.Fprintln(os.Stderr, "      --dry-run            show what would be removed")
+}
+
+func runAuditPrune(args []string) {
+	fs := newFlagSet("audit prune")
+	configDir := configDirFlag(fs)
+	keep := fs.String("keep", "90d", "retention window (e.g. 90d, 2160h); 0 removes nothing")
+	dryRun := fs.Bool("dry-run", false, "show what would be removed")
+	var positional []string
+	parseFlagsLoose(fs, args, &positional)
+
+	keepDur, err := audit.ParseKeep(*keep)
+	if err != nil {
+		fatalf("--keep: %v", err)
+	}
+	dataDir := config.DataDir(*configDir)
+
+	if *dryRun {
+		stale, err := audit.Stale(dataDir, keepDur, time.Now())
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(stale) == 0 {
+			fmt.Println("nothing older than " + *keep)
+			return
+		}
+		for _, path := range stale {
+			fmt.Println(filepath.Base(path))
+		}
+		return
+	}
+
+	removed, err := audit.Prune(dataDir, keepDur, time.Now())
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(removed) == 0 {
+		fmt.Println("nothing to prune (keep=" + *keep + ")")
+		return
+	}
+	for _, name := range removed {
+		fmt.Println("removed", name)
+	}
+
+	// Deleting records is itself an audited act, so the stream says who pruned
+	// it and how much went.
+	rec := audit.New(dataDir)
+	rec.Record(audit.NewEvent(operatorActor(), "audit.prune").
+		WithParams(map[string]any{"keep": *keep, "files": len(removed)}).
+		WithRefs(map[string]string{"oldest": removed[0], "newest": removed[len(removed)-1]}).
+		Allowed())
+	rec.Close()
+	fmt.Printf("pruned %d file(s); recorded as audit.prune\n", len(removed))
 }
 
 func runAuditTail(args []string) {

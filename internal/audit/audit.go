@@ -368,6 +368,75 @@ func Tail(dataDir string, f Filter, n int) ([]Event, error) {
 	return all, nil
 }
 
+// ParseKeep turns "90d" / "2160h" / "0" into a retention duration.
+func ParseKeep(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	if strings.HasSuffix(s, "d") {
+		if days, err := time.ParseDuration(strings.TrimSuffix(s, "d") + "h"); err == nil {
+			return days * 24, nil
+		}
+	}
+	return time.ParseDuration(s)
+}
+
+// Stale returns the whole day-files older than keep, without removing them.
+func Stale(dataDir string, keep time.Duration, now time.Time) ([]string, error) {
+	if keep <= 0 {
+		return nil, nil
+	}
+	files, err := listFiles(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := now.Add(-keep)
+	var stale []string
+	for _, path := range files {
+		day, ok := dayOf(path)
+		if !ok {
+			continue
+		}
+		if day.Before(cutoff) {
+			stale = append(stale, path)
+		}
+	}
+	return stale, nil
+}
+
+// Prune removes whole day-files older than keep, and returns what it removed.
+//
+// It is deliberately explicit and never automatic: deleting an audit trail is
+// an operator's decision, not a side effect of a tick. A keep of zero or less
+// removes nothing, so a misread flag cannot wipe the stream. The caller is
+// expected to record the removal itself (see `srcos audit prune`), so the fact
+// that records were deleted is also on the record.
+func Prune(dataDir string, keep time.Duration, now time.Time) ([]string, error) {
+	stale, err := Stale(dataDir, keep, now)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, path := range stale {
+		if err := os.Remove(path); err != nil {
+			return removed, err
+		}
+		removed = append(removed, filepath.Base(path))
+	}
+	return removed, nil
+}
+
+// dayOf parses audit-YYYY-MM-DD.jsonl into that day's UTC midnight.
+func dayOf(path string) (time.Time, bool) {
+	name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "audit-"), ".jsonl")
+	t, err := time.Parse("2006-01-02", name)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // listFiles returns the audit files oldest-first.
 func listFiles(dataDir string) ([]string, error) {
 	dir := filepath.Join(dataDir, "audit")
