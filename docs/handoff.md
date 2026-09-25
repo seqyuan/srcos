@@ -170,7 +170,7 @@ UI 造起来便宜了 → UI 不再是护城河
 哪个版本的工具 / 什么参数 / 允许还是拒绝」写进 `data/audit/audit-YYYY-MM-DD.jsonl`（只追加、
 按天轮转、参数脱敏），`srcos audit tail|list` 读；覆盖写入面（submit/cancel/run_flow）、
 拒绝事件（CSRF/未认证/只读试写）与配置变更（grant/group/admins/token，API 与 CLI 两条门）。
-**剩**：防篡改（hash chain）、`/admin/audit` 查询页、生命周期跃迁审计、保留策略。
+**剩**：防篡改（hash chain）、生命周期跃迁审计、保留策略（管理端查询页 `/admin/audit` 已做）。
 
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。

@@ -96,8 +96,8 @@
 - **流程画布**（Phase 5）：`/admin/flows/<id>/edit`（Vite+React 只在这一页加载）+ **拖拽摆放**
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
-  `srcos audit tail|list`；埋点覆盖写入面（submit/cancel/run_flow）、拒绝事件
-  （CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）
+  `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
+  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）
 
 **工程基线**
 
@@ -116,7 +116,7 @@
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
 - ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
-- 审计流的第二期：防篡改（hash chain / 签名）、`/admin/audit` 查询页、生命周期跃迁审计、保留策略
+- 审计流的第二期：防篡改（hash chain / 签名）、生命周期跃迁审计、保留策略（管理端查询页已做）
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
@@ -726,8 +726,10 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - **拒绝事件**（`internal/api`）：CSRF、未认证、只读 token 试写。拒绝是最有价值的审计材料。
   - **配置变更**：`grant.*` / `group.set` / `admins.set` / `token.create` / `token.revoke`
     （API 与 CLI 两条门都记 —— 漏了 CLI 就是漏了一扇门）；CLI `job submit` 也记。
-- **不做（第一期）**：防篡改（hash chain / 签名）、管理端查询页、生命周期跃迁审计
-  （reconcile / reaper）、保留策略。按「先有流，再谈防篡改」的顺序。
+- **第二期进展**：**管理端查询页已做**（`/admin/audit` + `GET /api/admin/audit`，仅管理员；
+  服务端渲染 + GET 筛选表单，与 CLI 共用 `audit.Query`，非管理员 403）。
+- **不做（仍待）**：防篡改（hash chain / 签名）、生命周期跃迁审计（reconcile / reaper）、保留策略。
+  按「先有流，再谈防篡改」的顺序。
 - **为什么不是数据库 / 不是消息队列**：与「文件系统即数据库」一致（AGENTS.md）。
   一行一个 JSON 的文本流能被 `grep`、`jq`、`rsync`，也能在十年后被读懂；
   审计的可用寿命比任何查询 API 都长。
@@ -991,3 +993,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **拆 server.go + 消除隐式路由表契约**（技术债 T1/T7）—— `server.go` 1829 行拆为 server.go（组装/Options/mux，588）+ auth.go（登录/TOTP，326）+ proxy.go（代理路由，435）+ pages.go（页面/资源/任务/管理端，518）+ loops.go（后台循环，64）；`Options` 头注集中写清每个字段的零值语义；`NewWithOptions` 从 supervisor 派生 `route.Table` 并在传了另一张时明确日志（以前只有一句注释警告，编译期不保证）。纯重组，行为不变（`-race` + `make e2e` 全绿） |
 | 2026-09-26 | **技术债 T6（拆 config 包）评估后不做** —— `UserConfig` 同时持有 `auth` 与 `services` 卡片是合理的（一个用户记录本就两样都有），不是「两种世界观混在一个包里」；拆包是纯命名 churn、风险大于收益。至此 P0/P1/P2 完成（T6 明确不做） |
 | 2026-09-26 | **CI（`.github/workflows/ci.yml`）** —— 三个独立 job：`vet` + `test -race` + `make build`；`make e2e`（`SRCOS_E2E_SANDBOX=none`，GitHub runner 无 user systemd/bwrap）；前端 `pnpm install --frozen-lockfile` + `pnpm build`（lockfileVersion 9 / pnpm 10）。顺带修 e2e 的判定断言：改为按实例记录的 `limiter` 判断，而不是「systemd-run 二进制是否存在」——runner 上二进制在、user manager 不在，旧写法会误报 ADR-022 回归 |
+| 2026-09-26 | **审计流第二期（1/4）：管理端查询页** —— `/admin/audit`（服务端渲染，GET 筛选表单：user/action/decision/since，最新在前；仅管理员，非管理员 403）+ `GET /api/admin/audit`（同一 `audit.Query`，脚本化）；`web.AuditPage`（自带样式块，与 admin 页同风格）+ 导航入口；`audit.ParseSince` 下沉供 CLI 与 API 共用。e2e 第 10 步：管理员登录 → API 返回 deny → 页面渲染 → 非管理员 403。剩：防篡改 / 生命周期审计 / 保留策略 |

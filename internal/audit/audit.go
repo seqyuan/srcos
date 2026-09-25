@@ -285,6 +285,28 @@ func (r *Recorder) warn(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[srcos] audit: "+format+"\n", a...)
 }
 
+// ParseSince turns "7d" / "2h30m" / an RFC3339 timestamp into a cutoff time.
+// It is shared by `srcos audit` and the admin endpoint so both read a "since"
+// the way an operator writes one. Empty means "no cutoff".
+func ParseSince(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if strings.HasSuffix(s, "d") {
+		if days, err := time.ParseDuration(strings.TrimSuffix(s, "d") + "h"); err == nil {
+			return time.Now().Add(-days * 24), nil
+		}
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("not a duration or RFC3339 timestamp: %q", s)
+}
+
 // Filter narrows a query. Zero values match everything.
 type Filter struct {
 	User     string

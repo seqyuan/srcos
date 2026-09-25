@@ -13,6 +13,7 @@ import (
 import (
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/api"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/execute"
@@ -160,7 +161,45 @@ func (s *Server) handleAdminSubPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if rest == "audit" || rest == "audit/" {
+		s.handleAdminAuditPage(w, r, username)
+		return
+	}
 	http.NotFound(w, r)
+}
+
+// handleAdminAuditPage renders the audit console (ADR-024). Reading it is
+// admin-only, like every /admin page; writing is the platform's own business.
+func (s *Server) handleAdminAuditPage(w http.ResponseWriter, r *http.Request, username string) {
+	q := r.URL.Query()
+	filter := audit.Filter{
+		User:     strings.TrimSpace(q.Get("user")),
+		Action:   strings.TrimSpace(q.Get("action")),
+		Decision: strings.TrimSpace(q.Get("decision")),
+	}
+	if since := strings.TrimSpace(q.Get("since")); since != "" {
+		at, err := audit.ParseSince(since)
+		if err != nil {
+			sendHTML(w, http.StatusBadRequest, web.NoticePage(s.siteTitle, "筛选条件无效",
+				err.Error(), "/admin/audit", "返回审计流"))
+			return
+		}
+		filter.Since = at
+	}
+	events, err := audit.Query(s.dataDir(), filter)
+	if err != nil {
+		log.Printf("[srcos] audit read: %v", err)
+		sendHTML(w, http.StatusInternalServerError, web.NoticePage(s.siteTitle, "读取失败",
+			err.Error(), "/admin/audit", "返回审计流"))
+		return
+	}
+	sendHTML(w, 200, web.AuditPage(s.siteTitle, username, events, filter))
+}
+
+// dataDir is where runtime state lives (data/), a sibling of config/. The
+// audit stream, instance records and workspaces are all under it.
+func (s *Server) dataDir() string {
+	return config.DataDir(config.DirOf(s.registry))
 }
 
 // handleUI serves the built frontend (ADR-012: embedded, same binary).

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
+	"github.com/seqyuan/srcos/internal/audit"
+	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -85,6 +87,9 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		writeJSON(w, 200, map[string]any{"tools": tools})
+
+	case path == "/audit" && r.Method == http.MethodGet:
+		h.adminAudit(w, r)
 
 	case strings.HasPrefix(path, "/grants/") && r.Method == http.MethodPut:
 		h.adminSetGrant(w, r, username, strings.TrimPrefix(path, "/grants/"))
@@ -372,6 +377,44 @@ func (h *Handler) adminSetAdmins(w http.ResponseWriter, r *http.Request, usernam
 		"admins": strings.Join(body.Admins, ","),
 	})
 	writeJSON(w, 200, map[string]any{"admins": h.opts.Policy.Snapshot().Admins})
+}
+
+// adminAudit answers the audit stream as JSON, so a script (or a future
+// dashboard) can filter it without scrolling a page. The /admin/audit page
+// reads through the same query.
+func (h *Handler) adminAudit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter := audit.Filter{
+		User:     strings.TrimSpace(q.Get("user")),
+		Action:   strings.TrimSpace(q.Get("action")),
+		Decision: strings.TrimSpace(q.Get("decision")),
+	}
+	if since := strings.TrimSpace(q.Get("since")); since != "" {
+		at, err := audit.ParseSince(since)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		filter.Since = at
+	}
+	events, err := audit.Query(config.DataDir(h.opts.ConfigDir), filter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	limit := 0
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	if limit > 0 && len(events) > limit {
+		events = events[len(events)-limit:]
+	}
+	if events == nil {
+		events = []audit.Event{} // JSON [] rather than null
+	}
+	writeJSON(w, 200, map[string]any{"events": events, "count": len(events)})
 }
 
 // savePolicy persists the live policy.

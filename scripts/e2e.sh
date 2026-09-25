@@ -22,6 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/srcos"
 
 USER_NAME=alice
+ADMIN_USER=e2eops
 PASSWORD=e2e-pass
 TOOL=e2e-ticker
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
@@ -142,11 +143,13 @@ chmod +x "$TOOLS/$TOOL/work.sh"
 pass "tool package valid"
 
 # ── 2. 用户 + 授权 ──────────────────────────────────────────────────────
-step 2 "创建用户 $USER_NAME 并授权 $TOOL"
+step 2 "创建用户 $USER_NAME + 管理员，并授权 $TOOL"
 printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | "$BIN" user "$USER_NAME" -d "$CFG" >/dev/null \
   || fail "user create failed"
+printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | "$BIN" user "$ADMIN_USER" -d "$CFG" >/dev/null \
+  || fail "admin user create failed"
 cat > "$CFG/grants.yaml" <<YAML
-admins: []
+admins: [$ADMIN_USER]
 grants:
   - tool: $TOOL
     users: [$USER_NAME]
@@ -155,7 +158,7 @@ grants:
       max_memory: 4Gi
       max_instances: 2
 YAML
-pass "user + grants ready (default-deny lifted for $TOOL)"
+pass "users + grants ready (default-deny lifted for $TOOL; $ADMIN_USER is admin)"
 
 # ── 3. 启动网关（队列消费者默认开启）────────────────────────────────────
 step 3 "启动网关（$BASE）"
@@ -271,5 +274,26 @@ grep -rq '"action":"scope"' "$AUDDIR" 2>/dev/null || fail "no scope denial in th
 "$BIN" audit list -d "$CFG" | grep -q 'submit' || fail "srcos audit list read nothing"
 pass "submit allow + scope deny recorded and readable"
 
+# ── 10. 管理端审计页 / API（仅管理员）──────────────────────────────
+step 10 "管理端审计流（/admin/audit + /api/admin/audit）"
+CJ2="$TMP/cookies-admin"
+code="$(curl -s -o /dev/null -w '%{http_code}' -c "$CJ2" -X POST "$BASE/login" \
+  -H "Origin: $BASE" --data-urlencode "username=$ADMIN_USER" \
+  --data-urlencode "password=$PASSWORD")"
+case "$code" in 200|302) ;; *) fail "admin login returned $code" ;; esac
+
+curl -fsS -b "$CJ2" "$BASE/api/admin/audit?decision=deny" | grep -q '"decision":"deny"' \
+  || fail "/api/admin/audit did not return the denial"
+pass "admin audit API returns the denial"
+
+curl -fsS -b "$CJ2" "$BASE/admin/audit?decision=deny" | grep -q '审计流' \
+  || fail "/admin/audit page did not render"
+pass "admin audit page renders"
+
+# A non-admin must not read the audit stream.
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/api/admin/audit")"
+[ "$code" = "403" ] || fail "non-admin /api/admin/audit = $code, want 403"
+pass "non-admin refused (403)"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端审计\n'
