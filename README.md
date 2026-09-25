@@ -1048,7 +1048,8 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 | **环境挂载** | R 在 miniforge 前缀里（非系统路径），靠 `ro_mounts` 挂进沙箱 + `env:` 把它的 `bin` 放进 `PATH`。注意用**真实路径**：`/pmo` 是指向 `/Volumes/data/pmo` 的符号链接，而 R 的启动脚本引用真实路径 |
 | **工作区即应用** | `workspace.init_from` 把模板 `app.R` 拷进用户工作区；改完重启实例就生效（`shiny::runApp("/workspace")`） |
 | **实例身份对工具可见** | `SRCOS_USER` / `SRCOS_TOOL` / `SRCOS_INSTANCE_ID` 注入沙箱，应用里直接显示（页脚那行） |
-| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read]}` → 实例启动时 SRCOS 签发一枚**只读**凭据到 `$HOME/.srcos/agent-token`；app.R 用它调 `$SRCOS_API/tools`，页面上直接显示结果（“实例凭据可用（只读）——SRCOS 回了 N 个工具”），而**审计里这次调用记为「这个实例做的」** |
+| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read, submit], tools: [hello-fanout]}` → 实例启动时 SRCOS 签发凭据到 `$HOME/.srcos/agent-token`。app.R 用它（a）读 `$SRCOS_API/tools`，（b）**点按钮提交一个真实任务**并刷新它的状态 |
+| **凭据是子集，且白名单会收窄** | 同一个凭据去提交白名单外的工具 → `403 may not submit to tool shiny-demo (its submit allowlist: hello-fanout)`，且这条拒绝也进审计 |
 
 > 启动服务需要**工具自己声明环境**：SRCOS 不知道 R 装在哪，也不应该知道 —— `tool.yaml` 的
 > `ro_mounts` + `env` 就是这份声明，换机器时改这里。
