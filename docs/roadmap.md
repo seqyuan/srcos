@@ -129,7 +129,7 @@
 |---|---|---|
 | 12 | ~~**审计流**~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，范围 A）；第二期（防篡改/管理页/生命周期/保留）见 handoff §3.1 #12 | — |
 | 13 | **Phase 6 SGE**：真登录节点上 `probe-env.sh`，再接真集群 | 真登录节点主机名（§8 #12） |
-| 14 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | — |
+| 14 | `storages.yaml` 编辑 / 申请审批流（管理端起服务已做） | — |
 
 ---
 
@@ -838,7 +838,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `internal/agenttoken`（创建/校验/撤销/失败关闭 + 使用时间）+ `srcos token create|list|revoke` +
       HTTP 面 `Authorization: Bearer`（第一期只读；第二期已可签发 `submit`，见下）+ 审计日志行
 - [x] **管理端页面**（2026-09-22）：`/admin` —— 实例总览（全部用户 + CPU/内存快照 + 日志）、
-      强制停止（走 `StopService`）、工具/授权内联编辑（增删用户/组/public/配额，"删除授权" = 下架）、
+      强制停止（走 `StopService`）、**启动服务**（2026-09-26，`POST /api/admin/instances` + `Runner.ForUser`，
+      共用同一端口池与路由表）、工具/授权内联编辑（增删用户/组/public/配额，"删除授权" = 下架）、
       组与管理员管理；配套 `/api/admin/*`（仅管理员 + Origin 校验）
 - [x] **授权变更的热加载**（2026-09-22）：`grant.Policy` 线程安全并支持原地 `ReplaceWith` ——
       管理端/API 的改动立即生效；手工 `vim grants.yaml` 在下一个扫描周期（10s）内生效，
@@ -1007,3 +1008,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **审计流第二期（2/4）：生命周期跃迁审计** —— `runtime.Options.Audit`；记录 `instance.done`（任务终态）、`instance.settled`（重启后凭 verdict 结算）、`instance.reaped`（回收 + reason）、`instance.orphaned`/`instance.adopted`（reconcile）、`instance.stopped`（管理端强制停 + CLI svc stop）；actor = 实例用户、kind=system；一个进程一个 Recorder（main.go 建，传给 supervisor 与 server）。e2e 断言 instance.done；runtime 单测锁定。剩：防篡改 / 保留策略 |
 | 2026-09-26 | **审计流第二期（3/4）：保留策略** —— `audit.Stale`/`audit.Prune`/`audit.ParseKeep` + `srcos audit prune --keep 90d [--dry-run]`；**显式、不自动**（删除审计是运维的决定，不是 tick 的副作用；`keep<=0` 不删任何东西），删除这件事本身记 `audit.prune`（谁、keep、删了几个、oldest/newest）。单测锁定「只删过期整天文件」与 keep=0 no-op。剩：防篡改 |
 | 2026-09-26 | **审计流第二期（4/4）：防篡改 hash chain** —— 每行 `prev`/`hash`（SHA-256(prev+该行字节)），**每文件**一条链；`srcos audit verify` + `/admin/audit` 横幅；能发现改行/删行/乱序/剥链字段，不能证明整文件未删、挡不住重写全部文件。**e2e 抓到的真 bug**：网关与 CLI 两个进程各持自己的「上一行」，交错写同一日文件链必断 —— 改为每次追加 `flock` + 重读文件尾（链属于文件不属于进程），单测 `TestChainSurvivesInterleavedRecorders` 锁定。审计流第二期完成；仅真实签名未做 |
+| 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |

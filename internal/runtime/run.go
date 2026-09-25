@@ -31,6 +31,24 @@ type Ports interface {
 	Reserve(port int, owner string) error
 }
 
+// ForUser returns a runner that starts units as `user` while sharing this
+// runner's port pool, routing table, backends, storage provider and audit
+// recorder (a shallow copy is enough: those fields are pointers or interfaces).
+//
+// It exists for the gateway, whose own runner deliberately carries no user
+// (reconcile and the reaper act on records, not on behalf of an actor, and
+// package runtime refuses to start a unit without one). An operator asking the
+// console to start a service for a user needs a runner that does — but *not* a
+// second port pool, which would hand the same port to two instances.
+func (r *Runner) ForUser(user string) *Runner {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	clone.opts.User = user
+	return &clone
+}
+
 // SetPorts installs the port pool after construction (the pool is shared with
 // the reconciler, which is built later).
 func (r *Runner) SetPorts(p Ports) { r.ports = p }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
+	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // This file renders the management console. It is server-rendered on purpose:
@@ -21,6 +22,9 @@ type AdminData struct {
 	Tools     []inspect.AdminTool
 	Admins    []string
 	Groups    map[string][]string
+	// Users is every registered account, for the "start a service as this
+	// user" form (the console can already stop, so it can start too).
+	Users []string
 	// DefaultAllow is shown because it silently overrides every grant.
 	DefaultAllow bool
 }
@@ -34,6 +38,7 @@ func AdminPage(siteTitle, username string, data AdminData) string {
 	body := fmt.Sprintf(adminTpl,
 		esc(username),
 		adminInstancesTable(data.Instances),
+		adminStartServiceForm(data),
 		defaultNote,
 		adminToolsTable(data.Tools),
 		adminUsersTable(data),
@@ -43,6 +48,40 @@ func AdminPage(siteTitle, username string, data AdminData) string {
 	body += `<script>var ADMIN_STATE = ` + AdminStateJSON(data) + `;</script>` +
 		`<script>` + adminScript + `</script>`
 	return PageShell(siteTitle, "管理控制台", body)
+}
+
+// adminStartServiceForm renders the "start a service as a user" control.
+//
+// The console could stop an instance but not start one; this closes the gap
+// without leaving the browser. Both lists are rendered server-side, so the note
+// can say precisely what is missing when there is nothing to start.
+func adminStartServiceForm(data AdminData) string {
+	var services []inspect.AdminTool
+	for _, t := range data.Tools {
+		if t.Kind == string(tool.KindService) {
+			services = append(services, t)
+		}
+	}
+	if len(data.Users) == 0 || len(services) == 0 {
+		return `<div class="adm-empty">启动服务需要：至少一个注册用户，以及一个 <span class="mono">kind: service</span> 的工具包。</div>`
+	}
+
+	var b strings.Builder
+	b.WriteString(`<form class="adm-start">`)
+	b.WriteString(`<select name="user">`)
+	for _, u := range data.Users {
+		b.WriteString(`<option value="` + esc(u) + `">` + esc(u) + `</option>`)
+	}
+	b.WriteString(`</select>`)
+	b.WriteString(`<select name="tool">`)
+	for _, t := range services {
+		b.WriteString(`<option value="` + esc(t.ID) + `">` + esc(t.ID) + ` ` + esc(t.Version) + `</option>`)
+	}
+	b.WriteString(`</select>`)
+	b.WriteString(`<button type="button" class="adm-btn primary" onclick="admStartService(this)">启动服务</button>`)
+	b.WriteString(`<span class="adm-hint-inline">以该用户身份启动一个实例（等价于 <span class="mono">srcos svc start --user</span>）；已存在则先停后起。</span>`)
+	b.WriteString(`</form>`)
+	return b.String()
 }
 
 // adminInstancesTable renders the instance overview.
@@ -339,6 +378,13 @@ function admSaveGrant(btn) {
 function admRemoveGrant(tool) {
   if (!confirm('删除 ' + tool + ' 的授权？该工具将只对管理员可见（等于下架）。')) { return; }
   admFetch('DELETE', '/api/admin/grants/' + encodeURIComponent(tool), null, '授权已删除');
+}
+function admStartService(btn) {
+  var form = btn.closest('.adm-start');
+  var user = form.querySelector('[name=user]').value;
+  var tool = form.querySelector('[name=tool]').value;
+  if (!confirm('以 ' + user + ' 的身份启动 ' + tool + '？')) { return; }
+  admFetch('POST', '/api/admin/instances', {user: user, tool: tool}, '服务已启动');
 }
 function admSaveGroup(btn) {
   var form = btn.closest('.grant-form');

@@ -145,7 +145,7 @@ var auditActions = []string{
 	"grant.set", "grant.remove", "grant.allow", "grant.deny", "group.set", "admins.set",
 	"token.create", "token.revoke",
 	"instance.done", "instance.settled", "instance.stopped",
-	"instance.reaped", "instance.adopted", "instance.orphaned",
+	"instance.started", "instance.reaped", "instance.adopted", "instance.orphaned",
 }
 
 func actionOptions(selected string) string {

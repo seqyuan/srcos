@@ -177,8 +177,8 @@ orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
 
-**其它**：申请/审批流（现在只有管理员直接 `grant`）；管理端起服务（`svc start` 仍只在 CLI，
-管理端能停不能起）；`storages.yaml` 的管理端编辑（只有 CLI/手写）；`apptainer` sandbox（Phase 6，
+**其它**：申请/审批流（现在只有管理员直接 `grant`）；`storages.yaml` 的管理端编辑（只有手写）；
+`apptainer` sandbox（Phase 6，
 声明了会明确报错）；`prlimit` 路径下的 RSS 看门狗；降级模式（无 user systemd）下失去等待者的任务
 只能写 `stopped` + 说明（没有判定文件可读，ADR-022 的兜底分支）。
 
@@ -195,7 +195,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 |---|---|---|---|
 | **12** | **审计流第二期**：防篡改（hash chain / 签名）+ `/admin/audit` 查询页 + 生命周期审计 + 保留策略 | 第一期（scope A）已完成：结构化落盘 + 写入面/拒绝/配置变更埋点 + CLI 读取 | — |
 | **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
-| 14 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
+| 14 | `storages.yaml` 编辑 / 申请审批流（管理端起服务已做） | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
 
 ### 3.2 需要用户提供信息才能做的
 

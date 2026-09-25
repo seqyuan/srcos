@@ -11,6 +11,7 @@ import (
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
+	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -61,6 +62,9 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		writeJSON(w, 200, map[string]any{"instances": instances})
+
+	case path == "/instances" && r.Method == http.MethodPost:
+		h.adminStartInstance(w, r, username)
 
 	case strings.HasPrefix(path, "/instances/") && strings.HasSuffix(path, "/stop") && r.Method == http.MethodPost:
 		h.adminStopInstance(w, r, username, strings.TrimSuffix(strings.TrimPrefix(path, "/instances/"), "/stop"))
@@ -183,6 +187,70 @@ func (h *Handler) adminInstances(r *http.Request) ([]inspect.AdminInstance, erro
 // operator is responding to something the owner may not know about (a runaway
 // service eating a login node). The record is updated by the same StopService
 // the reaper uses, so what the owner sees stays truthful.
+// adminStartInstance starts a service for a user on an operator's behalf.
+//
+// The console could already stop an instance but not start one, which left
+// "start a service" as a CLI-only act. It reuses the gateway's own runner via
+// ForUser so there is one port pool and one routing table — a second runner
+// would hand the same port to two instances.
+func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, username string) {
+	if h.opts.Runner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "this gateway has no supervisor, so it cannot start instances",
+		})
+		return
+	}
+	var body struct {
+		User string `json:"user"`
+		Tool string `json:"tool"`
+	}
+	if err := parseBody(r, &body); err != nil {
+		writeBodyError(w, err)
+		return
+	}
+	user, toolID := strings.TrimSpace(body.User), strings.TrimSpace(body.Tool)
+	if user == "" || toolID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user and tool are required"})
+		return
+	}
+	if h.Registry.GetUser(user) == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such user: " + user})
+		return
+	}
+	t, err := h.manifestForAdmin(toolID)
+	if err != nil {
+		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	if t.Kind != tool.KindService {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "tool " + t.ID + " is a task; tasks are submitted, not started",
+		})
+		return
+	}
+
+	runner := h.opts.Runner.ForUser(user)
+	// Starting twice should converge on one live service, the same way
+	// `srcos svc start` does: stop the previous one first, don't leak it.
+	if prev, lerr := runtime.LoadInstance(runtime.InstancePath(h.opts.ConfigDir, runtime.InstanceID(user, t.ID, ""))); lerr == nil {
+		if !prev.State.Terminal() {
+			_ = runner.StopService(r.Context(), t, prev)
+		}
+	}
+	inst, err := runner.StartService(r.Context(), t, nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = runtime.WriteServiceManifest(h.opts.ConfigDir, user, t.ID, nil)
+
+	h.auditChange(r, agenttoken.HumanIdentity(username), "instance.started", "instance", inst.ID, map[string]any{
+		"tool":  t.ID,
+		"owner": user,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"instance": inspect.ViewOfInstance(inst)})
+}
+
 func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, username, id string) {
 	if h.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{

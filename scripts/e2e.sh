@@ -25,6 +25,7 @@ USER_NAME=alice
 ADMIN_USER=e2eops
 PASSWORD=e2e-pass
 TOOL=e2e-ticker
+SVC=e2e-web
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
 TIMEOUT="${SRCOS_E2E_TIMEOUT:-60}"
 
@@ -139,6 +140,35 @@ touch "${SIGN}"
 echo "[done] ticks=${TICKS} -> ${OUT}/result.txt"
 SH
 chmod +x "$TOOLS/$TOOL/work.sh"
+
+# A service tool, so the e2e also covers the path the task tool cannot: start
+# (via the admin API), a published route, and a stop.
+mkdir -p "$TOOLS/$SVC"
+cat > "$TOOLS/$SVC/tool.yaml" <<YAML
+schemaVersion: 1
+id: $SVC
+version: 0.0.1
+name: "E2E Web"
+description: "端到端回归用的最小 service：监听分配到的端口"
+kind: service
+backend: local
+sandbox: none
+entry: work.sh
+resources:
+  cpu: 1
+  memory: "256Mi"
+ingress: {port: 8080}
+lifecycle: {max_lifetime: "5m", idle_ttl: "2m"}
+YAML
+cat > "$TOOLS/$SVC/work.sh" <<'SH'
+#!/usr/bin/env bash
+# A service is a unit that keeps running: listen on the port SRCOS assigned.
+set -euo pipefail
+: "${SRCOS_PORT:?SRCOS_PORT not set}"
+exec python3 -m http.server "${SRCOS_PORT}" --bind 127.0.0.1
+SH
+chmod +x "$TOOLS/$SVC/work.sh"
+
 "$BIN" tool validate -d "$CFG" --tools-dir "$TOOLS" >/dev/null || fail "tool validate failed"
 pass "tool package valid"
 
@@ -157,6 +187,12 @@ grants:
       max_cpu: 4
       max_memory: 4Gi
       max_instances: 2
+  - tool: $SVC
+    users: [$USER_NAME]
+    quota:
+      max_cpu: 2
+      max_memory: 1Gi
+      max_instances: 1
 YAML
 pass "users + grants ready (default-deny lifted for $TOOL; $ADMIN_USER is admin)"
 
@@ -299,5 +335,27 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/api/admin/audit")
 [ "$code" = "403" ] || fail "non-admin /api/admin/audit = $code, want 403"
 pass "non-admin refused (403)"
 
+# ── 11. 管理员启动 service（能停也能起）──────────────────────────
+step 11 "管理端启动 service（POST /api/admin/instances）"
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admin/instances" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' \
+  -d "{\"user\":\"$USER_NAME\",\"tool\":\"$SVC\"}")"
+[ "$code" = "201" ] || fail "admin start service = $code, want 201"
+
+# The route must be reachable through the proxy as that user.
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/proxy/$USER_NAME/$SVC/")"
+[ "$code" = "200" ] || fail "proxied service = $code, want 200"
+pass "service running and reachable at /proxy/$USER_NAME/$SVC/"
+
+grep -rq '"action":"instance.started"' "$AUDDIR" 2>/dev/null || fail "admin service start not audited"
+
+SVC_INST="$("$BIN" job list -d "$CFG" 2>/dev/null | awk -v t="$SVC" '$2==t{print $1}' | head -1)"
+[ -n "$SVC_INST" ] || fail "could not find the service instance id"
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admin/instances/$SVC_INST/stop" \
+  -H "Origin: $BASE")"
+[ "$code" = "200" ] || fail "admin stop = $code, want 200"
+grep -rq '"action":"instance.stopped"' "$AUDDIR" 2>/dev/null || fail "admin service stop not audited"
+pass "started and stopped, both audited"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端审计\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务\n'

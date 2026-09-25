@@ -4,6 +4,12 @@
   .adm-title { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
   .adm-sub { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
   .adm-actions { display: flex; gap: 8px; align-items: center; }
+  .adm-start { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 14px; }
+  .adm-start select {
+    height: 34px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card, transparent); color: var(--text); font-size: 13px;
+  }
+  .adm-start .adm-hint-inline { color: var(--text-muted); font-size: 12px; }
   .adm-btn {
     height: 38px; padding: 0 16px; border-radius: var(--r-pill); border: 1px solid var(--border);
     background: transparent; color: var(--text); font-size: 13px; font-weight: 550; cursor: pointer;
@@ -91,6 +97,7 @@
   <div class="adm-section">
     <h2>实例（全部用户）</h2>
     <div class="hint">只显示「还活着」的实例的资源占用快照（后端能报才有）；日志可展开，强制停止不需要实例所有者确认。</div>
+    <div class="adm-card">%s</div>
     <div class="adm-card">%s</div>
   </div>
 

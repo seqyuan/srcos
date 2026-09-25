@@ -132,11 +132,17 @@ func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := policy.Snapshot()
 
+	var users []string
+	for _, u := range s.registry.ListUsers() {
+		users = append(users, u.Username)
+	}
+
 	sendHTML(w, 200, web.AdminPage(s.siteTitle, username, web.AdminData{
 		Instances:    instances,
 		Tools:        tools,
 		Admins:       snapshot.Admins,
 		Groups:       snapshot.Groups,
+		Users:        users,
 		DefaultAllow: snapshot.DefaultAllow,
 	}))
 }
