@@ -766,7 +766,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 另一个实现期发现：`bwrap` **无法在已只读绑定的 `/usr` `/bin` `/lib*` 内创建挂载点**，
 所以工具自带二进制统一放 `/opt/srcos/bin`（沙箱 `PATH` 第一项），注册期直接拒绝违规配置。
 
-### Phase 2：实例化运行时（**进行中**）
+### Phase 2：实例化运行时（**主体完成**：剩 `storages` 管理端编辑、端口/路由审计、prlimit RSS 看门狗）
 - [x] `Tool` / `RunUnit` / `Instance` 的 Go 类型定义 + `tool.yaml` 校验器（Phase 1）
 - [x] `job.json` 落盘扫描器（目录即队列）+ `srcos job submit/run/list/status/logs` CLI（Phase 1）
 - [x] `MountSpec` + `Jail` + **内建挂载**（`/workspace`、虚拟 `/home/<user>`）+ 模板初始化（Phase 1）
@@ -811,7 +811,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `runtime.ReconcileTasks` 每 tick 结算失去等待者的任务记录；**任务改以 systemd 瞬时 unit 运行**，
       判定由 `ExecStopPost` 写入文件，所以重启后再结束的运行也有真实退出码
 
-### Phase 3：注册、授权与管理端（**进行中**）
+### Phase 3：注册、授权与管理端（**主体完成**：剩审计流与 `storages` rw 配额）
 - [x] 工具注册：扫描工具目录（`--tools-dir` / `$SRCOS_TOOLS_DIR`）
 - [x] **`Grant` 授权模型**（`internal/grant`）：**默认拒绝**、只有「允许」没有 deny、组 + 用户 + public + 通配兜底、管理员绕过
 - [x] **用户级配额聚合**：`max_cpu` / `max_memory` / `max_instances`，按存活实例求和；终态实例不占名额
@@ -831,7 +831,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] 审计日志（含 agent token 调用）
 - [ ] `storages.yaml` 的 rw 配额
 
-### Phase 3.5：MCP Server（read-only，**招牌功能**）——✅ 完成（2026-09-22）
+### Phase 3.5：MCP Server（**招牌功能**）——✅ 完成（只读 2026-09-22；**第二期 submit/cancel/run_flow 2026-09-24**）
 - [x] 网关内置 `/mcp` 端点（Streamable HTTP），复用单二进制与认证：`internal/mcp`，无会话状态
 - [x] MCP tool schema 从 `Tool.interface` **自动派生**（ADR-018）：`Interface.JSONSchema()`，
       在 `srcos_describe_tool` 的 `inputSchema` 里对外
@@ -843,7 +843,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] 端到端验证：官方 Python MCP SDK 客户端连上 → initialize / list_tools / call_tool 全通
 - [x] 一份实现两个前端：`internal/inspect` 是只读答案的唯一实现，REST API、HTML 页面、MCP 共用
 
-### Phase 4：云流程（**起步**）
+### Phase 4：云流程（**主体完成**：契约/校验/展开/并发/重试/取消/续跑/画布；剩流程级审计与 annopi 模块）
 - [x] **`docs/flow-spec.md`** 契约冻结（2026-09-22）
 - [x] **`Flow` 注册 + 校验**（2026-09-22）：`internal/flow` —— DAG 无环（报出环路径）、
       **连线即依赖**（下游必须直接或间接 depends_on 上游，否则可能先读不存在的路径）、
@@ -869,7 +869,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [ ] 流程级审计（目前只有实例记录与 `flowrun.yaml`）
 - [ ] 把 `annopi` 注册为普通工具模块（逃生口）
 
-### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer
+### Phase 5：前端（`webui/` Vite 包）+ 自带 viewer —— ✅ **全部完成**（2026-09-25）
 - [x] **`webui/` 工程骨架 + `make webui` + `//go:embed dist`**（2026-09-22）：Vite + React + TS，
       产物嵌入 `internal/web/dist/`；整个 dist/ 都是产物（只有 `.gitkeep` 进版本库），
       所以没有 Node 的环境也能 `make build`（画布页退化为解释页）
@@ -896,7 +896,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       列表服务端渲染（无 JS 也能看与撤），生成走 JSON API 以免明文进 URL；**只给自己签**、
       白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
 
-### Phase 5.5：dsh 集成（先 B 后 A）
+### Phase 5.5：dsh 集成（**路 B ✅ 2026-09-25**，路 A 未做）
 - [x] **路 B**（2026-09-25）：`integrations/dsh-plugin/` —— `@seqyuan/srcos-dsh`：`srcos` 协议
       provider（元数据帧 + 轮询去重 + 失败帧）、侧边栏 tab 类型（认领 `dsh-resource://srcos/**`
       与原生 `srcos://**`）、面板体（目录浏览 / 文本预览 / 失败原因），`build.mjs` 拼 dsh 的
