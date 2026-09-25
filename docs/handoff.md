@@ -472,7 +472,9 @@ internal/execute/           写入面唯一实现：Submit / Cancel / RunFlow（
                             （任务在 runtime 侧跑在 systemd 瞬时 unit 里，判定见 local.go 的 verdict*）
 internal/proxy/             httputil.ReverseProxy 的 Rewrite/ModifyResponse 全部逻辑
   └ conns.go                ActiveConns：长连接（WebSocket）计数，供回收判断"在用"
-internal/server/            网关 mux、登录/TOTP 页面、工具页面、/assets、代理路由
+internal/server/            网关：server.go（组装/Options/mux）+ auth.go（登录/TOTP）+
+                            proxy.go（代理路由）+ pages.go（页面/资源/任务/管理端）+
+                            routes.go（扫描/reconcile/回收）+ loops.go（后台循环）
   └ routes.go               动态路由 + 启动 reconcile / 周期回收 / 每 tick 结算任务 / 未就绪状态页
                             （TaskLoop 跑任务队列；ScanLoop 里的 reconcileTasks 收尾失去等待者的任务）
 internal/api/               管理 API（services）+ 工具/存储/任务 API（tools.go, jobs.go）
