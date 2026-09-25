@@ -54,3 +54,9 @@ lifecycle:
 # 首次使用时把模板拷进用户的 workspace；之后用户可以自己改 app.R。
 workspace:
   init_from: workspace-template/
+
+# 托管 agent 的实例身份（ADR-025）。应用本不是一个 agent，但声明后 SRCOS
+# 会在实例启动时签发一枚**只读**的实例凭据（scope 来自这里）放到
+# $HOME/.srcos/agent-token，app.R 用它调 SRCOS 自己的只读 API（SRCOS_API）。
+# 这类调用在审计里记为「这个实例做的」（actor 带 instance）。
+agent: { mcp: [read] }
