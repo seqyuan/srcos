@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0（T2→T5→T3→T4）与审计流（范围 A）推进中。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
+> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0（T2 删路 B/归档 · T5 `make e2e` · T3 sandbox 规则 · T4 构建守卫）完成；**审计流第一期完成**（ADR-024，scope A：`internal/audit` 结构化 JSONL + 写入面/拒绝/配置变更埋点 + `srcos audit`）。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
 
 ---
 
@@ -39,14 +39,17 @@ cookie，与程序（agent / MCP 客户端）的 **agent token**（`Authorizatio
 sandbox HTML）、`/tasks`（实例列表 + 详情 + **SSE 实时日志**）、`/tokens`（凭据自助页）、
 `/admin`（控制台）、`/admin/flows/<id>/edit`（画布：连线 + **拖拽摆放** + **expose 一键补齐**）。
 
+**可审计**：`internal/audit` 把写入面（submit/cancel/run_flow）、拒绝事件与配置变更写进
+`data/audit/audit-YYYY-MM-DD.jsonl`（只追加、按天轮转、参数脱敏），`srcos audit tail|list` 读（ADR-024）。
+
 **流程**：`flow run` 把「节点 × 样本」展开成普通任务，并发 / 重试 / 取消 / 续跑 / 配额 / 画布都通。
 
 **dsh**：只保留一条已验证用法 —— 作为「本地优先应用」被网关代理（`docs/dsh-demo.md`）；
 曾经探索的「路 B」资源协议插件已于 2026-09-26 移除（未验证 + 逆向 developer preview +
 与自带 viewer 重叠，ADR-016）。`srcos://` 与 `dsh-resource://` 的地址同构作为协议特性保留。
 
-下一步：**审计流**（结构化落盘 + 配置变更审计，范围 A）；**Phase 6（SGE）**（需要一台真登录节点）；
-或收尾 Phase 2/3 的几条（申请审批、`svc start` 进管理端）。
+下一步：**Phase 6（SGE）**（需要一台真登录节点）；或收尾 Phase 2/3 的几条（申请审批、`svc start` 进管理端）；
+或审计流的第二期（防篡改 / 管理页）。
 
 ---
 
@@ -124,6 +127,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
+│ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -162,8 +166,11 @@ UI 造起来便宜了 → UI 不再是护城河
 
 ### 2.3 尚未实现（明确边界，不要误以为有）
 
-**审计流** —— 目前每个被接受的 agent 请求写一行网关日志，每次写入另有一行 `audit submit|cancel|run_flow`；
-但没有独立的审计流、没有结构化落盘、也没有「改配置」的审计（流程级审计同样缺）。
+**审计流** —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）：`internal/audit` 把「谁 / 何时 /
+哪个版本的工具 / 什么参数 / 允许还是拒绝」写进 `data/audit/audit-YYYY-MM-DD.jsonl`（只追加、
+按天轮转、参数脱敏），`srcos audit tail|list` 读；覆盖写入面（submit/cancel/run_flow）、
+拒绝事件（CSRF/未认证/只读试写）与配置变更（grant/group/admins/token，API 与 CLI 两条门）。
+**剩**：防篡改（hash chain）、`/admin/audit` 查询页、生命周期跃迁审计、保留策略。
 
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
@@ -184,7 +191,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 
 | # | 做什么 | 为什么现在做 | 需要什么 |
 |---|---|---|---|
-| **12** | **审计流（进行中，范围 A）**：结构化落盘（谁 / 何时 / 哪个版本的工具 / 什么参数 / 被拒原因）+ 配置变更审计 | 「可审计」是三个支柱之一，现在是散落的日志行；企业内场景会先问这个 | — |
+| **12** | **审计流第二期**：防篡改（hash chain / 签名）+ `/admin/audit` 查询页 + 生命周期审计 + 保留策略 | 第一期（scope A）已完成：结构化落盘 + 写入面/拒绝/配置变更埋点 + CLI 读取 | — |
 | **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
 | 14 | 管理端起服务 / `storages.yaml` 编辑 / 申请审批流 | 把剩余运维动作搬进网关；非 CLI 用户能用 | — |
 
@@ -439,6 +446,7 @@ cmd_job.go                  tool / job / svc 子命令 + 通用 flag 解析（jo
 cmd_grant.go                grant 子命令
 cmd_token.go                token 子命令（create / list / revoke；`--expires 90d|never|<date>`）
 cmd_flow.go                 flow 子命令（list / validate；`--flows-dir`）
+cmd_audit.go                audit 子命令（tail / list：读 data/audit 的结构化流水）
 
 internal/resource/           资源协议（纯解析，无 I/O）：地址语法（与 dsh-resource:// 同构）+ viewer 注册表
   ├ address.go               srcos://<provider>/<scope>/<path>[?tool=]（无用户名：用户相对解析）
@@ -509,6 +517,8 @@ internal/flow/              流程契约：Flow 类型 + DAG（拓扑序/环检�
   └ record.go               运行记录（flowrun.yaml）+ .sign 逃生口
 internal/flowrun/           流程执行器：并发窗口、AND 依赖、when: always、重试+退避、取消、配额、续跑
 internal/activity/          write-behind 时间戳日志（token 使用时间 / 服务活跃时间共用）
+internal/audit/             结构化审计流水（Event/Actor/Target/Request/Outcome + Recorder 追加写
+                            data/audit/audit-YYYY-MM-DD.jsonl；按天轮转、nil no-op、参数脱敏）
 internal/runtime/usage.go   资源快照（systemd cgroup / /proc）—— UnitSampler 后端接口
 internal/rate/              令牌桶限速（登录 + 带宽）
 

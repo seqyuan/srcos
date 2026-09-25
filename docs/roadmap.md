@@ -95,11 +95,14 @@
   `run_flow`）+ `interface → JSON Schema` 派生
 - **流程画布**（Phase 5）：`/admin/flows/<id>/edit`（Vite+React 只在这一页加载）+ **拖拽摆放**
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
+- **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
+  `srcos audit tail|list`；埋点覆盖写入面（submit/cancel/run_flow）、拒绝事件
+  （CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）
 
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
-- 建立 `AGENTS.md`（不变式与定位）+ **23 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
+- 建立 `AGENTS.md`（不变式与定位）+ **24 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
   `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
 - **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
@@ -112,7 +115,9 @@
 - ~~**代理层接入动态路由表**~~ —— ✅ 完成（2026-09-22）：网关从实例记录重建路由表，
   `/proxy/<user>/<tool>/` 可达、实例优先于卡片、裸路径（SPA）同样回投到实例
 - ~~授权变更热加载（改 `grants.yaml` 需重启）~~ —— ✅ 完成（2026-09-22：10 秒内自动生效）
-- 审计流（散落的日志行，没有结构化落盘与配置变更审计）；`storages` 的 rw 配额
+- ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
+- 审计流的第二期：防篡改（hash chain / 签名）、`/admin/audit` 查询页、生命周期跃迁审计、保留策略
+- `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
 
@@ -701,6 +706,36 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-024：审计流是结构化、只追加的 JSONL，读在 `srcos audit`
+
+- **背景**：「可审计」是三个支柱之一（ADR-017），但实现一直是散落的 `log.Printf` 行 ——
+  能被 `journalctl` 看见，却答不了「谁在何时用哪个版本的工具、什么参数、被允许还是被拒绝」，
+  更没有「改配置」的记录（谁把哪个工具开给了谁），而这恰恰是企业内场景最先问的。
+- **决策**：新增 `internal/audit`，能力分两半：
+  - **写**：一个 JSON 对象一行，追加到 `data/audit/audit-YYYY-MM-DD.jsonl`（0600，按天轮转）。
+    事件模型 `Event{Actor,Action,Target,Params,Decision,Reason,Request,Outcome,Refs}`，
+    其中 `Actor` 区分 `session` / `agent_token`（带 token id 与 scopes）/ `cli` / `system`。
+  - **读**：`srcos audit tail|list`（过滤 user/action/decision/since，`--json` 出原始行）。
+- **两条硬约束**（写在包注释里，调用方依赖它们）：
+  1. **记录绝不打断它描述的动作**：`nil *Recorder` 是 no-op，写失败只记 stderr，绝不进请求路径。
+     `Recorder` 因此可以被调用方无条件持有，不需要每处 `if audit != nil`。
+  2. **凭据永不落盘**：所有参数过 `Redact`（password/secret/token/api_key/… 掩码）。
+- **埋点范围（第一期，scope A）**：
+  - **写入面**（`internal/execute`）：`submit` / `cancel` / `run_flow` 的成功与拒绝 ——
+    用 `defer` + 具名返回值，使每一条 early return 的拒绝路径都被记录。
+  - **拒绝事件**（`internal/api`）：CSRF、未认证、只读 token 试写。拒绝是最有价值的审计材料。
+  - **配置变更**：`grant.*` / `group.set` / `admins.set` / `token.create` / `token.revoke`
+    （API 与 CLI 两条门都记 —— 漏了 CLI 就是漏了一扇门）；CLI `job submit` 也记。
+- **不做（第一期）**：防篡改（hash chain / 签名）、管理端查询页、生命周期跃迁审计
+  （reconcile / reaper）、保留策略。按「先有流，再谈防篡改」的顺序。
+- **为什么不是数据库 / 不是消息队列**：与「文件系统即数据库」一致（AGENTS.md）。
+  一行一个 JSON 的文本流能被 `grep`、`jq`、`rsync`，也能在十年后被读懂；
+  审计的可用寿命比任何查询 API 都长。
+- **为什么放在 `data/` 而不是 `config/`**：`config/` 是声明态（谁被允许做什么），
+  `data/` 是运行态（谁做了什么）。两者混在一起会让「备份配置」变成「备份审计」。
+
+---
+
 ## 6. 路线图
 
 ### Phase 0：基线 ✅
@@ -952,3 +987,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **`make e2e` 端到端回归网**（技术债 T5）—— `scripts/e2e.sh`：临时配置 + 临时端口（`mktemp` + 空闲端口），跑通 提交 → 网关队列消费 → systemd 瞬时 unit → `<log>.verdict` → 日志 → 实例记录 → HTTP 资源查看（`/api/resources` + `raw`）→ agent token 认证；退出时只停自己创建的 unit 并清理临时目录（不碰仓库 `config/` `data/`）。无 bwrap 时 `SRCOS_E2E_SANDBOX=none` |
 | 2026-09-26 | **`sandbox: none` + `requires_storages` 注册期拒绝**（技术债 T3）—— storage 是 bind mount，只存在于 mount namespace；`none` 下沙箱路径在宿主上不存在，工具会以 `no such file` 失败并指向错误的问题。`tool.Validate` 直接拒绝该组合（tool-spec §9 / §5.4），连带修正 4 处自相矛盾的测试 fixture（补 `sandbox: bwrap`） |
 | 2026-09-26 | **`make build` 前端产物守卫**（技术债 T4）—— `internal/web/dist/` 缺 `index.html` 时醒目警告（不阻断构建）：以前是构建静默通过、到画布页才发现没打包。修正 Makefile 里“占位 index.html 进版本库”的过时注释（实际只进 `.gitkeep`） |
+| 2026-09-26 | **审计流第一期（scope A，ADR-024）** —— `internal/audit`（Event/Actor/Target/Request/Outcome + Recorder 追加写 `data/audit/audit-YYYY-MM-DD.jsonl`、按天轮转、nil no-op、参数脱敏、损坏行跳过）+ `srcos audit tail\|list`（--user/--action/--decision/--since/--limit/--json）；埋点：写入面 submit/cancel/run_flow（defer+具名返回值，拒绝路径不漏）、api 拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、CLI job submit；`make e2e` 第 9 步断言 submit(allow)+scope(deny) 入流。**不做**：防篡改 / 管理页 / 生命周期审计 |

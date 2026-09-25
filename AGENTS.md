@@ -177,6 +177,7 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 | `README.md` | 使用者怎么装、怎么用（代理网关部分） | 用户可见行为变更时改 |
 | `docs/environments.md` | 各主机的实测环境事实（沙箱/资源/存储/调度器） | 换主机或环境变化时追加 |
 | `docs/*.md` 其余 | 专题指南（`tunnel.md`、`dsh-demo.md`、`reverse-proxy-tls.md`…） | 对应主题变更时改 |
+| `docs/archive/` | goprox→SRCOS 过渡期的历史记录（命令与路径已过时） | **不维护**，不作为当前契约 |
 
 **规则：本文件写"为什么不能这么做"，roadmap 写"我们决定这么做"和"做到哪了"，
 handoff 写"现在到哪了、下一步做什么、哪些坑踩过了"。**

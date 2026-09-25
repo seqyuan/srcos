@@ -122,6 +122,10 @@ TLS 设置会持久化到 `state.yaml`（`tls_cert` / `tls_key`），之后的 `
             --hmac-secret <key>              启用 SSO（身份头 + HMAC 签名）
 ./srcos sso --off                           关闭 SSO
 
+# 审计（谁做了什么，ADR-024）
+./srcos audit tail -n 20                     最近 20 条结构化审计记录
+./srcos audit list --decision deny           只看被拒绝的请求
+
 Options:
   -d, --config-dir <dir>  配置目录（默认 <程序目录>/config）
   --host <host>           监听地址（默认 0.0.0.0）
@@ -960,6 +964,27 @@ srcos serve -d /opt/srcos/config --no-task-drainer
 >
 > systemd unit 的另一个副作用值得知道：**unit 的 stdout 不继承 SRCOS 的 fd**，
 > 所以日志由 systemd 写（`StandardOutput=append:`），而不是我们把管道接过去。
+
+### 审计流（`srcos audit`）
+
+「可审计」是平台三个支柱之一（ADR-024）。每次**写入**（提交 / 取消 / 跑流程）、每次**被拒绝**的请求
+（CSRF / 未认证 / 只读 token 试写）、每次**配置变更**（改授权、改组、改管理员、签发 / 撤销 token
+—— API 与 CLI 两条门都记）都会落一条结构化记录到 `data/audit/audit-YYYY-MM-DD.jsonl`：
+一行一个 JSON 对象、只追加、按天轮转、权限 0600，参数中的密码 / 密钥 / token 一律打码。
+
+记录回答的是：**谁、何时、哪个版本的工具、什么参数、被允许还是被拒绝**。
+
+```bash
+./srcos audit tail -n 20                       最近 20 条（最旧在前）
+./srcos audit list --user alice                 某个用户的全部动作
+./srcos audit list --decision deny              只看被拒绝的
+./srcos audit list --action grant.set           只看授权变更
+./srcos audit list --since 7d --limit 100       最近 7 天，最近 100 条
+./srcos audit list --json | jq .               原始 JSON（喂给日志 / 审计系统）
+```
+
+审计写在 `data/`（运行态）而不是 `config/`（声明态）—— 备份配置不该连审计一起带走。
+防篡改（hash chain）、管理端查询页、生命周期跃迁审计属于第二期。
 
 ## 管理控制台（`/admin`，仅管理员）
 
