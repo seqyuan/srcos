@@ -26,6 +26,7 @@ ADMIN_USER=e2eops
 PASSWORD=e2e-pass
 TOOL=e2e-ticker
 SVC=e2e-web
+ASK=e2e-ask
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
 TIMEOUT="${SRCOS_E2E_TIMEOUT:-60}"
 
@@ -169,6 +170,27 @@ exec python3 -m http.server "${SRCOS_PORT}" --bind 127.0.0.1
 SH
 chmod +x "$TOOLS/$SVC/work.sh"
 
+# A tool alice does NOT have and CAN ask for (requestable), so the e2e exercises
+# the request -> approve -> access path.
+mkdir -p "$TOOLS/$ASK"
+cat > "$TOOLS/$ASK/tool.yaml" <<YAML
+schemaVersion: 1
+id: $ASK
+version: 0.0.1
+name: "E2E Ask"
+description: "可申请但未授权的工具（B3 用）"
+kind: task
+backend: local
+sandbox: none
+entry: work.sh
+resources:
+  cpu: 1
+  memory: "256Mi"
+  walltime: "0:05:00"
+YAML
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TOOLS/$ASK/work.sh"
+chmod +x "$TOOLS/$ASK/work.sh"
+
 "$BIN" tool validate -d "$CFG" --tools-dir "$TOOLS" >/dev/null || fail "tool validate failed"
 pass "tool package valid"
 
@@ -193,6 +215,9 @@ grants:
       max_cpu: 2
       max_memory: 1Gi
       max_instances: 1
+  - tool: $ASK
+    users: [$ADMIN_USER]
+    requestable: true
 YAML
 pass "users + grants ready (default-deny lifted for $TOOL; $ADMIN_USER is admin)"
 
@@ -357,5 +382,38 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admi
 grep -rq '"action":"instance.stopped"' "$AUDDIR" 2>/dev/null || fail "admin service stop not audited"
 pass "started and stopped, both audited"
 
+# ── 12. 申请 → 审批（B3）──────────────────────────────────────────
+step 12 "工具访问申请/审批"
+# alice asks for the requestable tool she does not have.
+RESP="$(curl -s -w '\n%{http_code}' -b "$CJ" -X POST "$BASE/api/requests" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' \
+  -d "{\"tool\":\"$ASK\",\"reason\":\"e2e\"}")"
+code="$(printf '%s' "$RESP" | tail -1)"
+[ "$code" = "201" ] || fail "request create = $code: $(printf '%s' "$RESP" | head -1)"
+
+REQ_ID="$(curl -fsS -b "$CJ" "$BASE/api/requests" | grep -o '"id":"req-[^"]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$REQ_ID" ] || fail "could not read the request id"
+
+# A tool alice already has needs no request.
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" -X POST "$BASE/api/requests" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' -d "{\"tool\":\"$TOOL\"}")"
+[ "$code" = "400" ] || fail "already-granted request = $code, want 400"
+
+# The admin sees it pending, and a non-admin cannot read the queue.
+curl -fsS -b "$CJ2" "$BASE/api/admin/requests?state=pending" | grep -q "$REQ_ID" \
+  || fail "admin does not see the pending request"
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/api/admin/requests")"
+[ "$code" = "403" ] || fail "non-admin request queue = $code, want 403"
+
+# Approve: access becomes real, and both acts are audited.
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admin/requests/$REQ_ID/approve" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' -d '{}')"
+[ "$code" = "200" ] || fail "approve = $code, want 200"
+curl -fsS -b "$CJ" "$BASE/api/tools" | grep -q "\"id\":\"$ASK\"" \
+  || fail "approved tool is still not visible to alice"
+grep -rq '"action":"request.create"' "$AUDDIR" 2>/dev/null || fail "request.create not audited"
+grep -rq '"action":"request.approve"' "$AUDDIR" 2>/dev/null || fail "request.approve not audited"
+pass "申请 → 待审 → 批准 → 可用，且入审计"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批\n'

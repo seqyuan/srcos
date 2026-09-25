@@ -137,6 +137,18 @@ func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	for _, u := range s.registry.ListUsers() {
 		users = append(users, u.Username)
 	}
+	// Pending access requests (B3). A read failure must not blank the console,
+	// so it is logged and the section reads "none".
+	var pending []accessrequest.Request
+	if all, rerr := accessrequest.List(s.dataDir()); rerr != nil {
+		log.Printf("[srcos] admin requests: %v", rerr)
+	} else {
+		for _, req := range all {
+			if req.State == accessrequest.Pending {
+				pending = append(pending, req)
+			}
+		}
+	}
 
 	sendHTML(w, 200, web.AdminPage(s.siteTitle, username, web.AdminData{
 		Instances:    instances,
@@ -144,6 +156,7 @@ func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		Admins:       snapshot.Admins,
 		Groups:       snapshot.Groups,
 		Users:        users,
+		Requests:     pending,
 		DefaultAllow: snapshot.DefaultAllow,
 	}))
 }

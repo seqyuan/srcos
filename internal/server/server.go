@@ -496,6 +496,7 @@ func (s *Server) Handler() http.Handler {
 	// proxied backend's own /api/... tree is not shadowed by a catch-all.
 	// Each of these is a reserved gateway path (README「保留路径」).
 	for _, p := range []string{"/api/tools", "/api/tools/", "/api/paths", "/api/jobs", "/api/jobs/", "/api/flows/",
+		"/api/requests", "/api/requests/",
 		"/api/tokens", "/api/tokens/",
 		"/api/resources", "/api/resources/raw", "/api/resources/html",
 		"/api/admin", "/api/admin/"} {

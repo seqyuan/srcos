@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/seqyuan/srcos/internal/accessrequest"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -22,6 +23,9 @@ type AdminData struct {
 	Tools     []inspect.AdminTool
 	Admins    []string
 	Groups    map[string][]string
+	// Requests is every *pending* access request (B3); decided ones are history
+	// the operator reads through `srcos audit` / the audit page.
+	Requests []accessrequest.Request
 	// Users is every registered account, for the "start a service as this
 	// user" form (the console can already stop, so it can start too).
 	Users []string
@@ -37,6 +41,7 @@ func AdminPage(siteTitle, username string, data AdminData) string {
 	}
 	body := fmt.Sprintf(adminTpl,
 		esc(username),
+		adminRequestsTable(data.Requests),
 		adminInstancesTable(data.Instances),
 		adminStartServiceForm(data),
 		defaultNote,
@@ -81,6 +86,32 @@ func adminStartServiceForm(data AdminData) string {
 	b.WriteString(`<button type="button" class="adm-btn primary" onclick="admStartService(this)">启动服务</button>`)
 	b.WriteString(`<span class="adm-hint-inline">以该用户身份启动一个实例（等价于 <span class="mono">srcos svc start --user</span>）；已存在则先停后起。</span>`)
 	b.WriteString(`</form>`)
+	return b.String()
+}
+
+// adminRequestsTable renders the pending access requests (B3): the one table an
+// operator actually has to act on, so it sits at the top of the console.
+func adminRequestsTable(reqs []accessrequest.Request) string {
+	if len(reqs) == 0 {
+		return `<div class="adm-empty">没有待审的申请。用户在 <code>/tools</code> 页对「可申请」的工具提交后，会出现在这里。</div>`
+	}
+	var b strings.Builder
+	b.WriteString(`<table class="adm"><thead><tr><th>提交时间</th><th>用户</th><th>工具</th><th>用途</th><th></th></tr></thead><tbody>`)
+	for _, r := range reqs {
+		fmt.Fprintf(&b, `<tr>
+      <td class="adm-note">%s</td>
+      <td>%s</td>
+      <td><code>%s</code></td>
+      <td>%s</td>
+      <td class="right">
+        <button type="button" class="adm-btn primary sm" onclick="admApproveRequest('%s')">批准</button>
+        <button type="button" class="adm-btn sm danger" onclick="admDenyRequest('%s')">拒绝</button>
+      </td>
+    </tr>`,
+			esc(r.CreatedAt.Local().Format("2006-01-02 15:04")), esc(r.User), esc(r.Tool),
+			esc(r.Reason), esc(r.ID), esc(r.ID))
+	}
+	b.WriteString(`</tbody></table>`)
 	return b.String()
 }
 
@@ -396,6 +427,15 @@ function admStartService(btn) {
   var tool = form.querySelector('[name=tool]').value;
   if (!confirm('以 ' + user + ' 的身份启动 ' + tool + '？')) { return; }
   admFetch('POST', '/api/admin/instances', {user: user, tool: tool}, '服务已启动');
+}
+function admApproveRequest(id) {
+  if (!confirm('批准 ' + id + '？将立即写入一条 grant，授权马上生效。')) { return; }
+  admFetch('POST', '/api/admin/requests/' + encodeURIComponent(id) + '/approve', {}, '已批准，授权立即生效');
+}
+function admDenyRequest(id) {
+  var note = prompt('拒绝 ' + id + ' 的理由（可留空）：');
+  if (note === null) { return; }
+  admFetch('POST', '/api/admin/requests/' + encodeURIComponent(id) + '/deny', {note: note}, '已拒绝');
 }
 function admSaveGroup(btn) {
   var form = btn.closest('.grant-form');

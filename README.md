@@ -439,13 +439,15 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
 | `/api/flows/*` | `POST /api/flows/<id>/run` 用 CSV 样本表展开并启动一个流程 |
 | `/api/tokens`、`/api/tokens/*` | **agent token 自助管理**（列表 / 新建 / 撤销；只认浏览器 session，agent token 不能自己造 token） |
+| `/api/requests`、`/api/requests/*` | **工具访问申请**（B3；只认浏览器 session）：`GET` 自己的申请、`POST` 提交一个 |
 | `/api/resources`、`/api/resources/raw`、`/api/resources/html` | **`srcos://` 资源协议**（元数据 / 字节 / sandbox 化的用户 HTML） |
 | `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
 | `/admin` | **管理控制台**（仅管理员：实例总览 / 强制停止 / 授权管理） |
-| `/api/admin`、`/api/admin/*` | 管理 API（仅管理员；控制台调用它，也可脚本化） |
+| `/api/admin`、`/api/admin/*` | 管理 API（仅管理员；控制台调用它，也可脚本化：含 `/api/admin/audit`、`/api/admin/requests/<id>/approve|deny`、`POST /api/admin/instances` 启动服务） |
 | `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
-| `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单 |
+| `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单（含「可申请的工具」区） |
+| `/requests` | **我的申请**（B3：自己提交的访问申请与结果） |
 | `/proxy/*` | 服务代理前缀（静态卡片与服务实例路由共用；见「服务实例的动态路由」） |
 
 如果某个后端应用也使用这些**绝对路径**（例如后端自己也有 `/login` 页面、或 `/api/services` 接口），浏览器会命中网关而非后端。此时应让后端改用不冲突的路径，或为其配置 base_url/basePath 使链接落在 `/proxy/<用户>/<服务路径>/` 之下。
