@@ -752,3 +752,81 @@ func TestSubmitWritesAudit(t *testing.T) {
 		t.Fatalf("deny event wrong: %+v", deny)
 	}
 }
+
+// A client-supplied idempotency key pins a submission: a retry returns the first
+// outcome instead of starting a second run (A2).
+func TestSubmitIsIdempotentWithAKey(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
+
+	first, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, IdempotencyKey: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, IdempotencyKey: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.JobID != again.JobID || first.InstanceID != again.InstanceID {
+		t.Fatalf("a replay must return the first submission: %+v vs %+v", first, again)
+	}
+
+	// A different key is a different submission.
+	other, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, IdempotencyKey: "def"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.JobID == first.JobID {
+		t.Fatal("a new key must create a new job")
+	}
+
+	// No key: every call is a new submission, as before.
+	a, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.JobID == b.JobID {
+		t.Fatal("without a key there is no dedupe")
+	}
+
+	// The key is namespaced by tool: the same string on another tool is a
+	// different job.
+	onOther, err := f.Submit(ident, SubmitRequest{Tool: "other", Params: map[string]any{"word": "x"}, IdempotencyKey: "abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onOther.JobID == first.JobID {
+		t.Fatal("the key must be scoped per tool")
+	}
+}
+
+func TestIdempotentReplayIsAudited(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	rec := audit.New(config.DataDir(f.configDir))
+	f.opts.Audit = rec
+	defer rec.Close()
+	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}, IdempotencyKey: "k1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := audit.Query(config.DataDir(f.configDir), audit.Filter{Action: "submit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("submit events = %d, want 2", len(events))
+	}
+	if events[0].Params["idempotent_replay"] == "true" {
+		t.Fatal("the first submission is not a replay")
+	}
+	if events[1].Params["idempotent_replay"] != "true" {
+		t.Fatalf("the replay must be marked: %+v", events[1].Params)
+	}
+}

@@ -24,12 +24,13 @@ import (
 // and the name is presentation, so neither belongs in the on-disk record where
 // the sandbox could read them as instructions.
 type submitJobBody struct {
-	Tool      string            `json:"tool"`
-	Name      string            `json:"name"`
-	Params    map[string]any    `json:"params"`
-	Resources *tool.Resources   `json:"resources"`
-	Outputs   []string          `json:"outputs"`
-	Tags      map[string]string `json:"tags"`
+	Tool           string            `json:"tool"`
+	Name           string            `json:"name"`
+	Params         map[string]any    `json:"params"`
+	Resources      *tool.Resources   `json:"resources"`
+	Outputs        []string          `json:"outputs"`
+	Tags           map[string]string `json:"tags"`
+	IdempotencyKey string            `json:"idempotencyKey"`
 }
 
 // handleSubmitJob validates a submission against the tool's interface and drops
@@ -41,12 +42,13 @@ func (h *Handler) handleSubmitJob(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 	res, err := h.opts.Execute.Submit(ident, execute.SubmitRequest{
-		Tool:      body.Tool,
-		Name:      body.Name,
-		Params:    body.Params,
-		Resources: body.Resources,
-		Outputs:   body.Outputs,
-		Tags:      body.Tags,
+		Tool:           body.Tool,
+		Name:           body.Name,
+		Params:         body.Params,
+		Resources:      body.Resources,
+		Outputs:        body.Outputs,
+		Tags:           body.Tags,
+		IdempotencyKey: body.IdempotencyKey,
 	})
 	if err != nil {
 		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})

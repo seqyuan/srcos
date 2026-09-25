@@ -415,5 +415,19 @@ grep -rq '"action":"request.create"' "$AUDDIR" 2>/dev/null || fail "request.crea
 grep -rq '"action":"request.approve"' "$AUDDIR" 2>/dev/null || fail "request.approve not audited"
 pass "申请 → 待审 → 批准 → 可用，且入审计"
 
+# ── 13. 幂等键（A2）──────────────────────────────────────────
+step 13 "提交幂等键"
+sub() {
+  curl -fsS -b "$CJ" -X POST "$BASE/api/jobs" -H "Origin: $BASE" -H 'Content-Type: application/json' \
+    -d "{\"tool\":\"$TOOL\",\"params\":{\"ticks\":\"1\"},\"idempotencyKey\":\"e2e-$1\"}" \
+    | grep -o '"jobId":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+J1="$(sub key)"
+J2="$(sub key)"
+[ -n "$J1" ] && [ "$J1" = "$J2" ] || fail "idempotency key did not dedupe: $J1 vs $J2"
+J3="$(sub other)"
+[ "$J3" != "$J1" ] || fail "a different key must be a different job"
+pass "同一 key → 同一 job（$J1）；不同 key → 新 job"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键\n'

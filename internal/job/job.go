@@ -8,8 +8,10 @@ package job
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -393,13 +395,40 @@ func Claimed(jobDir string) bool {
 // The directory is the queue (ADR-004): writing the file *is* the submission,
 // which is what lets any language, anywhere — including a compute node — submit
 // without a daemon, a socket, or a credential.
+// ErrJobExists means a job already exists under a caller-chosen id. It is the
+// signal an idempotent submission replays on, never an error to surface.
+var ErrJobExists = errors.New("a job already exists under this id")
+
+// IdempotentID derives a stable job id from a client-supplied key, so the same
+// key always names the same job directory. The key is namespaced by user and
+// tool: two callers may pick the same string without colliding. The "k-"
+// prefix distinguishes a keyed id from a random one at a glance.
+func IdempotentID(user, toolID, key string) string {
+	sum := sha256.Sum256([]byte(user + "\x00" + toolID + "\x00" + key))
+	return "k-" + hex.EncodeToString(sum[:12])
+}
+
 func Submit(configDir, user, toolID string, j *Job) (string, string, error) {
+	return SubmitAs(configDir, user, toolID, j, "")
+}
+
+// SubmitAs files a job under a caller-chosen id. An id of "" allocates one.
+//
+// A non-empty id that already holds a job.json is reported as ErrJobExists
+// rather than overwritten: a caller-chosen id is an idempotency key, so finding
+// one there means this submission already happened.
+func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string, error) {
 	jobsDir := config.JobsDir(configDir, user, toolID)
 	if err := os.MkdirAll(jobsDir, 0o755); err != nil {
 		return "", "", err
 	}
-	id := NewID(jobsDir, j.Name)
+	if id == "" {
+		id = NewID(jobsDir, j.Name)
+	}
 	dir := filepath.Join(jobsDir, id)
+	if _, err := os.Stat(filepath.Join(dir, "job.json")); err == nil {
+		return id, dir, ErrJobExists
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", err
 	}

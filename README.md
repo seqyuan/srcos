@@ -914,7 +914,7 @@ PY
 
 | 工具 | 作用 |
 |---|---|
-| `srcos_submit_job` | 提交一个任务**并立即执行**，返回 `jobId` + `instanceId` |
+| `srcos_submit_job` | 提交一个任务**并立即执行**，返回 `jobId` + `instanceId`。可选 `idempotency_key`：同一个 key 重试返回**第一次的结果**（包括失败那次），不会起第二个任务 |
 | `srcos_cancel_instance` | 停掉一个在跑的实例（幂等：已结束的返回它的终态） |
 | `srcos_run_flow` | 用 CSV 样本表展开一个流程并启动（每个节点的工具都要在 token 的白名单里） |
 

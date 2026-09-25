@@ -579,6 +579,11 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - **实例在 submit 返回时就可供寻址**（先写 pending 记录再启动）：否则"刚提交就查"会得到
     误导性的 not found。
   - **取消是幂等的**：已终态的实例直接返回它的终态，而不是报错（agent 重试取消不应该失败）。
+  - **提交幂等键**（2026-09-26，A2）：`submit_job` / `POST /api/jobs` 可选 `idempotency_key` / `idempotencyKey`。
+    给了 key 就把该次提交钉在一个 job 目录上（`job.IdempotentID` 由 `user+tool+key` 派生），
+    重试返回**第一次提交的结果**（包括失败的那次）—— key 的含义是「就是这个请求」，
+    换一次尝试请换 key。key 按 (用户, 工具) 命名空间，所以两个人可以用同一个字符串。
+    重放在审计里带 `idempotent_replay=true`。
   - **已知限制（未解决）**：执行等待者活在网关进程里（与 CLI `job run` 同构）。
     网关在任务运行中重启会丢掉退出码（记录由 Reconcile 按后端能看到的真实状态收尾）。
     真正的持久任务执行器（网关侧的队列 drainer）仍是待办。
@@ -1014,5 +1019,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **审计流第二期（4/4）：防篡改 hash chain** —— 每行 `prev`/`hash`（SHA-256(prev+该行字节)），**每文件**一条链；`srcos audit verify` + `/admin/audit` 横幅；能发现改行/删行/乱序/剥链字段，不能证明整文件未删、挡不住重写全部文件。**e2e 抓到的真 bug**：网关与 CLI 两个进程各持自己的「上一行」，交错写同一日文件链必断 —— 改为每次追加 `flock` + 重读文件尾（链属于文件不属于进程），单测 `TestChainSurvivesInterleavedRecorders` 锁定。审计流第二期完成；仅真实签名未做 |
 | 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |
 | 2026-09-26 | **B3：工具访问申请/审批流**（设计已确认 → 已实现）—— `grant.requestable` 显式开关（只公开存在性，默认 false；`Policy.Requestable` 里具体 grant 优先于 `*`）+ `internal/accessrequest`（`data/requests/*.yaml`，幂等/状态机/原子写/0600）+ API（`GET/POST /api/requests` 只认 session；`GET /api/admin/requests`、`POST /api/admin/requests/<id>/approve|deny`；批准先写 grant 并落盘再标记 decided）+ UI（`/tools` 可申请区 + `/requests` 用户页 + `/admin` 待审区）+ 审计 `request.*`。**e2e 抓到一处遗漏**：`/api/requests` 未注册进 server mux 的 srcos API 路径表 → 请求掉进 `/api/` 代理回退 404；第 12 步现覆盖 申请→待审→批准→可见→审计 |
+| 2026-09-26 | **A2：提交幂等键** —— `job.IdempotentID(user,tool,key)` + `job.SubmitAs`（已有 job.json 则报 `ErrJobExists`，不覆盖）+ `execute.SubmitRequest.IdempotencyKey`（重放时直接返回首次的 job/instance + 终态）；API `POST /api/jobs` 的 `idempotencyKey`、MCP `srcos_submit_job` 的 `idempotency_key`；重放审计带 `idempotent_replay=true`。e2e 第 13 步：同 key 同 job、异 key 新 job |
 | 2026-09-26 | **专题指南 `docs/agent-mcp-positioning.md`**（D）—— 把 agent/dsh/MCP 的定位讨论落成文件：agent 的三层含义（外部/托管/dsh 内）、两条通道（MCP vs `srcos://`+REST）、三条不做（MCP Client / 直改 workspace / 推理循环）、优缺点表（A1 托管 agent 无实例身份、A2 agent 无幂等键、M1 `srcos://` 而非 MCP resources…）与建议；dsh 四个接触点与「为什么删路 B」。结论指向 ADR-011/016/017/019/024，不新增决策 |
 | 2026-09-26 | **B2（`storages.yaml` 管理端编辑）评估后不做** —— 网关在**构造时**把 storage provider 交给 api/execute/runtime，要即时生效需先把它做成可原地替换的（同 grants 的 `ReplaceWith`）；是可行的，但**价值偏低**（storages 很少变，重启一次可接受），而 UI 编辑会碰**安全边界**（`host_root` 的粒度就是数据可见范围，表单无法知道正确粒度）。结论：保留「手写文件 + 重启」；若将来真需要，做「编辑 + 明确提示需重启」而不做热加载 |

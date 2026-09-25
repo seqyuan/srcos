@@ -375,6 +375,9 @@ func writeTools() []tool {
 				"outputs":   arrayProp("Optional: declared output sandbox paths, e.g. /workspace/out"),
 				"resources": objectProp("Optional: lower the tool's resource ceiling (cpu / memory / walltime)"),
 				"tags":      objectProp("Optional: key/value tags recorded with the instance"),
+				"idempotency_key": stringProp("Optional. Retrying with the same key returns the first " +
+					"submission instead of starting a second run (including a failed one: a new attempt " +
+					"needs a new key). Scoped to this tool and caller."),
 			}, []string{"tool"}),
 			call: func(ctx context.Context, e env, args map[string]any) (any, error) {
 				toolID, err := requireString(args, "tool")
@@ -382,12 +385,13 @@ func writeTools() []tool {
 					return nil, err
 				}
 				res, err := e.exec.Submit(e.ident, execute.SubmitRequest{
-					Tool:      toolID,
-					Name:      optString(args, "name"),
-					Params:    optObject(args, "params"),
-					Outputs:   optStrings(args, "outputs"),
-					Tags:      optStringMap(args, "tags"),
-					Resources: optResources(args, "resources"),
+					Tool:           toolID,
+					Name:           optString(args, "name"),
+					Params:         optObject(args, "params"),
+					Outputs:        optStrings(args, "outputs"),
+					Tags:           optStringMap(args, "tags"),
+					Resources:      optResources(args, "resources"),
+					IdempotencyKey: optString(args, "idempotency_key"),
 				})
 				if err != nil {
 					return nil, err

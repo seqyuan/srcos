@@ -148,6 +148,11 @@ type SubmitRequest struct {
 	Resources *tool.Resources   `json:"resources"`
 	Outputs   []string          `json:"outputs"`
 	Tags      map[string]string `json:"tags"`
+	// IdempotencyKey, when set, pins this submission to one job directory: a
+	// retry with the same key returns the first submission's outcome instead of
+	// starting a second run. It is namespaced by (user, tool), and a *different*
+	// attempt needs a different key — the key means "this exact request".
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 // SubmitResult is what a caller gets back. The instance is queued at this
@@ -172,10 +177,17 @@ type SubmitResult struct {
 func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *SubmitResult, err error) {
 	toolID := strings.TrimSpace(req.Tool)
 	var t *tool.Tool
+	replayed := false
 	defer func() {
 		ev := audit.NewEvent(ident.AuditActor(), "submit").
 			WithTarget("tool", toolID, versionOf(t)).
 			WithParams(req.Params)
+		if replayed {
+			if ev.Params == nil {
+				ev.Params = map[string]string{}
+			}
+			ev.Params["idempotent_replay"] = "true"
+		}
 		if res != nil {
 			ev = ev.WithRefs(map[string]string{"job": res.JobID, "instance": res.InstanceID})
 		}
@@ -223,7 +235,20 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
 
-	jobID, dir, err := job.Submit(c.opts.ConfigDir, ident.User, t.ID, j)
+	// Idempotency: a client-supplied key pins the submission to one job
+	// directory. A replay returns the first submission — including a failed one:
+	// the key means "this exact request", and a fresh attempt needs a new key.
+	pinnedID := ""
+	if key := strings.TrimSpace(req.IdempotencyKey); key != "" {
+		pinnedID = job.IdempotentID(ident.User, t.ID, key)
+		dir := filepath.Join(config.JobsDir(c.opts.ConfigDir, ident.User, t.ID), pinnedID)
+		if _, serr := os.Stat(filepath.Join(dir, "job.json")); serr == nil {
+			replayed = true
+			return c.replay(ident.User, t.ID, pinnedID, dir), nil
+		}
+	}
+
+	jobID, dir, err := job.SubmitAs(c.opts.ConfigDir, ident.User, t.ID, j, pinnedID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +270,18 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *
 		InstanceID: instID,
 		State:      string(runtime.StatePending),
 	}, nil
+}
+
+// replay builds the answer for a submission whose idempotency key already
+// names a job. The state comes from the instance record, so a retry sees
+// whatever the first run became (pending, running, succeeded, failed).
+func (c *Controller) replay(user, toolID, jobID, dir string) *SubmitResult {
+	instID := runtime.InstanceID(user, toolID, jobID)
+	state := string(runtime.StatePending)
+	if rec, err := runtime.LoadInstance(runtime.InstancePath(c.opts.ConfigDir, instID)); err == nil {
+		state = string(rec.State)
+	}
+	return &SubmitResult{JobID: jobID, Dir: dir, Tool: toolID, InstanceID: instID, State: state}
 }
 
 // writePending records the queued instance before anything runs, so the id the
