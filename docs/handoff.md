@@ -173,7 +173,7 @@ UI 造起来便宜了 → UI 不再是护城河
 配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/
 orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `/admin/audit`（+ API）。
 防篡改：每文件 hash chain（`srcos audit verify`，多进程串链靠 flock + 重读文件尾）。
-保留：`srcos audit prune --keep 90d`（显式）。**仅真实签名（外部信任锚）未做。**
+保留：`srcos audit prune --keep 90d`（显式）。**外发**：`state.yaml` 的 `audit.forward_url` → HTTP 采集端（真正的信任锚；本地签名明确不做）。
 
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
@@ -526,6 +526,7 @@ internal/flowrun/           流程执行器：并发窗口、AND 依赖、when: 
 internal/activity/          write-behind 时间戳日志（token 使用时间 / 服务活跃时间共用）
 internal/audit/             结构化审计流水（Event/Actor/Target/Request/Outcome + Recorder 追加写
                             data/audit/audit-YYYY-MM-DD.jsonl；按天轮转、nil no-op、参数脱敏）
+  ├ forward.go              外发：Sink（HTTPSink）+ Forwarder（本地 spool → 按序发送 → 上限丢弃计数）
 internal/accessrequest/     工具访问申请的数据层（data/requests/*.yaml；幂等、状态机、原子写）
 internal/runtime/usage.go   资源快照（systemd cgroup / /proc）—— UnitSampler 后端接口
 internal/rate/              令牌桶限速（登录 + 带宽）

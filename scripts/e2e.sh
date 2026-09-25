@@ -66,6 +66,10 @@ cleanup() {
     kill "$GATEWAY_PID" >/dev/null 2>&1 || true
     wait "$GATEWAY_PID" 2>/dev/null || true
   fi
+  if [ -n "$COLLECTOR_PID" ]; then
+    kill "$COLLECTOR_PID" >/dev/null 2>&1 || true
+    wait "$COLLECTOR_PID" 2>/dev/null || true
+  fi
   if [ "${SRCOS_E2E_KEEP:-0}" = "1" ]; then
     echo "[e2e] kept temp dir: $TMP"
   else
@@ -84,7 +88,38 @@ PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));prin
 [ -n "$PORT" ] || PORT=$(( 28000 + ($$ % 2000) ))
 BASE="http://127.0.0.1:$PORT"
 
-info "SRCOS e2e  temp=$TMP  port=$PORT  sandbox=$SANDBOX"
+# An external audit collector, when python3 is available: the forwarding path is
+# where bugs hide, so the e2e exercises config -> state.yaml -> forwarder ->
+# collector, not just the forwarder's unit tests.
+COLLECTOR_LOG="$TMP/collector.jsonl"
+COLLECTOR_PID=""
+COLLECTOR_PORT=""
+if command -v python3 >/dev/null 2>&1; then
+  COLLECTOR_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  python3 - "$COLLECTOR_PORT" "$COLLECTOR_LOG" <<'PY' >/dev/null 2>&1 &
+import sys, http.server, socketserver
+port = int(sys.argv[1]); out = sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length') or 0)
+        body = self.rfile.read(n)
+        with open(out, 'ab') as f:
+            f.write(body + b"\n")
+        self.send_response(204); self.end_headers()
+    def log_message(self, *a): pass
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", port), H) as srv:
+    srv.serve_forever()
+PY
+  COLLECTOR_PID=$!
+  mkdir -p "$CFG"
+  cat > "$CFG/state.yaml" <<YAML
+audit:
+  forward_url: http://127.0.0.1:$COLLECTOR_PORT/audit
+YAML
+fi
+
+info "SRCOS e2e  temp=$TMP  port=$PORT  sandbox=$SANDBOX  collector=${COLLECTOR_PORT:-none}"
 
 # ── 1. 工具包（临时，不进 srcos-tools/）────────────────────────────────
 step 1 "写入临时工具 $TOOL（sandbox=$SANDBOX）"
@@ -429,5 +464,21 @@ J3="$(sub other)"
 [ "$J3" != "$J1" ] || fail "a different key must be a different job"
 pass "同一 key → 同一 job（$J1）；不同 key → 新 job"
 
+# ── 14. 审计外发（信任锚）──────────────────────────────────────────
+step 14 "审计外发到采集端"
+if [ -n "$COLLECTOR_PID" ]; then
+  got=0
+  for _ in $(seq 1 40); do
+    if grep -q '"action":"submit"' "$COLLECTOR_LOG" 2>/dev/null; then got=1; break; fi
+    sleep 0.5
+  done
+  [ "$got" = "1" ] || fail "collector received no events (forwarder may be stuck)"
+  # The forwarded copy carries prev/hash, so a remote collector can verify too.
+  grep -q '"hash":"' "$COLLECTOR_LOG" || fail "forwarded events lost their chain fields"
+  pass "事件已外发，且带链字段"
+else
+  info "  （无 python3，跳过采集端验证）"
+fi
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发\n'

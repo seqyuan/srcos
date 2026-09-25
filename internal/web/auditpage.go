@@ -12,7 +12,7 @@ import (
 // AuditPage renders the audit console: the structured stream, newest first,
 // with the same filters the CLI has. It is server-rendered (a plain GET form,
 // no JavaScript) so an operator can read it from anything that speaks HTML.
-func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter, problems []audit.Problem) string {
+func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter, problems []audit.Problem, forward audit.ForwardStatus) string {
 	var b strings.Builder
 
 	b.WriteString(auditCSS)
@@ -44,6 +44,20 @@ func AuditPage(siteTitle, username string, events []audit.Event, f audit.Filter,
 			b.WriteString(`<code>` + esc(where) + ` ` + esc(p.Reason) + `</code> `)
 		}
 		b.WriteString(`</div>`)
+	}
+
+	// External sink status: an operator has to see "the collector is down and N
+	// events are queued" — silence is the one thing this must not do.
+	if forward.Configured {
+		msg := fmt.Sprintf("审计外发：%s · 待发送 %d", forward.Sink, forward.Unsent)
+		cls := "audit-verified"
+		if forward.Unsent > 0 || forward.Dropped > 0 {
+			cls = "audit-broken"
+		}
+		if forward.Dropped > 0 {
+			msg += fmt.Sprintf(" · 已丢弃 %d（spool 超过上限）", forward.Dropped)
+		}
+		b.WriteString(`<div class="` + cls + `">` + esc(msg) + `</div>`)
 	}
 
 	// Filter form. GET so the query string is bookmarkable and shareable.

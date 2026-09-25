@@ -609,6 +609,18 @@ func runServer(opts options) {
 	// decisions, the API handler's requests and the write path all append to the
 	// same stream (ADR-024).
 	auditRec := audit.New(config.DataDir(configDir))
+	// Optional external sink: the audit's trust anchor. A collector that is down
+	// must not block anything, so events go to a local spool first (see
+	// internal/audit.Forwarder).
+	var auditFwd *audit.Forwarder
+	if state.Audit.ForwardURL != "" {
+		auditFwd = audit.NewForwarder(
+			filepath.Join(config.DataDir(configDir), "audit-forward"),
+			&audit.HTTPSink{URL: state.Audit.ForwardURL, Token: state.Audit.ForwardToken},
+			state.Audit.ForwardMax)
+		auditRec.ForwardTo(auditFwd)
+		log.Printf("[srcos] audit forward: %s (spool %s)", state.Audit.ForwardURL, auditFwd.Dir())
+	}
 	supervisor, routes, err := buildRunner(configDir, toolsDir, "", auditRec)
 	if err != nil {
 		log.Fatalf("supervisor: %v", err)
@@ -660,6 +672,9 @@ func runServer(opts options) {
 	taskCtx, stopTasks := context.WithCancel(context.Background())
 	defer stopTasks()
 	go srv.TaskLoop(taskCtx, 0)
+	if auditFwd != nil {
+		go auditFwd.Run(taskCtx, 0)
+	}
 
 	// Graceful shutdown
 	go func() {

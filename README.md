@@ -994,7 +994,21 @@ srcos serve -d /opt/srcos/config --no-task-drainer
 **防篡改**：每行带 `prev`/`hash`，每个日文件自成一条链；`srcos audit verify`（或 `/admin/audit`
 顶部的横幅）会重算并报出异常位置。它能发现改行 / 删行 / 乱序 / 剥掉链字段，**不能**证明某个整
 文件从未被删除（保留策略会合法地删整天文件），也挡不住能重写全部文件的人 —— 只是“这个文件
-没被就地改过”，不是“这台机器可信”。真实签名（外部信任锚）属于后续。
+没被就地改过”，不是“这台机器可信”。
+
+**外发（真正的信任锚）**：在 `state.yaml` 里指向一个采集端后，每个事件也会 POST 过去：
+
+```yaml
+# config/state.yaml
+audit:
+  forward_url: https://collector.example/srcos-audit
+  forward_token: <可选，作为 Authorization: Bearer 发送>
+  forward_max: 100000        # 本地 spool 上限（事件数）；超出丢最旧并计数
+```
+
+本地 hash chain 挡不住能重写全部文件的人（链可以重算）；**另一台机器上的副本才改不动**。
+SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看起来像防篡改）。采集端故障时事件留在
+本地 spool，`/admin/audit` 顶部显示「待发送 N / 已丢弃 M」，采集端恢复后按序补发。
 
 **保留策略**是**显式**的 `srcos audit prune --keep 90d`（`keep=0` 不删任何东西；删除这件事
 本身也记一条 `audit.prune`）——不会自动删除。记录里除提交与配置变更外，还包括**平台自己做的决定**：

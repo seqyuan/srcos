@@ -15,6 +15,26 @@ type StateConfig struct {
 	Server ServerState `yaml:"server"`
 	Auth   AuthState   `yaml:"auth"`
 	SSO    SSOState    `yaml:"sso"`
+	Audit  AuditState  `yaml:"audit,omitempty"`
+}
+
+// AuditState configures where the structured audit stream is forwarded.
+//
+// Forwarding is the audit's *trust anchor*: the per-file hash chain proves a
+// file was not edited in place, but whoever can rewrite every file can recompute
+// it. A copy on another machine cannot be rewritten from here. SRCOS therefore
+// does not offer local signing — an HMAC key on the same host buys almost
+// nothing and looks like more than it is.
+//
+// Empty ForwardURL means "keep the stream local only" (the default).
+type AuditState struct {
+	// ForwardURL is an HTTP collector; each event is POSTed as JSON.
+	ForwardURL string `yaml:"forward_url,omitempty"`
+	// ForwardToken, when set, is sent as `Authorization: Bearer`.
+	ForwardToken string `yaml:"forward_token,omitempty"`
+	// ForwardMax bounds the on-disk spool in events. Past it the oldest are
+	// dropped and counted (never silently). Zero uses a 100k default.
+	ForwardMax int `yaml:"forward_max,omitempty"`
 }
 
 // SSOState configures the lightweight single sign-on layer: the gateway

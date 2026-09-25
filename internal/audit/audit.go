@@ -232,6 +232,9 @@ func isSensitive(key string) bool {
 type Recorder struct {
 	dir string
 	mu  sync.Mutex
+	// fwd, when set, spools every event for an external sink (the audit's trust
+	// anchor). Nil means "local file only".
+	fwd *Forwarder
 	// warned suppresses repeat logging when the sink is unwritable.
 	warned bool
 }
@@ -297,7 +300,48 @@ func (r *Recorder) appendLocked(e Event) error {
 	line = append(line, '\n')
 	r.warned = false
 	_, err = f.Write(line)
+	// Spool for the external sink after the local write: an event the local file
+	// lost is not worth forwarding, and the spool is local/fast so it does not
+	// put the network on the request path.
+	if err == nil && r.fwd != nil {
+		if serr := r.fwd.Spool(e); serr != nil {
+			r.warn("forward: %v", serr)
+		}
+	}
 	return err
+}
+
+// ForwardTo attaches an external sink. Nil detaches.
+func (r *Recorder) ForwardTo(f *Forwarder) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fwd = f
+}
+
+// ForwardStatus describes the external sink for the admin page.
+func (r *Recorder) ForwardStatus() ForwardStatus {
+	if r == nil {
+		return ForwardStatus{}
+	}
+	r.mu.Lock()
+	fwd := r.fwd
+	r.mu.Unlock()
+	if fwd == nil {
+		return ForwardStatus{}
+	}
+	unsent, dropped := fwd.Stats()
+	return ForwardStatus{Configured: true, Sink: fwd.SinkName(), Unsent: unsent, Dropped: dropped}
+}
+
+// ForwardStatus is what the admin page shows about the external sink.
+type ForwardStatus struct {
+	Configured bool
+	Sink       string
+	Unsent     int
+	Dropped    int
 }
 
 // lastHashInFile returns the Hash of the last well-formed line in f, reading

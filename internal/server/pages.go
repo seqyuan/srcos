@@ -218,7 +218,7 @@ func (s *Server) handleAdminAuditPage(w http.ResponseWriter, r *http.Request, us
 	if verr != nil {
 		log.Printf("[srcos] audit verify: %v", verr)
 	}
-	sendHTML(w, 200, web.AuditPage(s.siteTitle, username, events, filter, problems))
+	sendHTML(w, 200, web.AuditPage(s.siteTitle, username, events, filter, problems, s.audit.ForwardStatus()))
 }
 
 // dataDir is where runtime state lives (data/), a sibling of config/. The

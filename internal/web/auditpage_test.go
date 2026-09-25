@@ -30,7 +30,7 @@ func TestAuditPageRendersAndEscapes(t *testing.T) {
 		},
 	}
 
-	html := AuditPage("SRCOS", "root", events, audit.Filter{Decision: audit.Deny}, nil)
+	html := AuditPage("SRCOS", "root", events, audit.Filter{Decision: audit.Deny}, nil, audit.ForwardStatus{})
 
 	for _, want := range []string{
 		"审计流",
@@ -56,7 +56,7 @@ func TestAuditPageRendersAndEscapes(t *testing.T) {
 }
 
 func TestAuditPageEmptyState(t *testing.T) {
-	html := AuditPage("SRCOS", "root", nil, audit.Filter{}, nil)
+	html := AuditPage("SRCOS", "root", nil, audit.Filter{}, nil, audit.ForwardStatus{})
 	if !strings.Contains(html, "没有匹配的审计记录") {
 		t.Fatal("empty state missing")
 	}
@@ -68,7 +68,7 @@ func TestAuditPageEmptyState(t *testing.T) {
 func TestAuditPageNewestFirst(t *testing.T) {
 	old := audit.Event{TS: time.Now().Add(-time.Hour), Actor: audit.Actor{User: "zzolduser"}, Action: "submit", Decision: audit.Allow}
 	neu := audit.Event{TS: time.Now(), Actor: audit.Actor{User: "zznewuser"}, Action: "submit", Decision: audit.Allow}
-	html := AuditPage("SRCOS", "root", []audit.Event{old, neu}, audit.Filter{}, nil)
+	html := AuditPage("SRCOS", "root", []audit.Event{old, neu}, audit.Filter{}, nil, audit.ForwardStatus{})
 	if strings.Index(html, "zznewuser") > strings.Index(html, "zzolduser") {
 		t.Fatal("the page should show the newest event first")
 	}

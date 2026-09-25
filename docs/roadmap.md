@@ -97,7 +97,7 @@
   （旁挂 `layout.yaml`）+ **`expose` 一键补齐**（ADR-023）
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
   `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
-  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）
+  （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）+ **外发**（`state.yaml` 的 `audit.forward_url`，信任锚）
 - **工具访问申请/审批**（B3）：`grant.requestable` 显式开关 + `internal/accessrequest`
   （`data/requests/*.yaml`）+ `/api/requests`（用户）+ `/api/admin/requests`（approve/deny）
   + `/requests` 页 + `/admin` 待审区；批准 = `AddUserToGrant` + 落盘，审计 `request.*`
@@ -742,11 +742,17 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - **生命周期跃迁**（`internal/runtime`）：`instance.done`（任务终态）、`instance.settled`
   （重启后凭判定文件结算）、`instance.reaped`（回收，带 reason）、`instance.orphaned` / `instance.adopted`
   （reconcile）、`instance.stopped`（管理端强制停 / CLI `svc stop`）—— actor 是该实例的用户、kind=system。
-- **不做（仍待）**：真实签名（外部信任锚）；hash chain 已做（见下）。
+- **不做（仍待）**：无。（本地签名不做，理由见下。）
 - **防篡改（hash chain，第二期收尾）**：每行带 `prev`/`hash`（`hash = SHA-256(prev + 该行字节)`），
   **每文件**一条链（不跨文件 —— 保留策略会合法删掉整天文件，跨文件链会被正常 prune 打断）。
   `srcos audit verify` 与管理页横幅都校验：能发现改行 / 删行 / 乱序 / 剥掉链字段；**不能**证明
   某个整文件从未被删除，也挡不住能重写全部文件的人。
+- **外发 = 信任锚（2026-09-26）**：`state.yaml` 的 `audit.forward_url` 指向 HTTP 采集端，
+  每个事件 POST 一次。先落本地 spool（`data/audit-forward/<ts>-<rand>.json`，一事件一文件），
+  后台**按序**发送、成功才删；采集端故障则保留重试，超过 `forward_max` 丢最旧并**计数**
+  （不静默）。管理页显示待发送/已丢弃。
+- **本地签名明确不做**：签名密钥必须在网关读得到的地方（否则写的时候签不了），而同一个写域里的
+  签名挡不住能重写全部文件的人 —— 它只会让人以为有防篡改。**锚必须在网关写不到的域里。**
 - **实现要点（e2e 抓到的真 bug）**：网关与 CLI 是**两个进程**同时写同一日文件，各持一条链必断；
   所以每次追加要 `flock` + 重读文件尾再串链 —— 链属于文件，不属于进程。
 - **为什么不是数据库 / 不是消息队列**：与「文件系统即数据库」一致（AGENTS.md）。
@@ -1020,5 +1026,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |
 | 2026-09-26 | **B3：工具访问申请/审批流**（设计已确认 → 已实现）—— `grant.requestable` 显式开关（只公开存在性，默认 false；`Policy.Requestable` 里具体 grant 优先于 `*`）+ `internal/accessrequest`（`data/requests/*.yaml`，幂等/状态机/原子写/0600）+ API（`GET/POST /api/requests` 只认 session；`GET /api/admin/requests`、`POST /api/admin/requests/<id>/approve|deny`；批准先写 grant 并落盘再标记 decided）+ UI（`/tools` 可申请区 + `/requests` 用户页 + `/admin` 待审区）+ 审计 `request.*`。**e2e 抓到一处遗漏**：`/api/requests` 未注册进 server mux 的 srcos API 路径表 → 请求掉进 `/api/` 代理回退 404；第 12 步现覆盖 申请→待审→批准→可见→审计 |
 | 2026-09-26 | **A2：提交幂等键** —— `job.IdempotentID(user,tool,key)` + `job.SubmitAs`（已有 job.json 则报 `ErrJobExists`，不覆盖）+ `execute.SubmitRequest.IdempotencyKey`（重放时直接返回首次的 job/instance + 终态）；API `POST /api/jobs` 的 `idempotencyKey`、MCP `srcos_submit_job` 的 `idempotency_key`；重放审计带 `idempotent_replay=true`。e2e 第 13 步：同 key 同 job、异 key 新 job |
+| 2026-09-26 | **审计外发（信任锚）** —— `audit.Sink`（`HTTPSink`：每事件 POST 一次）+ `audit.Forwarder`（本地 spool 一事件一文件 → 后台**按序**发送、成功才删 → 采集端故障保留重试 → 超 `forward_max` 丢最旧并计数）+ `Recorder.ForwardTo/ForwardStatus`；`state.yaml` 的 `audit.forward_url` / `forward_token` / `forward_max`；`/admin/audit` 显示待发送/已丢弃。**本地签名明确不做**（密钥在同一个写域，挡不住能重写全部文件的人，只是看起来像防篡改）。e2e 第 14 步：起 python 采集端 → 预写 state.yaml → 断言收到事件且带 `hash`（该步又抓到一个真 bug：端口变量带了尾空格 → URL 非法） |
 | 2026-09-26 | **专题指南 `docs/agent-mcp-positioning.md`**（D）—— 把 agent/dsh/MCP 的定位讨论落成文件：agent 的三层含义（外部/托管/dsh 内）、两条通道（MCP vs `srcos://`+REST）、三条不做（MCP Client / 直改 workspace / 推理循环）、优缺点表（A1 托管 agent 无实例身份、A2 agent 无幂等键、M1 `srcos://` 而非 MCP resources…）与建议；dsh 四个接触点与「为什么删路 B」。结论指向 ADR-011/016/017/019/024，不新增决策 |
 | 2026-09-26 | **B2（`storages.yaml` 管理端编辑）评估后不做** —— 网关在**构造时**把 storage provider 交给 api/execute/runtime，要即时生效需先把它做成可原地替换的（同 grants 的 `ReplaceWith`）；是可行的，但**价值偏低**（storages 很少变，重启一次可接受），而 UI 编辑会碰**安全边界**（`host_root` 的粒度就是数据可见范围，表单无法知道正确粒度）。结论：保留「手写文件 + 重启」；若将来真需要，做「编辑 + 明确提示需重启」而不做热加载 |
