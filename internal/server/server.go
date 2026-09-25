@@ -17,6 +17,7 @@ import (
 	"github.com/seqyuan/srcos/internal/activity"
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/api"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/execute"
@@ -86,6 +87,10 @@ type Server struct {
 	// submission run by itself. Nil when draining is disabled (or when the write
 	// path is not configured at all).
 	taskQueue *execute.Queue
+	// audit is the structured record of who did what (internal/audit). Shared
+	// with the API handler; the gateway's own decisions (reconcile, reaper) can
+	// record into it as well.
+	audit *audit.Recorder
 }
 
 // Options carries the seams the gateway needs beyond the user registry:
@@ -242,6 +247,11 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// disabled rather than half-working.
 	policy, _ := grants.(*grant.Policy)
 
+	// The structured audit stream (internal/audit). One recorder per process,
+	// shared with the API handler so the request path and the write path write
+	// to the same file.
+	auditRec := audit.New(config.DataDir(configDir))
+
 	apiOpts := api.Options{
 		ConfigDir:   configDir,
 		ToolsDir:    toolsDir,
@@ -252,6 +262,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		PolicyPath:  config.GrantsPath(configDir),
 		Runner:      opts.Supervisor,
 		FlowsDir:    flowsDir,
+		Audit:       auditRec,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},
@@ -288,6 +299,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		serviceActivity: serviceActivity,
 		activeConns:     proxy.NewActiveConns(),
 		runner:          opts.Supervisor,
+		audit:           auditRec,
 	}
 	if srv.runner != nil {
 		srv.reaper = &runtime.Reaper{

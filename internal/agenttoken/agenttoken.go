@@ -41,6 +41,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 )
 
@@ -167,7 +168,22 @@ func (i Identity) CanSubmitTool(toolID string) bool {
 	return false
 }
 
-// Describe renders the identity for an audit log line.
+// AuditActor renders the identity for the structured audit stream: who acted,
+// and which credential spoke for them.
+func (i Identity) AuditActor() audit.Actor {
+	a := audit.Actor{User: i.User, Kind: audit.KindSession}
+	if i.Agent {
+		a.Kind = audit.KindAgentToken
+		a.TokenID = i.TokenID
+		a.Label = i.Label
+		for _, s := range i.Scopes {
+			a.Scopes = append(a.Scopes, string(s))
+		}
+	}
+	return a
+}
+
+// Describe renders the identity for a log line.
 func (i Identity) Describe() string {
 	if !i.Agent {
 		return i.User

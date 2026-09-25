@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/execute"
@@ -72,6 +73,10 @@ type Options struct {
 	// default controller from the other options, so a deployment gets it without
 	// wiring anything extra.
 	Execute *execute.Controller
+	// Audit is the structured record of who did what (internal/audit). Nil is a
+	// valid no-op. It is also handed to the Execute controller this handler
+	// builds, so one recorder covers the whole request path.
+	Audit *audit.Recorder
 }
 
 // Handler handles REST API requests for service management.
@@ -104,6 +109,7 @@ func NewHandlerWithOptions(registry *config.UserRegistry, sessionSecret string, 
 			Storages:   opts.Storages,
 			Grants:     opts.Grants,
 			Supervisor: opts.Runner,
+			Audit:      opts.Audit,
 		})
 	}
 	return &Handler{
@@ -126,6 +132,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !auth.SameOriginRequest(r) &&
 			!agenttoken.HasBearerCredentials(r) {
 			writeJSON(w, 403, map[string]string{"error": "cross-origin request rejected"})
+			h.auditDeny(r, nil, "csrf", "cross-origin request rejected")
 			return true
 		}
 		return h.adminHandler(w, r)
@@ -160,6 +167,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 		!agenttoken.HasBearerCredentials(r) && !auth.SameOriginRequest(r) {
 		writeJSON(w, 403, map[string]string{"error": "cross-origin request rejected"})
+		h.auditDeny(r, nil, "csrf", "cross-origin request rejected")
 		return true
 	}
 
@@ -174,6 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	// explicit at the one place that would have to change.
 	if ident.Agent && !isReadMethod(r.Method) && !ident.Has(agenttoken.ScopeSubmit) {
 		log.Printf("[srcos] agent %s refused (read-only token): %s %s", ident.Describe(), r.Method, r.URL.Path)
+		h.auditDeny(r, &ident, "scope", "agent token is read-only; writing requires the submit scope")
 		writeJSON(w, 403, map[string]string{
 			"error": "agent token is read-only (scope \"read\"); writing requires the \"submit\" scope, which is reserved for the second phase of ADR-019",
 		})
@@ -289,6 +298,7 @@ func (h *Handler) identity(w http.ResponseWriter, r *http.Request) (agenttoken.I
 			// No credential: fall through to the session cookie.
 		default:
 			writeJSON(w, 401, map[string]string{"error": err.Error()})
+			h.auditDeny(r, nil, "auth", err.Error())
 			return agenttoken.Identity{}, false
 		}
 	}
@@ -296,6 +306,7 @@ func (h *Handler) identity(w http.ResponseWriter, r *http.Request) (agenttoken.I
 	session := h.sessionFromCookies(r.Header.Get("Cookie"))
 	if !session.Valid || session.UserID == "" {
 		writeJSON(w, 401, map[string]string{"error": "Unauthorized"})
+		h.auditDeny(r, nil, "auth", "no valid session or token")
 		return agenttoken.Identity{}, false
 	}
 	return agenttoken.HumanIdentity(session.UserID), true
@@ -309,6 +320,22 @@ func isReadMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+// auditDeny records a refused request. It is called at each gate that turns a
+// request away, because a denial is the most valuable thing an audit trail
+// carries — it is what "who tried what, and why were they stopped" needs.
+func (h *Handler) auditDeny(r *http.Request, ident *agenttoken.Identity, action, reason string) {
+	if h.opts.Audit == nil {
+		return
+	}
+	actor := audit.Actor{Kind: audit.KindAnonymous}
+	if ident != nil {
+		actor = ident.AuditActor()
+	}
+	h.opts.Audit.Record(audit.NewEvent(actor, action).
+		WithRequest(r.Method, r.URL.Path, auth.ClientIP(r), r.UserAgent()).
+		Denied(reason))
 }
 
 // currentSessionRev returns the per-account session revision derived from the

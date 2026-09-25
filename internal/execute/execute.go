@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/flow"
 	"github.com/seqyuan/srcos/internal/flowrun"
@@ -93,6 +94,9 @@ type Options struct {
 	// NewRunner builds the runner that *starts* a unit for one user. Nil builds
 	// the default local-backend runner.
 	NewRunner func(user string) (*runtime.Runner, error)
+	// Audit is the structured record of who did what (internal/audit). Nil is a
+	// valid no-op, which is what a test or a single-user deployment wants.
+	Audit *audit.Recorder
 }
 
 // Controller performs the write operations.
@@ -165,15 +169,25 @@ type SubmitResult struct {
 // The queue is the same drop-box `srcos job submit` writes to (ADR-004: 目录即
 // 队列), so a run submitted by an agent is an ordinary task with an ordinary
 // record, log and artifacts.
-func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (*SubmitResult, error) {
+func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *SubmitResult, err error) {
 	toolID := strings.TrimSpace(req.Tool)
+	var t *tool.Tool
+	defer func() {
+		ev := audit.NewEvent(ident.AuditActor(), "submit").
+			WithTarget("tool", toolID, versionOf(t)).
+			WithParams(req.Params)
+		if res != nil {
+			ev = ev.WithRefs(map[string]string{"job": res.JobID, "instance": res.InstanceID})
+		}
+		c.recordAudit(ev, err)
+	}()
 	if toolID == "" {
 		return nil, fmt.Errorf("%w: tool is required", ErrBadRequest)
 	}
 	if !ident.CanSubmitTool(toolID) {
 		return nil, fmt.Errorf("%w: this credential may not submit to tool %s%s", ErrForbidden, toolID, allowlistHint(ident))
 	}
-	t, err := c.visibleTool(ident.User, toolID)
+	t, err = c.visibleTool(ident.User, toolID)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +237,7 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (*Subm
 	if c.wake != nil {
 		c.wake()
 	}
-	audit(ident, "submit", fmt.Sprintf("tool=%s@%s job=%s", t.ID, t.Version, jobID))
+	auditLine(ident, "submit", fmt.Sprintf("tool=%s@%s job=%s", t.ID, t.Version, jobID))
 	return &SubmitResult{
 		JobID:      jobID,
 		Dir:        dir,
@@ -278,8 +292,16 @@ type CancelResult struct {
 // It is idempotent on purpose: cancelling something that already finished is
 // not an error, it is the caller's intent already satisfied — an agent that
 // retries a cancel must not get a confusing failure.
-func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, needle string) (*CancelResult, error) {
+func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, needle string) (res *CancelResult, err error) {
 	needle = strings.TrimSpace(needle)
+	var targetTool string
+	defer func() {
+		ev := audit.NewEvent(ident.AuditActor(), "cancel").WithTarget("tool", targetTool, "")
+		if res != nil {
+			ev = ev.WithRefs(map[string]string{"instance": res.InstanceID})
+		}
+		c.recordAudit(ev, err)
+	}()
 	if needle == "" {
 		return nil, fmt.Errorf("%w: an instance id is required", ErrBadRequest)
 	}
@@ -292,6 +314,7 @@ func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, need
 		}
 		return nil, translate(err)
 	}
+	targetTool = view.Tool
 	if !ident.CanSubmitTool(view.Tool) {
 		return nil, fmt.Errorf("%w: this credential may not control tool %s%s", ErrForbidden, view.Tool, allowlistHint(ident))
 	}
@@ -317,7 +340,7 @@ func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, need
 	if err := runner.StopService(ctx, t, inst); err != nil {
 		return nil, err
 	}
-	audit(ident, "cancel", fmt.Sprintf("instance=%s tool=%s", inst.ID, inst.Tool))
+	auditLine(ident, "cancel", fmt.Sprintf("instance=%s tool=%s", inst.ID, inst.Tool))
 	return &CancelResult{InstanceID: inst.ID, State: string(inst.State)}, nil
 }
 
@@ -354,7 +377,15 @@ type FlowRunResult struct {
 // the flow will use: a token narrowed to one pipeline must not be able to launder
 // a different tool through a composed flow. The user dimension (grants, quotas)
 // is enforced by the flow runner per node.
-func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (*FlowRunResult, error) {
+func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (res *FlowRunResult, err error) {
+	defer func() {
+		ev := audit.NewEvent(ident.AuditActor(), "run_flow").WithTarget("flow", req.Flow, "")
+		if res != nil {
+			ev = ev.WithTarget("flow", req.Flow, res.Version).
+				WithRefs(map[string]string{"run": res.RunID})
+		}
+		c.recordAudit(ev, err)
+	}()
 	if strings.TrimSpace(c.opts.FlowsDir) == "" {
 		return nil, fmt.Errorf("%w: no flow directory is configured", ErrUnavailable)
 	}
@@ -440,7 +471,7 @@ func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (*Fl
 		log.Printf("[srcos] flow run %s finished: %s", runID, record.State)
 	}()
 
-	audit(ident, "run_flow", fmt.Sprintf("flow=%s@%s run=%s jobs=%d", f.ID, f.Version, runID, len(units)))
+	auditLine(ident, "run_flow", fmt.Sprintf("flow=%s@%s run=%s jobs=%d", f.ID, f.Version, runID, len(units)))
 	return &FlowRunResult{
 		RunID:     runID,
 		Flow:      f.ID,
@@ -621,9 +652,27 @@ func allowlistHint(ident agenttoken.Identity) string {
 	return " (its submit allowlist: " + strings.Join(ident.SubmitTools, ",") + ")"
 }
 
-// audit writes the line an auditor asks for: who, what, which tool and version,
+// auditLine writes the log line an auditor greps for: who, what, which tool and version,
 // which instance. The REST/MCP layers already log every accepted agent request;
 // this records the *act*, which is the fact that survives.
-func audit(ident agenttoken.Identity, action, detail string) {
+func auditLine(ident agenttoken.Identity, action, detail string) {
 	log.Printf("[srcos] audit %s: %s %s", action, ident.Describe(), detail)
+}
+
+// recordAudit writes one write-path act to the structured audit stream. A nil
+// recorder is a no-op, so a deployment without one (a test) needs no branch.
+func (c *Controller) recordAudit(ev audit.Event, err error) {
+	if err != nil {
+		ev = ev.Denied(err.Error())
+	} else {
+		ev = ev.Allowed()
+	}
+	c.opts.Audit.Record(ev)
+}
+
+func versionOf(t *tool.Tool) string {
+	if t == nil {
+		return ""
+	}
+	return t.Version
 }

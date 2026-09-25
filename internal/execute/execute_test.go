@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/flow"
 	"github.com/seqyuan/srcos/internal/grant"
@@ -702,4 +703,52 @@ func waitInstance(t *testing.T, configDir, id string, want runtime.State) *runti
 	}
 	t.Fatalf("instance %s never reached %s (last: %+v)", id, want, last)
 	return nil
+}
+
+// The write path is what an auditor asks about: who, which tool version, what
+// parameters, and whether it was allowed. This locks both outcomes into the
+// structured stream.
+func TestSubmitWritesAudit(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	rec := audit.New(config.DataDir(f.configDir))
+	f.opts.Audit = rec
+	defer rec.Close()
+
+	allowed := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
+	res, err := f.Submit(allowed, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A read-only token is refused by the submit scope — and the refusal is
+	// itself worth recording.
+	readOnly := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeRead}, nil)
+	if _, err := f.Submit(readOnly, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read-only submit = %v, want ErrForbidden", err)
+	}
+
+	events, err := audit.Query(config.DataDir(f.configDir), audit.Filter{Action: "submit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("audit events = %d, want 2: %+v", len(events), events)
+	}
+	allow := events[0]
+	if allow.Decision != audit.Allow || allow.Actor.User != "alice" || allow.Actor.Kind != audit.KindAgentToken {
+		t.Fatalf("allow event wrong: %+v", allow)
+	}
+	if allow.Target.ID != "demo" || allow.Target.Version != "0.1.0" {
+		t.Fatalf("allow event lost tool@version: %+v", allow.Target)
+	}
+	if allow.Params["word"] != "hi" {
+		t.Fatalf("allow event lost params: %+v", allow.Params)
+	}
+	if allow.Refs["job"] != res.JobID || allow.Refs["instance"] != res.InstanceID {
+		t.Fatalf("allow event lost refs: %+v", allow.Refs)
+	}
+	deny := events[1]
+	if deny.Decision != audit.Deny || deny.Reason == "" {
+		t.Fatalf("deny event wrong: %+v", deny)
+	}
 }
