@@ -475,3 +475,22 @@ func TestLoadRealHelloFanout(t *testing.T) {
 		t.Fatal("example must declare a required `samples` input")
 	}
 }
+
+func TestIngressBackendPathMustBeAbsolute(t *testing.T) {
+	// relative backend_path is refused at registration: it would be a second,
+	// accidental contract about where the app lives.
+	if _, err := Load(writeTool(t, map[string]string{"tool.yaml": `
+schemaVersion: 1
+id: web
+version: 0.1.0
+name: Web
+kind: service
+backend: local
+entry: work.sh
+resources: {cpu: 1, memory: "1Gi"}
+ingress: {port: 8080, backend_path: app}
+lifecycle: {restart: never, max_lifetime: "1h"}
+`, "work.sh": minimalWork})); err == nil {
+		t.Fatal("a relative ingress.backend_path must be rejected")
+	}
+}

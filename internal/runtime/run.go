@@ -519,7 +519,7 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 			Path:        inst.RoutePath,
 			Target:      route.Target{Host: "127.0.0.1", Port: port},
 			WebSocket:   true,
-			BackendPath: t.Ingress.HealthcheckPath(),
+			BackendPath: t.Ingress.BackendPath,
 			State:       string(inst.State),
 		}); err != nil {
 			_ = h.Stop(context.Background())

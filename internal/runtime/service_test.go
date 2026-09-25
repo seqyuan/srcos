@@ -477,3 +477,27 @@ func TestReaperHonoursObservedActivity(t *testing.T) {
 		t.Fatalf("stopped = %v", stopped)
 	}
 }
+
+// The published route's backend path must come from ingress.backend_path, never
+// from the healthcheck path: the probe path says where to knock, not where the
+// app lives. (Before this, a tool with a non-root healthcheck had *every*
+// proxied request sent under that path.)
+func TestRouteBackendPathComesFromIngress(t *testing.T) {
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	tl.Ingress.BackendPath = "/app"
+
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+
+	e, ok := h.routes.Get("alice", "web")
+	if !ok {
+		t.Fatal("no route was published")
+	}
+	if e.BackendPath != "/app" {
+		t.Fatalf("route BackendPath = %q, want /app (it must not come from the healthcheck path)", e.BackendPath)
+	}
+}

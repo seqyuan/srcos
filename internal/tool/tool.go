@@ -189,6 +189,14 @@ type Internal struct {
 type Ingress struct {
 	Port        int          `yaml:"port"`
 	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty"`
+	// BackendPath is the prefix the backend itself expects (the same meaning as
+	// the static service card option). Empty means "the app is served at its
+	// root", which is the normal case for a service instance: SRCOS strips its
+	// own /proxy/<user>/<tool> prefix before forwarding.
+	//
+	// It is deliberately *not* the healthcheck path: the probe path says where to
+	// knock, not where the app lives.
+	BackendPath string `yaml:"backend_path,omitempty"`
 }
 
 // HealthcheckPath is the probe path, defaulting to the root.
@@ -447,6 +455,9 @@ func (t *Tool) Validate() error {
 	}
 	if t.Sandbox == SandboxApptainer && t.Image == "" {
 		bad("sandbox: apptainer requires image")
+	}
+	if t.Ingress != nil && t.Ingress.BackendPath != "" && !pathIsAbs(t.Ingress.BackendPath) {
+		bad("ingress.backend_path must be absolute, got %q", t.Ingress.BackendPath)
 	}
 	if t.Sandbox != SandboxApptainer && t.Image != "" {
 		bad("image is only meaningful with sandbox: apptainer (got sandbox: %s)", t.Sandbox)
