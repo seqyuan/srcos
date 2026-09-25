@@ -51,6 +51,7 @@ func printGrantUsage() {
 	fmt.Fprintln(os.Stderr, "      --user <name>         (repeatable)")
 	fmt.Fprintln(os.Stderr, "      --group <name>        (repeatable, must exist)")
 	fmt.Fprintln(os.Stderr, "      --public              any authenticated account")
+	fmt.Fprintln(os.Stderr, "      --requestable         let un-granted users ask for access (B3)")
 	fmt.Fprintln(os.Stderr, "      --max-cpu <n>         aggregate cores for this user+tool")
 	fmt.Fprintln(os.Stderr, "      --max-memory <size>   aggregate memory, e.g. 64Gi")
 	fmt.Fprintln(os.Stderr, "      --max-instances <n>   aggregate live instances")
@@ -106,6 +107,7 @@ func runGrantList(sub string, args []string) {
 		fmt.Printf("users     %v\n", g.Users)
 		fmt.Printf("groups    %v\n", g.Groups)
 		fmt.Printf("quota     cpu=%d memory=%s instances=%d\n", g.Quota.MaxCPU, dash(g.Quota.MaxMemory), g.Quota.MaxInstances)
+		fmt.Printf("requestable %v\n", g.Requestable)
 		fmt.Printf("effective %v\n", whoIsAllowed(p, g))
 		return
 	}
@@ -149,6 +151,7 @@ func runGrantSet(args []string) {
 	fs.Var(users, "user", "username (repeatable)")
 	fs.Var(groups, "group", "group name (repeatable)")
 	public := fs.Bool("public", false, "any authenticated account")
+	requestable := fs.Bool("requestable", false, "let un-granted users request access (B3)")
 	maxCPU := fs.Int("max-cpu", 0, "aggregate CPU cores")
 	maxMemory := fs.String("max-memory", "", "aggregate memory, e.g. 64Gi")
 	maxInstances := fs.Int("max-instances", 0, "aggregate live instances")
@@ -173,10 +176,11 @@ func runGrantSet(args []string) {
 	}
 
 	g := grant.Grant{
-		Tool:   tool,
-		Users:  *users,
-		Groups: *groups,
-		Public: *public,
+		Tool:        tool,
+		Users:       *users,
+		Groups:      *groups,
+		Public:      *public,
+		Requestable: *requestable,
 		Quota: grant.Quota{
 			MaxCPU:       *maxCPU,
 			MaxMemory:    *maxMemory,

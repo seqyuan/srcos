@@ -162,6 +162,11 @@ func adminToolsTable(tools []inspect.AdminTool) string {
 		if t.Grant != nil {
 			who = grantSummary(*t.Grant)
 		}
+		// A requestable tool is not granted, but its existence is public so
+		// users can ask for it (B3).
+		if t.Grant != nil && t.Grant.Requestable {
+			who += ` <span class="tag">可申请</span>`
+		}
 		quota := `<span class="muted">-</span>`
 		if t.Grant != nil && !t.Grant.Quota.IsZero() {
 			quota = fmt.Sprintf("cpu %d · mem %s · 实例 %d",
@@ -186,24 +191,29 @@ func adminToolsTable(tools []inspect.AdminTool) string {
 // JSON to /api/admin/grants/<tool>, and the page reloads. No client-side state
 // machine, nothing to get out of sync with the policy on disk.
 func grantForm(t inspect.AdminTool) string {
-	users, groups, public := "", "", false
+	users, groups, public, requestable := "", "", false, false
 	maxCPU, maxMemory, maxInstances := 0, "", 0
 	if t.Grant != nil {
 		users = strings.Join(t.Grant.Users, ", ")
 		groups = strings.Join(t.Grant.Groups, ", ")
 		public = t.Grant.Public
+		requestable = t.Grant.Requestable
 		maxCPU = t.Grant.Quota.MaxCPU
 		maxMemory = t.Grant.Quota.MaxMemory
 		maxInstances = t.Grant.Quota.MaxInstances
 	}
-	checked := ""
+	checked, reqChecked := "", ""
 	if public {
 		checked = " checked"
+	}
+	if requestable {
+		reqChecked = " checked"
 	}
 	return fmt.Sprintf(`<div class="grant-form" data-tool="%s">
       <label>用户（逗号分隔）<input type="text" name="users" value="%s" placeholder="alice, bob"></label>
       <label>组（逗号分隔，需已存在）<input type="text" name="groups" value="%s" placeholder="bio-team"></label>
       <label class="grant-check"><input type="checkbox" name="public"%s> 所有登录用户可用（public）</label>
+      <label class="grant-check"><input type="checkbox" name="requestable"%s> 未授权用户可申请（requestable）—— 只公开存在性，不授予权限</label>
       <div class="grant-row">
         <label>最大核数<input type="number" name="maxCpu" value="%d" min="0"></label>
         <label>最大内存<input type="text" name="maxMemory" value="%s" placeholder="64Gi"></label>
@@ -213,7 +223,7 @@ func grantForm(t inspect.AdminTool) string {
         <button type="button" class="adm-btn primary sm" onclick="admSaveGrant(this)">保存</button>
         <button type="button" class="adm-btn sm danger" onclick="admRemoveGrant('%s')">删除授权（等于下架）</button>
       </div>
-    </div>`, esc(t.ID), esc(users), esc(groups), checked, maxCPU, esc(maxMemory), maxInstances, esc(t.ID))
+    </div>`, esc(t.ID), esc(users), esc(groups), checked, reqChecked, maxCPU, esc(maxMemory), maxInstances, esc(t.ID))
 }
 
 // adminUsersTable renders the groups and admins, with an editor that replaces
@@ -369,6 +379,7 @@ function admSaveGrant(btn) {
     users: admList(form.querySelector('[name=users]').value),
     groups: admList(form.querySelector('[name=groups]').value),
     public: form.querySelector('[name=public]').checked,
+    requestable: form.querySelector('[name=requestable]').checked,
     maxCpu: parseInt(form.querySelector('[name=maxCpu]').value || '0', 10) || 0,
     maxMemory: form.querySelector('[name=maxMemory]').value.trim(),
     maxInstances: parseInt(form.querySelector('[name=maxInstances]').value || '0', 10) || 0

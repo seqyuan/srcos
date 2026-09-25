@@ -314,6 +314,7 @@ type grantBody struct {
 	Users        []string `json:"users"`
 	Groups       []string `json:"groups"`
 	Public       bool     `json:"public"`
+	Requestable  bool     `json:"requestable"`
 	MaxCPU       int      `json:"maxCpu"`
 	MaxMemory    string   `json:"maxMemory"`
 	MaxInstances int      `json:"maxInstances"`
@@ -347,10 +348,11 @@ func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, username
 	}
 
 	g := grant.Grant{
-		Tool:   toolID,
-		Users:  body.Users,
-		Groups: body.Groups,
-		Public: body.Public,
+		Tool:        toolID,
+		Users:       body.Users,
+		Groups:      body.Groups,
+		Public:      body.Public,
+		Requestable: body.Requestable,
 		Quota: grant.Quota{
 			MaxCPU:       body.MaxCPU,
 			MaxMemory:    body.MaxMemory,
@@ -363,9 +365,10 @@ func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, username
 		return
 	}
 	h.auditChange(r, agenttoken.HumanIdentity(username), "grant.set", "grant", toolID, map[string]any{
-		"users":  strings.Join(g.Users, ","),
-		"groups": strings.Join(g.Groups, ","),
-		"public": g.Public,
+		"users":       strings.Join(g.Users, ","),
+		"groups":      strings.Join(g.Groups, ","),
+		"public":      g.Public,
+		"requestable": g.Requestable,
 	})
 	writeJSON(w, 200, map[string]any{"grant": g})
 }

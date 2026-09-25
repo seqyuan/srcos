@@ -266,7 +266,7 @@ func (p *Policy) Describe() string {
 		return string(b)
 	}
 	add("\ngrants:\n")
-	add("  %-20s %-28s %-10s %s\n", "TOOL", "WHO", "INSTANCES", "CPU / MEMORY")
+	add("  %-20s %-28s %-10s %-10s %s\n", "TOOL", "WHO", "INSTANCES", "REQUEST", "CPU / MEMORY")
 	for _, g := range p.Grants {
 		who := "public"
 		switch {
@@ -279,11 +279,17 @@ func (p *Policy) Describe() string {
 		if g.Quota.MaxInstances > 0 {
 			inst = fmt.Sprintf("%d", g.Quota.MaxInstances)
 		}
+		// REQUEST says whether users who do NOT have the tool can ask for it
+		// (B3); it is not access.
+		request := "-"
+		if g.Requestable {
+			request = "可申请"
+		}
 		limits := "-"
 		if g.Quota.MaxCPU > 0 || g.Quota.MaxMemory != "" {
 			limits = fmt.Sprintf("%d / %s", g.Quota.MaxCPU, orDash(g.Quota.MaxMemory))
 		}
-		add("  %-20s %-28s %-10s %s\n", g.Tool, who, inst, limits)
+		add("  %-20s %-28s %-10s %-10s %s\n", g.Tool, who, inst, request, limits)
 	}
 	return string(b)
 }

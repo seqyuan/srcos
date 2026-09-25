@@ -428,3 +428,46 @@ func TestReplaceWithKeepsThePointerStable(t *testing.T) {
 		t.Fatalf("groups = %v", holder.GroupNames())
 	}
 }
+
+// Requestable exposes a tool's existence without granting it; a more specific
+// grant wins over "*" exactly as Allowed does (B3).
+func TestRequestablePrecedence(t *testing.T) {
+	var nilPolicy *Policy
+	if nilPolicy.Requestable("anything") {
+		t.Fatal("a nil policy is not requestable")
+	}
+
+	p, err := New(nil, nil, []Grant{
+		{Tool: "*", Public: true, Requestable: true},
+		{Tool: "specific", Public: true, Requestable: false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Requestable("other") {
+		t.Fatal("the wildcard grant should make an unmentioned tool requestable")
+	}
+	if p.Requestable("specific") {
+		t.Fatal("the specific grant must win over the wildcard")
+	}
+
+	q, err := New(nil, nil, []Grant{{Tool: "demo", Users: []string{"alice"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Requestable("demo") {
+		t.Fatal("requestable must default to false")
+	}
+}
+
+func TestSetGrantKeepsRequestable(t *testing.T) {
+	p, err := New(nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetGrant(Grant{Tool: "demo", Requestable: true})
+	got, ok := p.Grant("demo")
+	if !ok || !got.Requestable {
+		t.Fatalf("SetGrant dropped requestable: %+v", got)
+	}
+}

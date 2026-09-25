@@ -141,6 +141,13 @@ type Grant struct {
 	// Public grants access to every authenticated user.
 	Public bool `yaml:"public,omitempty" json:"public,omitempty"`
 
+	// Requestable exposes the tool's *existence* to users who are not granted it,
+	// so they can ask for access (B3). It is not access: approval writes a grant
+	// exactly like `srcos grant allow`, so "why can alice use this" still points
+	// at a line in grants.yaml. Default false — publishing a tool still does not
+	// mean telling everyone it exists.
+	Requestable bool `yaml:"requestable,omitempty" json:"requestable,omitempty"`
+
 	// Quota is this grant's own ceiling. It is applied *in addition to* the
 	// tool's declared resources, so a user can never exceed what the tool is
 	// willing to run with, and may be given less.
@@ -295,6 +302,24 @@ func (p *Policy) Allowed(username, toolID string) bool {
 	}
 	if g, ok := p.grantForLocked("*"); ok && g.Allows(username, p.Groups) {
 		return true
+	}
+	return false
+}
+
+// Requestable reports whether a tool accepts access requests from users who do
+// not have it. A more specific grant wins; the "*" grant is the fallback, the
+// same precedence Allowed uses.
+func (p *Policy) Requestable(toolID string) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if g, ok := p.grantForLocked(toolID); ok {
+		return g.Requestable
+	}
+	if g, ok := p.grantForLocked("*"); ok {
+		return g.Requestable
 	}
 	return false
 }
