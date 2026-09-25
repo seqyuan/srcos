@@ -1,7 +1,9 @@
 package agenttoken
 
 import (
+	"errors"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 )
 
@@ -550,5 +553,70 @@ func TestHasBearerCredentials(t *testing.T) {
 		if got := HasBearerCredentials(req); got != want {
 			t.Fatalf("HasBearerCredentials(%q) = %v, want %v", header, got, want)
 		}
+	}
+}
+
+// An instance credential is a subset by construction and lives in its own file,
+// so the gateway never races a human's `token create` (A1).
+func TestInstanceCredentials(t *testing.T) {
+	dir := t.TempDir()
+	cfg := New(filepath.Join(dir, "agent-tokens.yaml"))
+	rt := New(filepath.Join(dir, "instance-tokens.yaml"))
+
+	plaintext, err := rt.MintInstance("alice", "alice-web-svc", []string{"submit"}, []string{"demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := func(tok string) *http.Request {
+		r := httptest.NewRequest("GET", "/api/tools", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		return r
+	}
+
+	ident, err := rt.Authenticate(req(plaintext))
+	if err != nil {
+		t.Fatalf("runtime store: %v", err)
+	}
+	if ident.User != "alice" || !ident.Agent || ident.Instance != "alice-web-svc" {
+		t.Fatalf("identity = %+v", ident)
+	}
+	// submit implies read, and the allowlist narrows by tool.
+	if !ident.Has(ScopeRead) || !ident.Has(ScopeSubmit) {
+		t.Fatalf("scopes = %v", ident.Scopes)
+	}
+	if !ident.CanSubmitTool("demo") || ident.CanSubmitTool("other") {
+		t.Fatalf("allowlist = %v", ident.SubmitTools)
+	}
+
+	// The config store must not know it: two writers, two files.
+	if _, err := cfg.Authenticate(req(plaintext)); !errors.Is(err, ErrUnknownToken) {
+		t.Fatalf("the user store must not hold an instance credential: %v", err)
+	}
+	// The chain finds it.
+	if _, err := (Chain{cfg, rt}).Authenticate(req(plaintext)); err != nil {
+		t.Fatalf("chain: %v", err)
+	}
+
+	actor := ident.AuditActor()
+	if actor.Kind != audit.KindAgentToken || actor.Instance != "alice-web-svc" {
+		t.Fatalf("audit actor = %+v", actor)
+	}
+
+	// Revoking the instance kills the credential; revoking again is a no-op.
+	if ok, err := rt.RevokeInstance("alice-web-svc"); err != nil || !ok {
+		t.Fatalf("revoke = %v %v", ok, err)
+	}
+	if _, err := (Chain{cfg, rt}).Authenticate(req(plaintext)); !errors.Is(err, ErrNoCredential) {
+		t.Fatalf("after revoke the chain must reject: %v", err)
+	}
+	if ok, _ := rt.RevokeInstance("alice-web-svc"); ok {
+		t.Fatal("a second revoke should report false")
+	}
+	if n := len(rt.InstanceTokens()); n != 0 {
+		t.Fatalf("instance tokens left = %d", n)
+	}
+	// Minting without an instance id is refused: the binding is the point.
+	if _, err := rt.MintInstance("alice", "  ", nil, nil); err == nil {
+		t.Fatal("MintInstance must require an instance id")
 	}
 }

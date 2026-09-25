@@ -48,6 +48,41 @@ func (s *Server) reconcile() {
 		}
 	}
 	s.syncRoutes()
+	s.sweepInstanceCredentials()
+}
+
+// sweepInstanceCredentials revokes instance credentials whose instance is gone
+// (A1).
+//
+// A crash deletes nothing, so without this "the credential's lifetime is the
+// instance's" would quietly stop being true. Explicit stops already revoke on
+// the way out; this is the backstop for the way that has no way out.
+func (s *Server) sweepInstanceCredentials() {
+	if s.runtimeTokens == nil {
+		return
+	}
+	tokens := s.runtimeTokens.InstanceTokens()
+	if len(tokens) == 0 {
+		return
+	}
+	live := map[string]bool{}
+	if insts, err := runtime.ListInstances(config.DirOf(s.registry)); err == nil {
+		for _, inst := range insts {
+			if !inst.State.Terminal() {
+				live[inst.ID] = true
+			}
+		}
+	}
+	for _, t := range tokens {
+		if live[t.Instance] {
+			continue
+		}
+		if _, err := s.runtimeTokens.RevokeInstance(t.Instance); err != nil {
+			log.Printf("[srcos] instance credential sweep: %v", err)
+			continue
+		}
+		log.Printf("[srcos] revoked the credential of dead instance %s", t.Instance)
+	}
 }
 
 // reconcileTasks settles task records whose process is gone.

@@ -195,6 +195,9 @@ resources:
   memory: "256Mi"
 ingress: {port: 8080}
 lifecycle: {max_lifetime: "5m", idle_ttl: "2m"}
+# A hosted agent (A1): SRCOS mints an instance credential at start and revokes
+# it at stop, so the agent never needs a user-level token.
+agent: {mcp: [read]}
 YAML
 cat > "$TOOLS/$SVC/work.sh" <<'SH'
 #!/usr/bin/env bash
@@ -407,6 +410,15 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/proxy/$USER_NAME/
 [ "$code" = "200" ] || fail "proxied service = $code, want 200"
 pass "service running and reachable at /proxy/$USER_NAME/$SVC/"
 
+# A hosted agent (A1): the credential is minted into the instance's home, it
+# authenticates, and stopping the instance revokes it.
+AGENT_TOK_FILE="$DATA/homes/$USER_NAME/.srcos/agent-token"
+[ -f "$AGENT_TOK_FILE" ] || fail "no agent credential was minted into the home"
+AGENT_TOK="$(tr -d '\n' < "$AGENT_TOK_FILE")"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGENT_TOK" "$BASE/api/tools")"
+[ "$code" = "200" ] || fail "instance credential rejected: $code"
+pass "实例凭证已签发到 home 且可用"
+
 grep -rq '"action":"instance.started"' "$AUDDIR" 2>/dev/null || fail "admin service start not audited"
 
 SVC_INST="$("$BIN" job list -d "$CFG" 2>/dev/null | awk -v t="$SVC" '$2==t{print $1}' | head -1)"
@@ -415,7 +427,11 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admi
   -H "Origin: $BASE")"
 [ "$code" = "200" ] || fail "admin stop = $code, want 200"
 grep -rq '"action":"instance.stopped"' "$AUDDIR" 2>/dev/null || fail "admin service stop not audited"
-pass "started and stopped, both audited"
+# The credential's lifetime is the instance's.
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGENT_TOK" "$BASE/api/tools")"
+[ "$code" = "401" ] || fail "the instance credential survived its instance: $code"
+grep -rq '"action":"agenttoken.revoke"' "$AUDDIR" 2>/dev/null || fail "credential revocation not audited"
+pass "started and stopped, both audited; 实例凭证随之失效"
 
 # ── 12. 申请 → 审批（B3）──────────────────────────────────────────
 step 12 "工具访问申请/审批"

@@ -918,6 +918,19 @@ PY
 | `srcos_cancel_instance` | 停掉一个在跑的实例（幂等：已结束的返回它的终态） |
 | `srcos_run_flow` | 用 CSV 样本表展开一个流程并启动（每个节点的工具都要在 token 的白名单里） |
 
+**托管 agent 的凭据（A1）**：如果一个 `kind: service` 工具自己托管的 agent 要调 `/mcp`，它不需要
+你交给它一枚用户级 token —— 在 `tool.yaml` 里声明：
+
+```yaml
+kind: service
+agent: { mcp: [read], tools: [scrna_qc] }   # scope 与白名单来自这里
+```
+
+实例**启动时** SRCOS 签发一枚实例 token（scope/白名单来自工具声明，所以是 owner 权限的
+**子集**），写到虚拟 home 的 **`$HOME/.srcos/agent-token`**（0600）；实例停止时撤销，
+网关启动时会清掉「实例已不在」的残留。审计里这类动作的 actor 带 `instance`，
+所以「实例做的」与「人做的」分得清（ADR-025）。
+
 > **提交即执行**：`POST /api/jobs`、`srcos_submit_job` 与 `srcos job submit` 都只是写
 > `job.json`（目录即队列），**网关的任务队列会自动把它跑起来**（提交会唤醒队列，通常毫秒级）。
 > 详见下面的「任务队列」。

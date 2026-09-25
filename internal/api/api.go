@@ -56,6 +56,10 @@ type Options struct {
 	// (agents, MCP clients) rather than browsers (ADR-019). Nil means token
 	// authentication is not wired and only session cookies are accepted.
 	AgentTokens *agenttoken.Store
+	// Authenticator resolves a bearer credential when more than one store can
+	// hold one (user tokens + instance tokens, A1). Nil falls back to
+	// AgentTokens alone.
+	Authenticator agenttoken.Authenticator
 	// Policy is the authorization policy. Nil disables the management surface
 	// (/api/admin/*): an admin is someone the policy says is one, so without a
 	// policy there is no one to authorize.
@@ -288,8 +292,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 // the cookie: a program that sent a bad credential must be told so, not
 // silently served as whatever browser session the caller happens to hold.
 func (h *Handler) identity(w http.ResponseWriter, r *http.Request) (agenttoken.Identity, bool) {
-	if h.opts.AgentTokens != nil {
-		ident, err := h.opts.AgentTokens.Authenticate(r)
+	auth := h.opts.Authenticator
+	if auth == nil {
+		auth = h.opts.AgentTokens
+	}
+	if auth != nil {
+		ident, err := auth.Authenticate(r)
 		switch {
 		case err == nil:
 			// The store has already checked that the token's user still exists

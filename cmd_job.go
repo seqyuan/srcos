@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/activity"
+	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
@@ -430,15 +432,22 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 	if auditRec == nil {
 		auditRec = audit.New(config.DataDir(configDir))
 	}
+	// Instance credentials (A1) live in a runtime file: the gateway mints and
+	// revokes them as instances start and stop.
+	runtimeTokens := agenttoken.New(config.InstanceTokensPath(configDir))
+	if err := runtimeTokens.Reload(); err != nil {
+		log.Printf("[srcos] %v — rejecting instance credentials until it is fixed", err)
+	}
 	ports := portpool.New(0, 0)
 	routes := route.NewTable()
 	runner := runtime.NewRunner(runtime.Options{
-		ConfigDir: configDir,
-		ToolsDir:  toolsDir,
-		User:      user,
-		Storages:  storages,
-		Routes:    routes,
-		Audit:     auditRec,
+		ConfigDir:   configDir,
+		ToolsDir:    toolsDir,
+		User:        user,
+		Storages:    storages,
+		Routes:      routes,
+		Audit:       auditRec,
+		AgentTokens: runtimeTokens,
 		Backends: map[string]runtime.Backend{
 			"local": &runtime.Local{},
 		},

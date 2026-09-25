@@ -200,6 +200,24 @@ type Options struct {
 	// not acts a person performed, and they are what "why did my service
 	// disappear" is answered with.
 	Audit *audit.Recorder
+	// AgentTokens mints and revokes the credential a hosted agent uses (A1).
+	// Nil means this host cannot host agents: a tool that declares `agent` fails
+	// loudly rather than starting without a credential.
+	AgentTokens AgentTokenIssuer
+}
+
+// AgentTokenIssuer is the credential lifecycle a hosted agent needs (A1).
+//
+// It is an interface rather than an import so package runtime stays about
+// running units: the caller passes the store, and the scopes/allowlist come
+// from the tool manifest, so the minted credential is a subset of its owner's
+// permissions by construction.
+type AgentTokenIssuer interface {
+	// MintInstance mints a token bound to one service instance and returns the
+	// plaintext, which is shown nowhere else.
+	MintInstance(user, instanceID string, scopes, tools []string) (string, error)
+	// RevokeInstance removes whatever was minted for that instance.
+	RevokeInstance(instanceID string) (bool, error)
 }
 
 // Runner drives a unit through its lifecycle.

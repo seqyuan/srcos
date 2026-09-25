@@ -114,6 +114,14 @@ lifecycle:                          # kind=service 必需
   maxLifetime: "12h"
   idleTTL: "1h"                     # sge backend 下被忽略（改由 h_rt 决定）
 
+# ── 托管 agent 的凭据（仅 kind=service，可选）──────────────
+# 声明后，SRCOS 在实例启动时签发一枚 agent token（scope 与白名单来自这里，
+# 所以它是 owner 权限的子集），放到虚拟 home 的 $HOME/.srcos/agent-token
+# （0600），实例停止时撤销。agent 拿它调 /mcp。见 ADR-025。
+agent:
+  mcp: [read]                       # read | submit（至少一个）
+  tools: [scrna_qc]                 # 可选：收窄 submit 到这些工具（需含 submit）
+
 # ── 完成判定（仅 task，逃生口）─────────────────────────────
 completion:                         # 可选，见 §7.3
   doneWhen: { type: file_exists, path: "/workspace/out/S001/_SUCCESS" }
@@ -570,6 +578,8 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |
 | `sandbox: none` 不能有 `requires_storages` —— 声明的 storage 要 bind 进 mount namespace，而 `none` 不建 namespace | 拒绝注册 |
+| `agent` 只对 `kind: service` 合法（托管 agent 是长驻单元） | 拒绝注册 |
+| `agent.mcp` 必须含 `read`/`submit` 至少一个；`agent.tools` 需同时含 `submit` | 拒绝注册 |
 | `internal.executor: qsubsge` + `backend: sge` | 拒绝注册（§6） |
 | `type: path` 必须有 `from` | 拒绝注册 |
 | `from` 必须是 `requires_storages` 的子集 | 拒绝注册 |

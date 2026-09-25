@@ -84,7 +84,9 @@ type Server struct {
 	Reader *inspect.Reader
 	// Tokens authenticates the bearer credential. It is required: /mcp exists
 	// for programs, and a program's credential is an agent token (ADR-019).
-	Tokens *agenttoken.Store
+	// It is an Authenticator rather than a single store because instance
+	// credentials live in a different file from user-issued ones (A1).
+	Tokens agenttoken.Authenticator
 	// Exec is the write path the phase-2 tools call. Nil means this deployment
 	// cannot execute, and the write tools are then not offered at all.
 	Exec *execute.Controller
@@ -94,7 +96,7 @@ type Server struct {
 }
 
 // NewServer builds the server and its tool registry.
-func NewServer(version string, reader *inspect.Reader, tokens *agenttoken.Store, exec *execute.Controller) *Server {
+func NewServer(version string, reader *inspect.Reader, tokens agenttoken.Authenticator, exec *execute.Controller) *Server {
 	s := &Server{Version: version, Reader: reader, Tokens: tokens, Exec: exec}
 	s.tools = append(readTools(), writeTools()...)
 	s.byName = make(map[string]tool, len(s.tools))

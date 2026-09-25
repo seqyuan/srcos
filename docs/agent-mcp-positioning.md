@@ -58,7 +58,7 @@ SRCOS 负责「把方法资本化」（`work.sh` 固化 + 反复执行，边际 
 
 | # | 问题 | 说明 |
 |---|---|---|
-| A1 | **「托管 agent」只有设计** | ADR-019 说「托管 agent 调 MCP 时用实例身份，权限是所属用户的子集」，但**实例身份 token 不存在**；agent 实例只能拿用户级 token |
+| A1 | ~~**「托管 agent」只有设计**~~ ✅ **已解决（2026-09-26，ADR-025）** | 工具声明 `agent: {mcp, tools}` → 实例启动签发运行态实例令牌（`data/agent-tokens.yaml`，子集由构造保证）→ 投递到 `$HOME/.srcos/agent-token`（0600）→ 停止撤销 + 启动清扫；审计 actor 带 `instance` |
 | A2 | ~~**agent 侧没有幂等键**~~ ✅ **已解决（2026-09-26）** | `submit_job` / `POST /api/jobs` 可选 `idempotency_key`：同一个 key 钉在同一 job 目录（`user+tool+key` 派生），重试返回第一次的结果；重放在审计里标 `idempotent_replay` |
 | A3 | **MCP 无状态 ⇒ 只能轮询** | 无 progress notification；`srcos_task_status` 轮询是唯一手段 |
 | A4 | **审计曾是洞** | ✅ 已补（ADR-024 第一期+第二期） |
@@ -129,8 +129,7 @@ POST /mcp   (Streamable HTTP, 无状态, application/json)
 
 ## 5. 待决 / 建议
 
-1. **托管 agent 的实例身份**（A1）：要做就得给 service 实例发一枚「权限 ≤ 所属用户」的 token。
-   目前不做，但它是「SRCOS 里跑 agent」的前提。
+1. **托管 agent 的实例身份**（A1）：✅ 已做（ADR-025）。托管 agent 现在是可行的 —— 剩下的只是第一个真实用例。
 2. **MCP resources vs `srcos://`**（M1）：保持现状，除非出现明确要求。
 3. **dsh 路 A/B**：已移除。若将来出现真实的 dsh 互操作需求，以**锁定版本 + 真实验证**重建，
    不要让未验证的半成品挂在文档里冒充能力。

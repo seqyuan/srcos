@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/audit"
+	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
@@ -499,6 +500,12 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 
 	inst.State = StateRunning
 	inst.Healthcheck = "ok"
+	// The agent's credential, before the route is published: a hosted agent that
+	// cannot be given one must not be reported as a running service (A1).
+	if err := r.issueAgentToken(t, inst, prep); err != nil {
+		_ = h.Stop(context.Background())
+		return fail("agent credential: %v", err), nil
+	}
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		_ = h.Stop(context.Background())
 		return nil, err
@@ -522,6 +529,38 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 
 	keepPort = true
 	return inst, nil
+}
+
+// issueAgentToken mints the credential a hosted agent uses (A1) and hands it to
+// the sandbox as a file in the virtual home.
+//
+// Not an environment variable: every instance runs as the same OS user, so a
+// token in /proc/<pid>/environ is readable from anywhere in that uid's view,
+// while a 0600 file is exactly the instance's own. The agent reads
+// $HOME/.srcos/agent-token.
+func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance, prep *prepared) error {
+	if t.Agent == nil {
+		return nil
+	}
+	if r.opts.AgentTokens == nil {
+		return errors.New("this tool hosts an agent but no agent-token store is wired on this host")
+	}
+	plaintext, err := r.opts.AgentTokens.MintInstance(inst.User, inst.ID, t.Agent.MCP, t.Agent.Tools)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(prep.paths.Home, ".srcos")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent-token"), []byte(plaintext+"\n"), 0o600); err != nil {
+		return err
+	}
+	r.auditInstance(inst, "agenttoken.mint", map[string]any{
+		"scopes": strings.Join(t.Agent.MCP, ","),
+		"tools":  strings.Join(t.Agent.Tools, ","),
+	})
+	return nil
 }
 
 // healthcheck polls the instance's ingress until it answers, because a process
@@ -613,6 +652,17 @@ func (r *Runner) StopService(ctx context.Context, t *tool.Tool, inst *Instance) 
 	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
 	if err != nil {
 		inst.Error = "stop: " + err.Error()
+	}
+	// The credential's lifetime is the instance's: revoke it on the way out,
+	// whichever way the instance is leaving (explicit stop, the reaper, an admin
+	// stopping someone else's service).
+	if r.opts.AgentTokens != nil {
+		if _, rerr := r.opts.AgentTokens.RevokeInstance(inst.ID); rerr != nil {
+			log.Printf("[srcos] revoke instance credential %s: %v", inst.ID, rerr)
+		} else {
+			_ = os.Remove(filepath.Join(config.HomeDir(r.opts.ConfigDir, inst.User), ".srcos", "agent-token"))
+			r.auditInstance(inst, "agenttoken.revoke", nil)
+		}
 	}
 	return SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
 }

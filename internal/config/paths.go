@@ -67,6 +67,16 @@ func AgentTokensPath(configDir string) string {
 	return filepath.Join(configDir, "agent-tokens.yaml")
 }
 
+// InstanceTokensPath is where *instance* agent tokens live (A1).
+//
+// A separate file from config/agent-tokens.yaml on purpose: that one is
+// declaration state a human manages (CLI, /tokens), while instance credentials
+// are minted and revoked by the gateway as instances start and stop. Two
+// writers, two files — instead of two processes racing over one.
+func InstanceTokensPath(configDir string) string {
+	return filepath.Join(DataDir(configDir), "agent-tokens.yaml")
+}
+
 // ServiceActivityPath is the proxy-written record of when each service
 // instance was last used.
 //

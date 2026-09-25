@@ -159,6 +159,7 @@ var auditActions = []string{
 	"grant.set", "grant.remove", "grant.allow", "grant.deny", "group.set", "admins.set",
 	"token.create", "token.revoke",
 	"request.create", "request.approve", "request.deny",
+	"agenttoken.mint", "agenttoken.revoke",
 	"instance.done", "instance.settled", "instance.stopped",
 	"instance.started", "instance.reaped", "instance.adopted", "instance.orphaned",
 }

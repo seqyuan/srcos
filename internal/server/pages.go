@@ -284,7 +284,7 @@ func (s *Server) mcpHandler() http.Handler {
 	// The write path is the API handler's own controller, so an agent's
 	// submission and a browser's form submission are the same operation with the
 	// same checks (one implementation, two front-ends).
-	return mcp.NewServer(s.mcpVersion, s.reader(), s.agentTokens, s.apiHandler.Executor())
+	return mcp.NewServer(s.mcpVersion, s.reader(), s.authenticator, s.apiHandler.Executor())
 }
 
 // requireUserPage enforces a session for a page and redirects to login

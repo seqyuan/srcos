@@ -101,11 +101,13 @@
 - **工具访问申请/审批**（B3）：`grant.requestable` 显式开关 + `internal/accessrequest`
   （`data/requests/*.yaml`）+ `/api/requests`（用户）+ `/api/admin/requests`（approve/deny）
   + `/requests` 页 + `/admin` 待审区；批准 = `AddUserToGrant` + 落盘，审计 `request.*`
+- **托管 agent 凭据**（ADR-025）：工具 `agent: {mcp, tools}` 声明 → 实例启动签发 `data/agent-tokens.yaml`
+  → `$HOME/.srcos/agent-token`（0600）→ 停止撤销 + 启动清扫；认证走 `agenttoken.Chain`（REST 与 MCP 一致）
 
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
-- 建立 `AGENTS.md`（不变式与定位）+ **24 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
+- 建立 `AGENTS.md`（不变式与定位）+ **25 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
   `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
 - **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
@@ -121,6 +123,8 @@
 - ~~审计流（散落的日志行，没有结构化落盘与配置变更审计）~~ —— ✅ **第一期完成**（2026-09-26，ADR-024，scope A）
 - ~~审计流第二期~~ —— ✅ **完成**（2026-09-26）：管理端查询页（`/admin/audit` + `/api/admin/audit`）+ 生命周期跃迁审计 + 保留策略（`srcos audit prune`）+ hash chain（`srcos audit verify`）；仅真实签名未做
 - ~~工具访问申请/审批流~~ —— ✅ 完成（2026-09-26，B3；设计见 `docs/plans/2026-09-26-tool-access-request-design.md`）
+- ~~托管 agent 的实例身份（A1）~~ —— ✅ 完成（2026-09-26，ADR-025：工具声明 `agent:` → 启动签发运行态令牌 → home 0600 文件 → 随实例撤销）
+- ~~agent 提交幂等键（A2）~~ —— ✅ 完成（2026-09-26，ADR-019 第二期契约）
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE 只在 fake runner 上测过，**从未在真登录节点运行**
@@ -715,6 +719,35 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-025：托管 agent 用「实例身份」——工具声明、运行时令牌文件、随实例生死
+
+- **背景**：ADR-019 说「托管 agent 调 MCP 用实例身份，权限是所属用户的子集」，但一直没有这枚身份：
+  agent 只能拿一枚用户级 token（权限放大，且审计里分不清「实例做的」与「人做的」）。
+- **决策**：工具在 `tool.yaml` 里声明它托管的 agent 需要什么（只对 `kind: service` 合法）：
+
+  ```yaml
+  kind: service
+  agent: { mcp: [read, submit], tools: [a, b] }   # tools 只能收窄 submit
+  ```
+
+  实例**启动时**由 SRCOS 签发一枚 token：
+  - **scope 与白名单来自工具声明**（不是调用方），所以「是子集」由构造保证；owner 的 Grant 仍是外层
+    上界，提交时的工具 × 用户检查照旧。
+  - **存在运行态文件 `data/agent-tokens.yaml`**，与 `config/agent-tokens.yaml`（人签发的）分开 ——
+    两个写入者、两个文件，而不是两个进程抢一个文件。认证用 `agenttoken.Chain`（用户令牌 + 实例
+    令牌），REST 与 MCP 两面一致。
+  - **投递是虚拟 home 里 0600 的 `$HOME/.srcos/agent-token`**，不是环境变量：所有实例共用一个 OS
+    用户，`/proc/<pid>/environ` 在同 uid 的视野里可读；0600 文件正好只属于这个实例。
+  - **生命周期 = 实例**：启动签发；停止（显式 stop / 回收 / 管理端强制停）撤销；网关启动时清扫
+    「实例已不在」的令牌 —— 崩溃不会删任何东西，清扫是这条保证的兜底。
+  - **审计**：actor 带 `instance`（「实例做的」与「人做的」可区分），签发/撤销记
+    `agenttoken.mint` / `agenttoken.revoke`（kind=system）。
+- **失败语义**：声明了 `agent` 却签发不出来 → **服务启动失败**：一个「没有凭据的托管 agent」
+  不能被报成 running。
+- **不做**：让 agent 用用户级 token（现状，权限放大）；把实例令牌放环境变量；跨主机共享令牌文件。
+
+---
+
 ### ADR-024：审计流是结构化、只追加的 JSONL，读在 `srcos audit`
 
 - **背景**：「可审计」是三个支柱之一（ADR-017），但实现一直是散落的 `log.Printf` 行 ——
@@ -1026,6 +1059,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |
 | 2026-09-26 | **B3：工具访问申请/审批流**（设计已确认 → 已实现）—— `grant.requestable` 显式开关（只公开存在性，默认 false；`Policy.Requestable` 里具体 grant 优先于 `*`）+ `internal/accessrequest`（`data/requests/*.yaml`，幂等/状态机/原子写/0600）+ API（`GET/POST /api/requests` 只认 session；`GET /api/admin/requests`、`POST /api/admin/requests/<id>/approve|deny`；批准先写 grant 并落盘再标记 decided）+ UI（`/tools` 可申请区 + `/requests` 用户页 + `/admin` 待审区）+ 审计 `request.*`。**e2e 抓到一处遗漏**：`/api/requests` 未注册进 server mux 的 srcos API 路径表 → 请求掉进 `/api/` 代理回退 404；第 12 步现覆盖 申请→待审→批准→可见→审计 |
 | 2026-09-26 | **A2：提交幂等键** —— `job.IdempotentID(user,tool,key)` + `job.SubmitAs`（已有 job.json 则报 `ErrJobExists`，不覆盖）+ `execute.SubmitRequest.IdempotencyKey`（重放时直接返回首次的 job/instance + 终态）；API `POST /api/jobs` 的 `idempotencyKey`、MCP `srcos_submit_job` 的 `idempotency_key`；重放审计带 `idempotent_replay=true`。e2e 第 13 步：同 key 同 job、异 key 新 job |
+| 2026-09-26 | **A1：托管 agent 的实例身份**（ADR-025）—— `tool.AgentSpec`（`agent: {mcp, tools}`，只对 service 合法，注册期校验）+ `agenttoken.MintInstance/RevokeInstance/InstanceTokens` + `agenttoken.Chain`（用户令牌 + 实例令牌；新增 `ErrUnknownToken` 哨兵让 Chain 能区分「这个 store 没有」与「凭据无效」）+ `runtime.Options.AgentTokens`（StartService 签发到 `$HOME/.srcos/agent-token` 0600、StopService 撤销）+ 网关启动清扫死实例的令牌 + `data/agent-tokens.yaml`（`config.InstanceTokensPath`，与人的令牌分文件）+ `audit.Actor.Instance`。e2e 第 11 步：启动 e2e-web（带 `agent:`）→ 凭证落在 home 且可用 → 停止后 401 → 审计有 `agenttoken.revoke` |
 | 2026-09-26 | **审计外发（信任锚）** —— `audit.Sink`（`HTTPSink`：每事件 POST 一次）+ `audit.Forwarder`（本地 spool 一事件一文件 → 后台**按序**发送、成功才删 → 采集端故障保留重试 → 超 `forward_max` 丢最旧并计数）+ `Recorder.ForwardTo/ForwardStatus`；`state.yaml` 的 `audit.forward_url` / `forward_token` / `forward_max`；`/admin/audit` 显示待发送/已丢弃。**本地签名明确不做**（密钥在同一个写域，挡不住能重写全部文件的人，只是看起来像防篡改）。e2e 第 14 步：起 python 采集端 → 预写 state.yaml → 断言收到事件且带 `hash`（该步又抓到一个真 bug：端口变量带了尾空格 → URL 非法） |
 | 2026-09-26 | **专题指南 `docs/agent-mcp-positioning.md`**（D）—— 把 agent/dsh/MCP 的定位讨论落成文件：agent 的三层含义（外部/托管/dsh 内）、两条通道（MCP vs `srcos://`+REST）、三条不做（MCP Client / 直改 workspace / 推理循环）、优缺点表（A1 托管 agent 无实例身份、A2 agent 无幂等键、M1 `srcos://` 而非 MCP resources…）与建议；dsh 四个接触点与「为什么删路 B」。结论指向 ADR-011/016/017/019/024，不新增决策 |
 | 2026-09-26 | **B2（`storages.yaml` 管理端编辑）评估后不做** —— 网关在**构造时**把 storage provider 交给 api/execute/runtime，要即时生效需先把它做成可原地替换的（同 grants 的 `ReplaceWith`）；是可行的，但**价值偏低**（storages 很少变，重启一次可接受），而 UI 编辑会碰**安全边界**（`host_root` 的粒度就是数据可见范围，表单无法知道正确粒度）。结论：保留「手写文件 + 重启」；若将来真需要，做「编辑 + 明确提示需重启」而不做热加载 |

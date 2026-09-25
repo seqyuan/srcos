@@ -129,7 +129,11 @@ type Identity struct {
 	Agent   bool
 	TokenID string
 	Label   string
-	Scopes  ScopeSet
+	// Instance, for a token minted for a hosted agent (A1), names the service
+	// instance it belongs to. It is what makes "an instance did this" visible in
+	// the audit, distinct from "a person did this".
+	Instance string
+	Scopes   ScopeSet
 	// SubmitTools is the optional per-tool narrowing of ScopeSubmit. Empty means
 	// "any tool its user may use".
 	SubmitTools []string
@@ -176,6 +180,7 @@ func (i Identity) AuditActor() audit.Actor {
 		a.Kind = audit.KindAgentToken
 		a.TokenID = i.TokenID
 		a.Label = i.Label
+		a.Instance = i.Instance
 		for _, s := range i.Scopes {
 			a.Scopes = append(a.Scopes, string(s))
 		}
@@ -216,6 +221,42 @@ type Token struct {
 	ExpiresAt time.Time `yaml:"expires_at,omitempty"`
 	// SecretHash is SHA-256 (hex) of the *whole* plaintext token.
 	SecretHash string `yaml:"secret_hash"`
+	// Instance names the service instance this token was minted for, when it is
+	// a hosted agent's credential (A1). Empty for user-issued tokens.
+	Instance string `yaml:"instance,omitempty" json:"instance,omitempty"`
+}
+
+// Authenticator resolves a bearer credential to an identity. The REST API and
+// the MCP endpoint both take one, so a deployment can present a Chain (user
+// tokens + instance tokens, A1) without either front-end knowing the difference.
+type Authenticator interface {
+	Authenticate(r *http.Request) (Identity, error)
+}
+
+// Chain tries several stores in order, for the reason instance credentials live
+// in a different file from user-issued ones: the gateway mints and revokes
+// instance tokens (runtime state, lifetime = the instance), while a human
+// issues the others (declaration state, managed by the CLI and /tokens). Both
+// must authenticate, and neither should be able to write the other's file.
+type Chain []*Store
+
+// Authenticate asks each store until one recognises the credential.
+func (c Chain) Authenticate(r *http.Request) (Identity, error) {
+	for _, s := range c {
+		if s == nil {
+			continue
+		}
+		ident, err := s.Authenticate(r)
+		if err == nil {
+			return ident, nil
+		}
+		if !errors.Is(err, ErrNoCredential) && !errors.Is(err, ErrUnknownToken) {
+			// A presented-but-bad credential is a hard failure, not a cue to try
+			// the next store.
+			return Identity{}, err
+		}
+	}
+	return Identity{}, ErrNoCredential
 }
 
 // Expired reports whether the token is past its expiry at `now`.
@@ -240,6 +281,11 @@ type file struct {
 // distinguish it from a rejection so a session cookie can still be tried;
 // every other error means "a token was presented and refused".
 var ErrNoCredential = errors.New("no bearer credential")
+
+// ErrUnknownToken means "this store does not hold that credential". It is a
+// sentinel so a Chain can move on to the next store, while a genuinely invalid
+// credential (bad signature, expired, malformed) stays a hard failure.
+var ErrUnknownToken = errors.New("unknown agent token")
 
 var (
 	idPattern   = regexp.MustCompile(`^[a-z2-7]{8}$`)
@@ -393,7 +439,7 @@ func (s *Store) verifyAt(raw string, now time.Time) (Identity, error) {
 	rec, found := s.byID[id]
 	s.mu.RUnlock()
 	if !found {
-		return Identity{}, errors.New("unknown agent token")
+		return Identity{}, ErrUnknownToken
 	}
 
 	// Compare the hash before the expiry so a valid-but-expired token gets the
@@ -426,6 +472,7 @@ func (s *Store) verifyAt(raw string, now time.Time) (Identity, error) {
 		Agent:       true,
 		TokenID:     rec.ID,
 		Label:       rec.Label,
+		Instance:    rec.Instance,
 		Scopes:      ScopeSet(rec.Scopes),
 		SubmitTools: rec.SubmitTools,
 	}, nil
@@ -446,7 +493,11 @@ type CreateParams struct {
 	// SubmitTools narrows the submit scope to these tools (only meaningful with
 	// ScopeSubmit; the empty list means every tool the owner may use).
 	SubmitTools []string
-	Now         time.Time
+	// Instance, when set, marks the token as belonging to a hosted agent's
+	// service instance (A1): it is minted at start, revoked at stop, and lets the
+	// audit say which instance acted.
+	Instance string
+	Now      time.Time
 }
 
 // Create mints a token, records its hash and returns the plaintext token,
@@ -516,6 +567,7 @@ func (s *Store) Create(p CreateParams) (Token, string, error) {
 		CreatedAt:   now,
 		ExpiresAt:   expires,
 		SecretHash:  hex.EncodeToString(sum[:]),
+		Instance:    strings.TrimSpace(p.Instance),
 	}
 
 	if err := s.commitLocked(append(append([]Token{}, s.tokens...), rec)); err != nil {
@@ -1021,6 +1073,86 @@ func KnownScopesNames() []string {
 	out := make([]string, 0, len(KnownScopes))
 	for _, s := range KnownScopes {
 		out = append(out, string(s))
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// instance credentials (hosted agents, A1)
+// ─────────────────────────────────────────────────────────────────────────
+
+// MintInstance mints a credential for a hosted agent's service instance.
+//
+// It goes through the same Create path as any other token, so the credential is
+// narrowed exactly like a hand-issued one. What makes it a *subset* of its
+// owner's permissions is that the scopes and the submit allowlist come from the
+// tool manifest, not from the caller.
+func (s *Store) MintInstance(user, instanceID string, scopes, tools []string) (string, error) {
+	if strings.TrimSpace(instanceID) == "" {
+		return "", errors.New("an instance id is required for an instance credential")
+	}
+	parsed := make([]Scope, 0, len(scopes))
+	for _, sc := range scopes {
+		parsed = append(parsed, Scope(strings.TrimSpace(sc)))
+	}
+	_, plaintext, err := s.Create(CreateParams{
+		User:        user,
+		Label:       "instance " + instanceID,
+		Scopes:      parsed,
+		SubmitTools: tools,
+		Instance:    instanceID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return plaintext, nil
+}
+
+// RevokeInstance removes the credential minted for one instance, reporting
+// whether one was there. It is safe to call for an instance that never had one.
+func (s *Store) RevokeInstance(instanceID string) (bool, error) {
+	if strings.TrimSpace(instanceID) == "" {
+		return false, nil
+	}
+	if err := s.Reload(); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := make([]Token, 0, len(s.tokens))
+	found := false
+	for _, t := range s.tokens {
+		if t.Instance == instanceID {
+			found = true
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if !found {
+		return false, nil
+	}
+	if err := s.commitLocked(kept); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// InstanceTokens returns the instance-bound credentials, oldest first.
+//
+// It exists so a caller can find credentials whose instance is gone: a crash
+// deletes no tokens, so a sweep on startup is what keeps "the credential's
+// lifetime is the instance's" true.
+func (s *Store) InstanceTokens() []Token {
+	if err := s.Reload(); err != nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Token
+	for _, t := range s.tokens {
+		if t.Instance != "" {
+			out = append(out, t)
+		}
 	}
 	return out
 }

@@ -129,6 +129,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
 │ ✅ 管理与申请：/admin（含待审申请）· /requests · grant requestable     │
+│ ✅ 托管 agent 凭据：agent: 声明 → 启动签发 → home 0600 → 停止撤销      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -196,7 +197,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 |---|---|---|---|
 | **12** | **审计流第二期**：防篡改（hash chain / 签名）+ `/admin/audit` 查询页 + 生命周期审计 + 保留策略 | 第一期（scope A）已完成：结构化落盘 + 写入面/拒绝/配置变更埋点 + CLI 读取 | — |
 | **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
-| 14 | agent 端到端 runner 身份（A1）/ agent 提交幂等键（A2）—— 见 `docs/agent-mcp-positioning.md` | 让托管 agent 成为可能；让 agent 能安全重试 | — |
+| 14 | 托管 agent 的首个真实用例（A1 已就绪，见 ADR-025）；SGE（缺集群） | 把「agent 用实例身份调 MCP」跑一次真实场景 | — |
 
 ### 3.2 需要用户提供信息才能做的
 

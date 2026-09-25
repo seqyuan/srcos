@@ -47,6 +47,12 @@ type Server struct {
 	// agentTokens is the program-credential store: the API and the MCP
 	// endpoint both authenticate through it (ADR-019).
 	agentTokens *agenttoken.Store
+	// runtimeTokens holds instance credentials (A1), minted and revoked by the
+	// gateway as instances start and stop. It authenticates alongside
+	// agentTokens but is never managed from the UI.
+	runtimeTokens *agenttoken.Store
+	// authenticator resolves a bearer credential across both stores.
+	authenticator agenttoken.Authenticator
 	// mcpVersion is the build version reported in MCP's initialize.
 	mcpVersion string
 	// routes is the dynamic routing table: the only coupling point between the
@@ -247,6 +253,18 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// from the CLI-written registry.
 	agentTokens.AttachUsage(agenttoken.LoadUsage(config.AgentTokenUsagePath(configDir)))
 
+	// Instance credentials (A1): a hosted agent's token, minted at start and
+	// revoked when the instance ends. A separate file from the one above — the
+	// gateway writes this one, a human writes that one.
+	runtimeTokens := agenttoken.New(config.InstanceTokensPath(configDir))
+	if err := runtimeTokens.Reload(); err != nil {
+		log.Printf("[srcos] instance tokens: %v — rejecting every instance credential until it is fixed", err)
+	}
+	runtimeTokens.AttachUsage(agenttoken.LoadUsage(config.AgentTokenUsagePath(configDir)))
+	// Both credential files must authenticate, and both fail closed when their
+	// account is gone.
+	authenticator := agenttoken.Chain{agentTokens, runtimeTokens}
+
 	// Which service instances are actually being used. The reaper needs it:
 	// idleTTL must measure traffic, not time since start.
 	serviceActivity := activity.Load(config.ServiceActivityPath(configDir), serviceActivityHeader)
@@ -254,6 +272,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// whose user is gone, and every front-end that authenticates through it
 	// (the REST API, MCP) gets that for free.
 	agentTokens.AttachUserCheck(registry)
+	runtimeTokens.AttachUserCheck(registry)
 	if n := len(agentTokens.Tokens()); n > 0 {
 		log.Printf("[srcos] %d agent token(s) loaded (Authorization: Bearer)", n)
 	}
@@ -272,16 +291,17 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	}
 
 	apiOpts := api.Options{
-		ConfigDir:   configDir,
-		ToolsDir:    toolsDir,
-		Storages:    storages,
-		Grants:      grants,
-		AgentTokens: agentTokens,
-		Policy:      policy,
-		PolicyPath:  config.GrantsPath(configDir),
-		Runner:      opts.Supervisor,
-		FlowsDir:    flowsDir,
-		Audit:       auditRec,
+		ConfigDir:     configDir,
+		ToolsDir:      toolsDir,
+		Storages:      storages,
+		Grants:        grants,
+		AgentTokens:   agentTokens,
+		Authenticator: authenticator,
+		Policy:        policy,
+		PolicyPath:    config.GrantsPath(configDir),
+		Runner:        opts.Supervisor,
+		FlowsDir:      flowsDir,
+		Audit:         auditRec,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
 			return web.ToolFormPage(siteTitle, username, t, sts)
 		},
@@ -297,6 +317,8 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		storages:      storages,
 		grants:        grants,
 		agentTokens:   agentTokens,
+		runtimeTokens: runtimeTokens,
+		authenticator: authenticator,
 		mcpVersion:    mcpVersion,
 		loginLimiter:  rate.NewLimiter(10, 15*time.Minute),
 		totpLimiter:   rate.NewLimiter(10, 15*time.Minute),

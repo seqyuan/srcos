@@ -97,9 +97,28 @@ type Tool struct {
 	Workspace  *InitTemplate `yaml:"workspace,omitempty"`
 	Home       *InitTemplate `yaml:"home,omitempty"`
 
+	// Agent declares that this service hosts an agent that calls SRCOS's MCP
+	// endpoint (A1). When set, an agent token is minted at instance start and
+	// revoked when it ends.
+	Agent *AgentSpec `yaml:"agent,omitempty"`
+
 	// Dir is the tool package directory this manifest was loaded from. It is
 	// not part of tool.yaml.
 	Dir string `yaml:"-"`
+}
+
+// AgentSpec declares what an agent hosted by this service needs from SRCOS
+// (A1). It exists so a hosted agent does not have to be handed a user-level
+// credential: SRCOS mints one whose scopes and allowlist come from *here*, so it
+// is a subset of its owner's permissions by construction, hands it to the
+// sandbox as a file in the virtual home, and revokes it when the instance ends.
+type AgentSpec struct {
+	// MCP is the scope set the minted token carries: read and/or submit.
+	MCP []string `yaml:"mcp"`
+	// Tools narrows submit to these tool ids (empty = every tool the owner may
+	// use). It can only narrow — the owner's Grant is still the outer bound, and
+	// the usual tool × user checks run at submit time.
+	Tools []string `yaml:"tools,omitempty"`
 }
 
 // ROMount mounts a host path read-only into the sandbox. This is for
@@ -431,6 +450,31 @@ func (t *Tool) Validate() error {
 	}
 	if t.Sandbox != SandboxApptainer && t.Image != "" {
 		bad("image is only meaningful with sandbox: apptainer (got sandbox: %s)", t.Sandbox)
+	}
+
+	// ── agent (A1) ────────────────────────────────────────
+	// Only a service can host an agent: the credential's lifetime is the
+	// instance's, and only a long-running unit has one.
+	if t.Agent != nil {
+		if t.Kind != KindService {
+			bad("agent is only meaningful for kind: service (a hosted agent is a long-running unit)")
+		}
+		submit := false
+		for _, sc := range t.Agent.MCP {
+			switch strings.TrimSpace(sc) {
+			case "read":
+			case "submit":
+				submit = true
+			default:
+				bad("agent.mcp must be read|submit, got %q", sc)
+			}
+		}
+		if len(t.Agent.MCP) == 0 {
+			bad("agent.mcp must name at least one scope (read|submit)")
+		}
+		if len(t.Agent.Tools) > 0 && !submit {
+			bad("agent.tools narrows submit, so agent.mcp must include submit")
+		}
 	}
 
 	// ── executor × backend cross-check (ADR-007) ────────────────────────
