@@ -174,6 +174,22 @@ resources: {cpu: 1, memory: "1Gi", walltime: "0:01:00"}
 			wantSub: "not listed in requires_storages",
 		},
 		{
+			name: "storages without a mount namespace",
+			yaml: `
+schemaVersion: 1
+id: demo
+version: 0.1.0
+name: Demo
+kind: task
+backend: local
+sandbox: none
+entry: work.sh
+requires_storages: [data]
+resources: {cpu: 1, memory: "1Gi", walltime: "0:01:00"}
+`,
+			wantSub: "sandbox: none with requires_storages",
+		},
+		{
 			name: "enum without values",
 			yaml: `
 schemaVersion: 1

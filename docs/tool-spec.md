@@ -419,7 +419,6 @@ cellranger count --transcriptome="${REF}" ...
 SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知道宿主路径**。
 
 ### 5.4 storage 声明的硬要求（重要）
-
 1. **`host_root` 必须是 bind 的最小粒度的路径。**
    bwrap 的 userns 会把未映射的 gid 折叠成 `65534`，而沙箱进程本身就在 `65534` 组里，
    因此**宿主的 `group` 权限位在沙箱内等于公开可读**。
@@ -435,6 +434,9 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
    ```
    （已实测有效；比 `chmod o+rx` 安全，比改组简单。）
 3. `mode: ro` 的 storage 在沙箱内同时是 `ro` 挂载，工具无法写入。
+4. **声明了 storage 就必须用 `sandbox: bwrap`。** storage 是 bind mount，只存在于 mount
+   namespace 里；`sandbox: none` 下沙箱路径（如 `/data/ref`）在宿主上根本不存在，工具会以
+   `no such file` 失败 —— 指向错误的问题。注册期直接拒绝这个组合（§9）。
 
 ### 5.4.1 环境挂载（`ro_mounts`）与数据 storage 的区别
 
@@ -567,6 +569,7 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `kind: service` 必须有 `ingress` + `lifecycle` | 拒绝注册 |
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |
+| `sandbox: none` 不能有 `requires_storages` —— 声明的 storage 要 bind 进 mount namespace，而 `none` 不建 namespace | 拒绝注册 |
 | `internal.executor: qsubsge` + `backend: sge` | 拒绝注册（§6） |
 | `type: path` 必须有 `from` | 拒绝注册 |
 | `from` 必须是 `requires_storages` 的子集 | 拒绝注册 |

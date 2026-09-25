@@ -41,7 +41,7 @@ name: Demo
 description: "demo tool"
 kind: task
 backend: local
-sandbox: none
+sandbox: bwrap
 entry: work.sh
 interface:
   inputs:

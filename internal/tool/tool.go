@@ -465,6 +465,17 @@ func (t *Tool) Validate() error {
 		declared[s] = true
 	}
 
+	// A declared storage is materialized as a bind mount, so it only exists
+	// inside a mount namespace. With sandbox: none the sandbox path (e.g.
+	// /data/ref) is not on the host at all, so a tool that reads one fails with
+	// "no such file" — pointing the author at the wrong problem. Refuse the
+	// contradiction where it is written (tool-spec §9).
+	if t.Sandbox == SandboxNone && len(t.RequiresStorages) > 0 {
+		bad("sandbox: none with requires_storages is incompatible: declared storages are " +
+			"bind-mounted into a mount namespace, which sandbox: none does not create " +
+			"(use sandbox: bwrap)")
+	}
+
 	// ── interface ───────────────────────────────────────────────────────
 	names := map[string]bool{}
 	for i, in := range t.Interface.Inputs {

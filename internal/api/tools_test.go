@@ -32,6 +32,7 @@ version: 0.1.0
 name: Demo
 kind: task
 backend: local
+sandbox: bwrap
 entry: work.sh
 interface:
   inputs:

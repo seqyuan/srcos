@@ -291,7 +291,7 @@ func TestRunIsIdempotentPerTask(t *testing.T) {
 }
 
 func TestRunRejectsUnimplementedFeaturesClearly(t *testing.T) {
-	h := newHarness(t, "none", okScript, "requires_storages: [cluster-share]\n")
+	h := newHarness(t, "bwrap", okScript, "requires_storages: [cluster-share]\n")
 	loaded := h.submit(t, "j4", `{"schemaVersion":1,"name":"demo"}`)
 
 	_, err := h.runner.RunTask(context.Background(), h.tool(t), loaded)
