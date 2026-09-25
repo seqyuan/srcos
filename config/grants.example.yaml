@@ -1,0 +1,70 @@
+# SRCOS 授权策略（Grant）
+#
+# 复制为 config/grants.yaml 后生效（也可用 `srcos grant ...` 维护）。
+# 缺失时：**默认拒绝** —— 所有工具对非管理员不可见。
+# 这是刻意的：发布一个工具不应该等于把它发给所有人。
+#
+# ── 两条设计原则 ────────────────────────────────────────────────────────
+#
+# 1. 只有「允许」，没有 deny。访问权是所有 grant 的并集，
+#    所以「为什么 alice 能用这个工具」永远能指到某一行某人写下的记录，
+#    而不是「因为没有一条 deny」。这是可审计的前提。
+#
+# 2. 配额有两层，互相独立：
+#    - 工具自己的 resources 说「这个分析最多能用多少」（工具作者声明）；
+#    - grant 的 quota 说「你最多能占多少」（管理员授予）。
+#    两者都生效，且 grant 的配额是**聚合**的：同一个用户对同一个工具的
+#    所有存活实例加起来不能超过 max_cpu / max_memory / max_instances。
+#    没有这一层，一个用户可以开很多个小实例把机器占满。
+#
+# ── 管理员 ──────────────────────────────────────────────────────────────
+#
+# 管理员绕过所有 grant（他们本来就能改它，用 grant 管自己是循环论证），
+# 但**不能**绕过工具声明的资源上限 —— 那是工具的属性，不是人的身份。
+
+admins:
+  # 改成你自己的账号（必须与 config/users/<name>.yaml 中的一个一致，
+  # 否则没有任何人能管理这个网关）。
+  - admin
+
+# 单用户 / 内网全公开部署的逃生口。默认 false。
+# default_allow: true
+
+groups:
+  bio-team:
+    - alice
+    - bob
+  infra:
+    - carol
+
+grants:
+  # 单人授权 + 聚合配额
+  - tool: hello-fanout
+    users: [alice]
+    quota:
+      max_cpu: 16
+      max_memory: 64Gi
+      max_instances: 3
+
+  # 按组授权
+  - tool: pickdemo
+    groups: [bio-team]
+
+  # 全站公开（任何已登录账号）
+  - tool: hello-public
+    public: true
+
+  # 可申请：把工具的**存在性**公开给未授权用户，让他们在 /tools 页提交一个
+  # 申请（B3）。它不是权限 —— 批准仍会写成上面那种普通 grant（等价于
+  # srcos grant allow），所以「为什么 alice 能用」依旧指向 grants.yaml 的一行。
+  # 默认 false：发布一个工具不等于告诉所有人它存在。
+  - tool: scrna_qc
+    users: [alice]        # 已经有权限的人不受影响
+    requestable: true
+
+  # 兜底：未被上面提到的工具都按这一条
+  - tool: "*"
+    groups: [infra]
+    quota:
+      max_cpu: 8
+      max_instances: 2

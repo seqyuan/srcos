@@ -1,0 +1,67 @@
+# SRCOS 共享数据声明（StorageProvider）
+#
+# 复制为 config/storages.yaml 后生效。缺失时视为"没有共享数据"，这是合法的：
+# 声明了 requires_storages 的工具会在注册/运行时明确报错，而不是静默失败。
+#
+# ── 三条硬要求（违反了就是数据暴露，不是配置不便）────────────────────────
+#
+# 1. host_root 的粒度就是数据可见范围。
+#    bubblewrap 的 user namespace 把所有未映射的 gid 折叠成 65534，而沙箱进程
+#    本身就在 65534 组里 —— 因此宿主的 group 权限位在沙箱内等于公开可读。
+#    所以 host_root 写成 /share 就等于把 /share 下所有 group-readable 的内容
+#    （含其他项目组的 drwxrwx--- 目录）一并交给沙箱。
+#    → 需要更窄的范围就声明更窄的 storage，不要指望 sub-path 过滤。
+#
+# 2. host_root 必须对启动 srcos 的 OS 用户可读。
+#    bind 挂载不改变权限，只让路径可见：宿主读不到，沙箱里也读不到，
+#    SRCOS 的预览同样读不到。组独占目录用 ACL 授权，比改组简单也更安全：
+#        sudo setfacl -R -m u:<srcos 的 OS 用户>:r-x /Volumes/data/some-project
+#
+# 3. 只读参考数据一律 mode: ro。需要写入的用单独的项目目录，
+#    不要让工具往参考数据集里写。
+#
+# ── 环境 vs 数据，不要混用 ──────────────────────────────────────────────
+#
+#   这里的 storages 是【数据】—— 用户通过工具的 type: path 参数从中选择。
+#   【环境】（conda 环境、module 树、.sif 镜像、工具自带二进制）属于
+#   tool.yaml 的 ro_mounts，由工具作者声明，允许较粗，因为不含用户数据。
+#
+# ── tool 侧如何引用 ────────────────────────────────────────────────────
+#
+#   # tool.yaml
+#   requires_storages: [data]
+#   interface:
+#     inputs:
+#       - {name: ref, type: path, from: data, select: directory}
+#
+#   闭环：path 参数的可选范围 == 已挂载的 storage == requires_storages。
+#   三者由构造保证一致，所以不会出现「UI 里选了、但沙箱里看不到」。
+
+storages:
+  # ── 共享数据盘（node01 上 15.5T ext4）────────────────────────────────
+  - id: data
+    name: "共享数据盘"
+    type: posix
+    host_root: /Volumes/data
+    sandbox_path: /data
+    mode: ro
+    description: "只读参考数据与项目交付物；工具通过 type: path 参数从中选择"
+
+  # ── 需要写入时，声明单独的项目目录，而不是把上面的改成 rw ──────────
+  #
+  # - id: data-rw
+  #   name: "共享数据盘（可写区）"
+  #   type: posix
+  #   host_root: /Volumes/data/srcos-workspace
+  #   sandbox_path: /data-out
+  #   mode: rw
+  #   description: "工具写入区；必须有配额，否则一个工具能写爆整块盘"
+
+  # ── 大容量工作盘（node01 上 7.2T ext4）作为可写区候选 ───────────────
+  #
+  # - id: work
+  #   name: "工作盘"
+  #   type: posix
+  #   host_root: /work
+  #   sandbox_path: /work
+  #   mode: rw

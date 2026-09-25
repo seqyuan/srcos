@@ -25,7 +25,12 @@ Thumbs.db
 # internal/config/ (source code) is not accidentally ignored.
 /state.yaml
 /config.yaml
-/config/
+# Everything under config/ is runtime state (session_secret, password_hash,
+# agent tokens) and must not be committed — except the examples the docs tell
+# you to copy. Without these negations the examples do not exist in a fresh
+# clone, while README/AGENTS reference them.
+/config/*
+!/config/*.example.yaml
 /data/
 
 # The frontend bundle is a build product: only the .gitkeep that keeps the
