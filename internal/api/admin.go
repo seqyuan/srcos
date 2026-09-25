@@ -95,6 +95,15 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 	case path == "/audit" && r.Method == http.MethodGet:
 		h.adminAudit(w, r)
 
+	case path == "/requests" && r.Method == http.MethodGet:
+		h.adminListRequests(w, r)
+
+	case strings.HasPrefix(path, "/requests/") && strings.HasSuffix(path, "/approve") && r.Method == http.MethodPost:
+		h.adminApproveRequest(w, r, username, strings.TrimSuffix(strings.TrimPrefix(path, "/requests/"), "/approve"))
+
+	case strings.HasPrefix(path, "/requests/") && strings.HasSuffix(path, "/deny") && r.Method == http.MethodPost:
+		h.adminDenyRequest(w, r, username, strings.TrimSuffix(strings.TrimPrefix(path, "/requests/"), "/deny"))
+
 	case strings.HasPrefix(path, "/grants/") && r.Method == http.MethodPut:
 		h.adminSetGrant(w, r, username, strings.TrimPrefix(path, "/grants/"))
 

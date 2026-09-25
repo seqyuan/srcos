@@ -146,6 +146,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		path == "/api/paths" ||
 		path == "/api/jobs" ||
 		strings.HasPrefix(path, "/api/jobs/") ||
+		path == "/api/requests" ||
+		strings.HasPrefix(path, "/api/requests/") ||
 		strings.HasPrefix(path, "/api/flows/") ||
 		path == "/api/tokens" ||
 		strings.HasPrefix(path, "/api/tokens/") ||
@@ -212,6 +214,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		h.handleDescribeTool(w, username, strings.TrimPrefix(path, "/api/tools/"))
 	case path == "/api/paths" && r.Method == "GET":
 		h.handlePaths(w, r, username)
+
+	// Tool-access requests (B3): a user asking for a tool they cannot use.
+	case path == "/api/requests" && r.Method == "GET":
+		h.handleListRequests(w, ident)
+	case path == "/api/requests" && r.Method == "POST":
+		h.handleCreateRequest(w, r, ident)
 
 	// Submissions: the generated form, a tool's own UI, and the MCP submit tool
 	// all funnel through the same validation and the same drop-box.

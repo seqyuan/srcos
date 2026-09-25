@@ -144,6 +144,7 @@ var auditActions = []string{
 	"csrf", "auth", "scope",
 	"grant.set", "grant.remove", "grant.allow", "grant.deny", "group.set", "admins.set",
 	"token.create", "token.revoke",
+	"request.create", "request.approve", "request.deny",
 	"instance.done", "instance.settled", "instance.stopped",
 	"instance.started", "instance.reaped", "instance.adopted", "instance.orphaned",
 }

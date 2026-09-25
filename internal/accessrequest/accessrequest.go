@@ -43,17 +43,17 @@ var ErrNotPending = errors.New("request is already decided")
 
 // Request is one user's ask for one tool.
 type Request struct {
-	ID     string `yaml:"id"`
-	User   string `yaml:"user"`
-	Tool   string `yaml:"tool"`
-	Reason string `yaml:"reason,omitempty"`
-	State  State  `yaml:"state"`
+	ID     string `yaml:"id" json:"id"`
+	User   string `yaml:"user" json:"user"`
+	Tool   string `yaml:"tool" json:"tool"`
+	Reason string `yaml:"reason,omitempty" json:"reason,omitempty"`
+	State  State  `yaml:"state" json:"state"`
 
-	CreatedAt time.Time `yaml:"created_at"`
+	CreatedAt time.Time `yaml:"created_at" json:"createdAt"`
 	// DecidedAt / DecidedBy / Note are set when the request leaves pending.
-	DecidedAt time.Time `yaml:"decided_at,omitempty"`
-	DecidedBy string    `yaml:"decided_by,omitempty"`
-	Note      string    `yaml:"note,omitempty"`
+	DecidedAt time.Time `yaml:"decided_at,omitempty" json:"decidedAt,omitempty"`
+	DecidedBy string    `yaml:"decided_by,omitempty" json:"decidedBy,omitempty"`
+	Note      string    `yaml:"note,omitempty" json:"note,omitempty"`
 }
 
 // Terminal reports whether a decision has been made.
