@@ -98,6 +98,9 @@
 - **审计流**（ADR-024）：`internal/audit`（结构化 JSONL、只追加、按天轮转、参数脱敏）+
   `srcos audit tail|list` + 管理端 `/admin/audit`（+ `/api/admin/audit`）；埋点覆盖写入面
   （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）+ **外发**（`state.yaml` 的 `audit.forward_url`，信任锚）
+- **统一的服务实例化**（ADR-026/027/028）：`environment:` 具名环境（管理端声明 root/env/provides，工具只引用 id）
+  + `command:` 声明式启动（与 `entry` 二选一，`${SRCOS_*}` 从环境展开）+ `ingress` 补齐（websocket/bwlimit/port 可选）
+  + `backend: external`（转发既存后端：不启动/不停止/不回收）+ content digest（版本 = 可验证内容）
 - **工具访问申请/审批**（B3）：`grant.requestable` 显式开关 + `internal/accessrequest`
   （`data/requests/*.yaml`）+ `/api/requests`（用户）+ `/api/admin/requests`（approve/deny）
   + `/requests` 页 + `/admin` 待审区；批准 = `AddUserToGrant` + 落盘，审计 `request.*`
@@ -107,7 +110,7 @@
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
-- 建立 `AGENTS.md`（不变式与定位）+ **25 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
+- 建立 `AGENTS.md`（不变式与定位）+ **28 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
   `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
 - **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
@@ -796,6 +799,66 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-026：服务只有一条实例化路径 —— 具名环境 + 声明式命令
+
+- **背景**：服务类工具的「怎么起」此前只能在 `work.sh` 里手拼：找解释器、设 `PATH`/locale、读端口、exec。
+  每个服务类工具重复一遍，而且**宿主路径写进了工具包**（`ro_mounts: /Volumes/data/pmo/miniforge3`）——
+  换一台机器就得改工具包，包变成这台机器的副本。
+- **决策**：
+  1. **`environment: <id>`** —— 解释器/依赖从哪来，由**管理端**在 `config/environments.yaml` 声明
+     （`root` / `env` / `provides`），工具只引用 id。与 `storages.yaml` **同构**：声明处、工具引用、
+     挂载、注册期断言、宿主不可达处理，五个面一一对应。
+     - `root` **按宿主路径本身**只读挂载：解释器内部硬编码绝对路径（实测：挂 `/pmo` 会让 R 报 `bin/sed: not found`）。
+     - 环境的 `env` 插在**平台默认与工具 `env:` 之间**：工具可覆盖环境，环境可覆盖平台。
+     - `provides` 把「装了但没那个包」提前到注册期（实测：`PATH` 上先找到的 `/usr/bin/R` 没有 shiny）。
+  2. **`command: [argv…]`** —— 声明式启动命令，与 `entry:` **恰好二选一**；argv **直接 exec、不经 shell**；
+     `${NAME}` 从**本单元自己的环境**展开（与环境同源，所以两者不可能对不上），且只允许该 `kind`
+     实际拥有的变量，错名/未闭合括号在**注册期**就报。
+  3. **`ingress` 补齐**：`websocket`（默认开）、`bwlimit`；`port` 变可选并澄清语义（只对 sge 有意义）。
+- **两级校验**（对齐 storage 的 `CheckReachable`）：未声明的 id → 注册期**硬失败**（机器无关，CI 能拦）；
+  宿主不可达 → **警告** + 启动硬失败。
+- **不做**：让工具包写宿主路径；把 `environment` 做成任意挂载（它是**环境**，数据走 storages）；
+  `command` 里跑 shell（无 shell 才没有注入面）。
+
+---
+
+### ADR-027：转发既存后端是一种 backend（`external`），不是第二个子系统
+
+- **背景**：「有些服务已经在跑，我只要一条受管、可授权的路径」——这曾由**静态服务卡片**承担。
+  但卡片不受 `Grant` 管辖（靠「在你自己的 `user.yaml` 里」），于是平台有两个授权真相，
+  而定位是「用户权限控制平台」。
+- **决策**：`backend: external` + `external: {host, port}`。`backend` 是「单元在哪跑」的轴（ADR-002），
+  external 是它的一个取值：**转发**而**不实例化**。
+  - `Start` 不启动任何进程，只把声明的端点发布到路由表；`WantEndpoint() == true`
+    （先例：SGE 用同一机制发布 rendezvous 端点）。
+  - **不停止、不回收**：`svc stop` 只撤路由 + 记录 `stopped`；`isReapable` 跳过 —— 不杀不是它起的进程。
+  - `lifecycle` / `resources` / `command` / `entry` / `environment` / `requires_storages` / `agent`
+    在这里是**死配置**，注册期直接拒绝（各自带理由，而不是静默忽略）。
+  - 健康检查照做；审计记 `instance.forwarded`（带 endpoint）。
+  - **host 必须是回环**：路由表只收回环端点，而记录是本地进程可改的文件，这条限制是一道兵防线。
+    要转发**另一主机**上的后端，今天用静态卡片（或在前面放 `ssh -L`）—— 写清楚，而不是悄悄放宽。
+- **收益**：一条转发管线、一个授权模型（Grant）、一个审计流、一个目录；卡片继续可用，新东西走工具。
+- **顺带修的真 bug**：`inst.Endpoint` 从不取自 `h.Endpoint()`，而会自己发布端点的后端（SGE 的 `ssh -L`）
+  本该用它 —— 于是 SGE 实例的记录与路由都指向端口池的端口。只有真集群能撞上。
+
+---
+
+### ADR-028：工具的内容摘要（`digest`）—— 不是签名
+
+- **背景**：`version` 是工具作者写的字符串，**它变了才说明问题**；而包里的文件可以改了而不改版本号。
+  「可复现 / 可审计」要求「到底跑的哪份代码」可答。
+- **决策**：`tool.Digest(dir)` = 包内容的 sha256（相对路径 + 权限 + 内容，稳定排序），加载时算一次；
+  排除构建缓存与版本控制元数据（`__pycache__` / `node_modules` / `.git` / `.DS_Store` / `*.pyc`）。
+  记录在三处：**实例记录**（`tool_digest`，每个实例都留）、**审计**（`Target.Digest`，
+  显示成 `demo@0.1.0#a58e88795f2a`）、**`tool list` / `/api/tools`**。
+- **明确不是签名**：它证明「内容与记录一致」，不证明「内容可信」——后者是审计的外部锚（ADR-024）。
+  两件事混在一起会把这个能力说大。
+- **不做（暂）**：git 的 `HEAD` + dirty 记录。它要为**每次加载**起一个子进程，收益不足以现在付；
+  digest 已经把「变了看得出来」做到了。
+- **推论**：工具包不要放镜像/环境大文件（走 `ro_mounts` / `environment`），否则每次加载都要重算摘要。
+
+---
+
 ## 6. 路线图
 
 ### Phase 0：基线 ✅
@@ -1071,3 +1134,4 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **统一服务实例化 · 步骤 4：`ingress` 补齐与语义澄清** —— `ingress.websocket`（`*bool`，**默认开**：app server 通常需要，没人升级时也无害）与 `ingress.bwlimit`（字节/秒，0=不限）接进 `route.Entry`——代理侧与 `serviceForEntry` 早就支持，缺的只是实例这条线；`ingress.port` 变**可选**并写清语义（**只对 sge 有意义**：作业在计算节点上偏好的端口，实际端口由 rendezvous 公布；local 一律用 `$SRCOS_PORT`）。样例与 e2e 的服务工具去掉无意义的 `port: 8080`；shiny-demo 显式写 `websocket: true` 当文档。单测：未写 port 合法、负值被拒、websocket 默认开、两者确实到达 route.Entry |
 | 2026-09-26 | **统一服务实例化 · 步骤 5：`backend: external`（转发既存后端成为工具的一种后端）** —— `external: {host, port}`；SRCOS **只发布路由**：不启动、不停止（`svc stop` 只撤路由）、不回收（`isReapable` 跳过）、不接资源限；`command`/`entry`/`environment`/`requires_storages`/`agent`/`resources` 在这里是死配置，注册期直接拒绝；`lifecycle` 也不需要。端点为回环（路由表只收回环，是一道兵防线），另一主机上的后端仍走静态卡片或 `ssh -L`。健康检查照做；审计记 `instance.forwarded`。**顺手修了一个真 bug**：`inst.Endpoint` 从不取自 `h.Endpoint()`，而会自己发布端点的后端（SGE 的 ssh -L 隧道）本该用它 —— 于是它的记录与路由都指向端口池的端口（只有真集群能撞上）。验收：机器上真实在跑的 `shiny-server:3838` 作为 external 工具 → 经网关 200 + `Welcome to Shiny Server!` → 停止后路由撤、上游仍 200。e2e 第 15 步覆盖 |
 | 2026-09-26 | **统一服务实例化 · 步骤 6：content digest（工具源码管理）** —— `tool.Digest(dir)`：包内容的 sha256（相对路径 + 权限 + 内容，稳定排序），加载时算一次；排除 `__pycache__`/`node_modules`/`.git`/`.DS_Store`/`*.pyc`（否则代码没动摘要也会变）。记进 **实例记录**（`tool_digest`）、**审计**（`Target.Digest`，CLI 与管理页显示 `demo@0.1.0#a58e88795f2a`）与 **`tool list` / `/api/tools`**。意义：`version` 是人写的声明，digest 是实际字节 —— “到底跑的哪份代码”变得可答。**明确不是签名**（那是审计外发那一层，ADR-024）。git 记录（HEAD + dirty）**暂不做**：它要为每次加载起一个子进程，收益不足以现在付；需要时再加。单测：内容变→摘要变、加载稳定、垃圾目录不参与 |
+| 2026-09-26 | **统一服务实例化 · 步骤 7：ADR-026/027/028 + 文档收尾** —— 三条决策落到 roadmap §5：**026 服务只有一条实例化路径**（具名环境 + 声明式命令 + ingress 补齐；两级校验；不做宿主路径入包/环境当数据/shell）· **027 转发既存后端是一种 backend**（`external`：不启动/不停止/不回收；死配置拒绝；回环限制写明；顺手修 SGE 端点记录 bug）· **028 工具内容摘要**（digest 记入实例/审计/目录；明确不是签名；git 记录暂不做）。合同文档（tool-spec §2.1–2.4 / §5.4.1 / §6.1 / §9）、README、AGENTS「明确不做」已同步。计划文档标记为已实现 |

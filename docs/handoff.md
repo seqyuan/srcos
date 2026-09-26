@@ -130,6 +130,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
 │ ✅ 管理与申请：/admin（含待审申请）· /requests · grant requestable     │
 │ ✅ 托管 agent 凭据：agent: 声明 → 启动签发 → home 0600 → 停止撤销      │
+│ ✅ 服务实例化：environment 具名环境 · command 声明式 · external 转发  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -178,6 +179,9 @@ orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `
 
 **在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
 `qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
+
+**统一服务实例化留下的**（ADR-026/027/028）：`external` 只支持**回环**后端（另一主机仍走卡片或 `ssh -L`）；
+digest 的 git 记录（HEAD + dirty）暂不做；`storages.yaml` 的管理端编辑**评估后不做**（以下同）。
 
 **其它**：`storages.yaml` 的管理端编辑**评估后不做**（价值低 + 遇安全边界，见 roadmap 变更记录）；
 `apptainer` sandbox（Phase 6，
