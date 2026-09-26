@@ -202,7 +202,12 @@ type Internal struct {
 }
 
 type Ingress struct {
-	Port        int          `yaml:"port"`
+	// Port is the port the app would like to bind *inside its unit*. It is
+	// optional, and only a preference: on `local` the platform assigns
+	// SRCOS_PORT and the app must listen on that; on `sge` two service jobs can
+	// land on one node, so the job prefers this port and falls back to a free
+	// one, publishing whichever it got. Local-only tools should simply omit it.
+	Port        int          `yaml:"port,omitempty"`
 	Healthcheck *Healthcheck `yaml:"healthcheck,omitempty"`
 	// BackendPath is the prefix the backend itself expects (the same meaning as
 	// the static service card option). Empty means "the app is served at its
@@ -212,6 +217,22 @@ type Ingress struct {
 	// It is deliberately *not* the healthcheck path: the probe path says where to
 	// knock, not where the app lives.
 	BackendPath string `yaml:"backend_path,omitempty"`
+	// WebSocket allows protocol upgrades through the proxy. Nil means enabled:
+	// an app server usually needs it and the upgrade path is harmless when
+	// nothing asks for one.
+	WebSocket *bool `yaml:"websocket,omitempty"`
+	// BWLimit caps this instance's bandwidth in bytes/sec (0 = unlimited). It
+	// is enforced by the shared proxy path, so an instance and a static card
+	// behave the same.
+	BWLimit int64 `yaml:"bwlimit,omitempty"`
+}
+
+// WebSocketEnabled reports whether the proxy should allow protocol upgrades.
+func (i *Ingress) WebSocketEnabled() bool {
+	if i == nil || i.WebSocket == nil {
+		return true
+	}
+	return *i.WebSocket
 }
 
 // HealthcheckPath is the probe path, defaulting to the root.
@@ -473,6 +494,12 @@ func (t *Tool) Validate() error {
 	}
 	if t.Ingress != nil && t.Ingress.BackendPath != "" && !pathIsAbs(t.Ingress.BackendPath) {
 		bad("ingress.backend_path must be absolute, got %q", t.Ingress.BackendPath)
+	}
+	if t.Ingress != nil && t.Ingress.Port < 0 {
+		bad("ingress.port must be >= 0 (it is a preference for sge; local assigns SRCOS_PORT), got %d", t.Ingress.Port)
+	}
+	if t.Ingress != nil && t.Ingress.BWLimit < 0 {
+		bad("ingress.bwlimit must be >= 0 bytes/sec (0 = unlimited), got %d", t.Ingress.BWLimit)
 	}
 	if t.Sandbox != SandboxApptainer && t.Image != "" {
 		bad("image is only meaningful with sandbox: apptainer (got sandbox: %s)", t.Sandbox)

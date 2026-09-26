@@ -193,7 +193,7 @@ entry: work.sh
 resources:
   cpu: 1
   memory: "256Mi"
-ingress: {port: 8080}
+ingress: {healthcheck: {path: "/"}}   # no port: local assigns SRCOS_PORT
 lifecycle: {max_lifetime: "5m", idle_ttl: "2m"}
 # A hosted agent (A1): SRCOS mints an instance credential at start and revokes
 # it at stop, so the agent never needs a user-level token.

@@ -127,11 +127,17 @@ internal:                           # 可选，仅供校验，SRCOS 不执行
 
 # ── kind=service 专属 ─────────────────────────────────────
 ingress:                            # kind=service 必需
-  port: 3838                        # 容器/沙箱内监听的端口
+  # port 可选：它只对 sge 有意义（作业在计算节点上**偏好**的端口；两个服务作业
+  # 可能落在同一节点，所以脚本会退回一个空闲端口，并把实际端口公布出去）。
+  # local 下一律用端口池分配的 $SRCOS_PORT —— 工具必须监听它，省略即可。
+  # port: 3838
   healthcheck:
-    path: "/"                       # 探活路径
+    path: "/"                       # 探活路径（不要与 backend_path 搞混）
     timeout: "120s"                 # 单次探活超时
     startupGrace: "180s"            # 冷启动宽限期
+  backend_path: "/app"               # 可选：后端自己期望的前缀（默认在它自己的根）
+  websocket: true                   # 可选，默认 true：是否允许协议升级穿过代理
+  bwlimit: 10485760                 # 可选，字节/秒，0 = 不限（与静态卡片共用同一套限速）
 lifecycle:                          # kind=service 必需
   restart: always                   # always | on-failure | never
   maxLifetime: "12h"
@@ -649,8 +655,9 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `command[0]` 非空；`${...}` 只能引用 SRCOS 给这个 `kind` 注入的变量，括号必须闭合 | 拒绝注册（错在注册时，不是运行时） |
 | `environment` 必须是 `config/environments.yaml` 里已声明的 id | 拒绝注册（机器无关，所以 CI 能拦） |
 | `environment` 的 `root` 在本机不可读 / `provides` 缺失 | **警告**（不阻断）；启动实例时硬失败 |
-| `kind: service` 必须有 `ingress` + `lifecycle` | 拒绝注册 |
+| `kind: service` 必须有 `ingress` + `lifecycle`（`port` 可选） | 拒绝注册 |
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
+| `ingress.backend_path` 必须绝对；`ingress.port` ≥ 0；`ingress.bwlimit` ≥ 0 | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |
 | `sandbox: none` 不能有 `requires_storages` —— 声明的 storage 要 bind 进 mount namespace，而 `none` 不建 namespace | 拒绝注册 |
 | `agent` 只对 `kind: service` 合法（托管 agent 是长驻单元） | 拒绝注册 |

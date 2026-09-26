@@ -582,7 +582,8 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 			InstanceID:  inst.ID,
 			Path:        inst.RoutePath,
 			Target:      route.Target{Host: "127.0.0.1", Port: port},
-			WebSocket:   true,
+			WebSocket:   t.Ingress.WebSocketEnabled(),
+			BWLimit:     t.Ingress.BWLimit,
 			BackendPath: t.Ingress.BackendPath,
 			State:       string(inst.State),
 		}); err != nil {

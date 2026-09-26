@@ -526,3 +526,44 @@ func TestDeclarativeCommandRunsForAService(t *testing.T) {
 		t.Fatalf("no route published: %+v", e)
 	}
 }
+
+// A service's websocket / bandwidth declaration must reach the route the proxy
+// reads — they are the same two fields a static card carries, so an instance and
+// a card behave identically through the shared forwarding path.
+func TestRouteCarriesWebSocketAndBandwidth(t *testing.T) {
+	// Default: upgrades allowed, no throttle.
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	if e, ok := h.routes.Get("alice", "web"); !ok {
+		t.Fatal("no route was published")
+	} else if !e.WebSocket {
+		t.Fatal("websocket must default to enabled on the route")
+	}
+
+	// Explicit: upgrades refused, 2 MiB/s.
+	h2 := newServiceHarness(t)
+	tl2 := h.tool(t)
+	no := false
+	tl2.Ingress.WebSocket = &no
+	tl2.Ingress.BWLimit = 2 << 20
+	inst2, err := h2.runner.StartService(context.Background(), tl2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h2.runner.StopService(context.Background(), tl2, inst2) }()
+	e, ok := h2.routes.Get("alice", "web")
+	if !ok {
+		t.Fatal("no route was published")
+	}
+	if e.WebSocket {
+		t.Fatal("websocket: false must reach the route")
+	}
+	if e.BWLimit != 2<<20 {
+		t.Fatalf("route bwlimit = %d, want %d", e.BWLimit, 2<<20)
+	}
+}

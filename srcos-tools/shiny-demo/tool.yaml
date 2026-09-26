@@ -35,11 +35,13 @@ resources:
   memory: "2Gi"
 
 ingress:
-  port: 8080
+  # port 省略：local 下由端口池分配，工具必须监听 $SRCOS_PORT（见命令里的 ${SRCOS_PORT}）。
+  # 它只对 sge 有意义（作业在计算节点上偏好的端口，实际端口由 rendezvous 公布）。
   healthcheck:
     path: "/"                 # Shiny 的首页
     timeout: "60s"
     startup_grace: "180s"     # 首次启动 R 要加载一堆包
+  websocket: true            # 默认就是 true；Shiny 的客户端协议走它，显式写出来当文档
 
 lifecycle:
   restart: on-failure

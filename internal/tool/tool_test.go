@@ -596,3 +596,47 @@ func TestExpandCommand(t *testing.T) {
 		t.Fatal("a missing variable must be an error")
 	}
 }
+
+// ingress 的可选项：port 只是偏好（local 用 $SRCOS_PORT），websocket 默认开，
+// bwlimit 不得为负。
+func TestIngressOptionalFields(t *testing.T) {
+	base := func(ingress string) string {
+		return `
+schemaVersion: 1
+id: web
+version: 0.1.0
+name: Web
+kind: service
+backend: local
+entry: work.sh
+resources: {cpu: 1, memory: "1Gi"}
+` + ingress + `
+lifecycle: {restart: never, max_lifetime: "1h"}
+`
+	}
+	load := func(ingress string) (*Tool, error) {
+		return Load(writeTool(t, map[string]string{"tool.yaml": base(ingress), "work.sh": minimalWork}))
+	}
+
+	// No port at all: valid (local assigns SRCOS_PORT).
+	tl, err := load("ingress: {healthcheck: {path: /}}")
+	if err != nil {
+		t.Fatalf("ingress without a port must be valid: %v", err)
+	}
+	if !tl.Ingress.WebSocketEnabled() {
+		t.Fatal("websocket must default to enabled")
+	}
+	if tl.Ingress.BWLimit != 0 {
+		t.Fatalf("bwlimit = %d, want 0 (unlimited)", tl.Ingress.BWLimit)
+	}
+
+	if _, err := load("ingress: {port: -1}"); err == nil || !strings.Contains(err.Error(), "ingress.port") {
+		t.Fatalf("a negative port must be rejected: %v", err)
+	}
+	if _, err := load("ingress: {port: 8080, bwlimit: -5}"); err == nil || !strings.Contains(err.Error(), "bwlimit") {
+		t.Fatalf("a negative bwlimit must be rejected: %v", err)
+	}
+	if _, err := load("ingress: {port: 8080, websocket: false}"); err != nil {
+		t.Fatalf("an explicit websocket: false must be accepted: %v", err)
+	}
+}
