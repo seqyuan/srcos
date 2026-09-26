@@ -68,6 +68,16 @@ type Target struct {
 	Type    string `json:"type,omitempty"` // tool | job | instance | flow | run | token | grant | group
 	ID      string `json:"id,omitempty"`
 	Version string `json:"version,omitempty"`
+	// Digest is the content hash of the tool package when the target is a tool:
+	// `version` says which release someone claims, the digest says which bytes
+	// actually ran. It is not a signature — see tool.Digest.
+	Digest string `json:"digest,omitempty"`
+}
+
+// WithDigest attaches the target's content digest (which build of the tool ran).
+func (e Event) WithDigest(d string) Event {
+	e.Target.Digest = d
+	return e
 }
 
 // Request is where the act came from, when it came over HTTP. It is what turns

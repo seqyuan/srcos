@@ -73,6 +73,12 @@ type Instance struct {
 	ExitCode int    `yaml:"exit_code"`
 	Error    string `yaml:"error,omitempty"`
 
+	// ToolDigest is the content hash of the tool package at the moment this
+	// instance was prepared. `version` is a string someone wrote; this is what
+	// makes "which code ran" answerable when the files changed without the
+	// version changing.
+	ToolDigest string `yaml:"tool_digest,omitempty"`
+
 	Backend string   `yaml:"backend"`
 	Sandbox string   `yaml:"sandbox"`
 	Limiter string   `yaml:"limiter"` // systemd-run | prlimit | none

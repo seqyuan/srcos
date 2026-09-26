@@ -19,6 +19,7 @@ import (
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // ── a fake backend ───────────────────────────────────────────────────────
@@ -828,5 +829,39 @@ func TestIdempotentReplayIsAudited(t *testing.T) {
 	}
 	if events[1].Params["idempotent_replay"] != "true" {
 		t.Fatalf("the replay must be marked: %+v", events[1].Params)
+	}
+}
+
+// 审计的 submit 事件要带上工具包的内容摘要：version 说“声称的版本”，
+// digest 说“实际跑的字节”。
+func TestSubmitAuditCarriesToolDigest(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	rec := audit.New(config.DataDir(f.configDir))
+	f.opts.Audit = rec
+	defer rec.Close()
+
+	ident := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
+	if _, err := f.Submit(ident, SubmitRequest{Tool: "demo", Params: map[string]any{"word": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := audit.Query(config.DataDir(f.configDir), audit.Filter{Action: "submit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("submit events = %d", len(events))
+	}
+	got := events[0].Target.Digest
+	if got == "" {
+		t.Fatal("the submit event must carry the tool's content digest")
+	}
+	// It is the digest of the package on disk, not a made-up string.
+	tl, err := tool.Find(f.toolsDir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != tl.Digest {
+		t.Fatalf("audit digest = %s, want the package's %s", got, tl.Digest)
 	}
 }

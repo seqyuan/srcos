@@ -4,7 +4,7 @@
 >
 > 进度:步骤 1（声明式 `command:`）✅ · 步骤 2/3（`environment:` 具名环境 + 沙箱装配 + shiny-demo 迁移）✅ ·
 > 步骤 4（`ingress` 补齐：websocket / bwlimit / port 可选）✅ ·
-> 步骤 5（`backend: external` 转发既存后端）✅ · 其余（content digest / 文档收尾 + ADR）待做。
+> 步骤 5（`backend: external` 转发既存后端）✅ · 步骤 6（content digest）✅ · 其余（文档收尾 + ADR）待做。
 > 目标服务类型:R Shiny / Python Shiny / Jupyter / dsh(+ RStudio,见 §2.5)。
 >
 > 相关:ADR-002(backend 与 isolation 正交)、ADR-003(一个运行原语)、

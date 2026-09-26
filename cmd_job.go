@@ -64,9 +64,10 @@ func runToolCmd(args []string) {
 			fmt.Printf("no tools found under %s\n", root)
 			return
 		}
-		fmt.Printf("%-20s %-8s %-8s %-7s %-9s %s\n", "ID", "VERSION", "KIND", "SANDBOX", "BACKEND", "NAME")
+		fmt.Printf("%-20s %-8s %-12s %-8s %-7s %-9s %s\n", "ID", "VERSION", "DIGEST", "KIND", "SANDBOX", "BACKEND", "NAME")
 		for _, t := range tools {
-			fmt.Printf("%-20s %-8s %-8s %-7s %-9s %s\n", t.ID, t.Version, t.Kind, t.Sandbox, t.Backend, t.Name)
+			fmt.Printf("%-20s %-8s %-12s %-8s %-7s %-9s %s\n",
+				t.ID, t.Version, tool.ShortDigest(t.Digest), t.Kind, t.Sandbox, t.Backend, t.Name)
 		}
 
 	case "validate":
@@ -108,6 +109,9 @@ func validateOneTool(dir string, envs environment.Provider, envPath string) {
 	} else {
 		fmt.Printf("     command  %s\n", strings.Join(t.Command, " "))
 	}
+	// The version is a string someone wrote; the digest is what makes "which
+	// code ran" answerable when the files change without it.
+	fmt.Printf("     digest   %s\n", t.ShortDigestOrDash())
 	fmt.Printf("     inputs   %d, outputs %d, storages %v\n",
 		len(t.Interface.Inputs), len(t.Interface.Outputs), t.RequiresStorages)
 

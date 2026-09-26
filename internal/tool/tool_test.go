@@ -700,3 +700,74 @@ lifecycle: {max_lifetime: "1h"}
 		t.Fatalf("external with a local backend must be rejected: %v", err)
 	}
 }
+
+// content digest：version 是人写的字符串，它变了才说明问题；digest 是内容，
+// 内容变了它就变 —— “到底跑的哪份代码”因此可答。
+func TestDigestTracksContentNotVersion(t *testing.T) {
+	files := map[string]string{"tool.yaml": minimalTask, "work.sh": minimalWork}
+	dir := writeTool(t, files)
+
+	first, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Digest) != 64 {
+		t.Fatalf("digest = %q, want a full sha256 hex", first.Digest)
+	}
+	// Stable across loads.
+	again, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Digest != first.Digest {
+		t.Fatalf("digest is not stable: %s vs %s", first.Digest, again.Digest)
+	}
+
+	// One byte of a *script* changes it, even with the same version string.
+	if err := os.WriteFile(filepath.Join(dir, "work.sh"), []byte(minimalWork+"\n# tweak\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Digest == first.Digest {
+		t.Fatal("editing a script must change the digest")
+	}
+	if changed.Version != first.Version {
+		t.Fatal("the version string is unchanged in this fixture — that is the point")
+	}
+}
+
+// Build caches and VCS metadata are not source: hashing them would move the
+// digest without the code moving.
+func TestDigestSkipsBuildAndVCSJunk(t *testing.T) {
+	dir := writeTool(t, map[string]string{"tool.yaml": minimalTask, "work.sh": minimalWork})
+	base, err := Digest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, junk := range []string{
+		filepath.Join("__pycache__", "x.pyc"),
+		filepath.Join(".git", "HEAD"),
+		filepath.Join("node_modules", "pkg", "index.js"),
+		".DS_Store",
+	} {
+		path := filepath.Join(dir, junk)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after, err := Digest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != base {
+		t.Fatal("build/VCS junk must not change the digest")
+	}
+}

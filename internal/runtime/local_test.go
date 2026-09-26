@@ -458,6 +458,9 @@ func TestDeclarativeCommandRunsForATask(t *testing.T) {
 	if inst.State != StateSucceeded {
 		t.Fatalf("state = %s (%s)", inst.State, inst.Error)
 	}
+	if inst.ToolDigest == "" {
+		t.Fatal("the instance record must carry the tool package's digest (which code ran)")
+	}
 	if log := readFile(t, inst.LogPath); !strings.Contains(log, "cmd-ok ws=") {
 		t.Fatalf("the command did not run: %s", log)
 	}

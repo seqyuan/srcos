@@ -1196,6 +1196,10 @@ environment: r-miniforge          # 管理端声明 root / PATH / provides
 它的 `root` 只读挂进沙箱（按宿主路径本身，因为解释器内部用绝对路径），`env` 插在
 平台默认与工具自己的 `env:` 之间。换机器只改 `environments.yaml`，工具包不变。
 
+工具的 `version` 是**人写的声明**，而 SRCOS 还会算一个**内容摘要**（`digest`）：manifest + 脚本 + 模板的 sha256。
+两者都记进实例与审计（`tool demo@0.1.0#a58e88795f2a`），所以“到底跑的哪份代码”是可答的 —— 
+文件改了而版本号没改，摘要把这件事露出来。**摘要是内容一致性，不是签名**（见 `docs/tool-spec.md` §2.4）。
+
 只交付命令 + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
 想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。
 

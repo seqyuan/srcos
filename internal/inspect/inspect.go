@@ -117,8 +117,11 @@ type StorageView struct {
 // ToolView is a tool as the read side presents it: the contract, never the host
 // directory the package lives at.
 type ToolView struct {
-	ID          string         `json:"id"`
-	Version     string         `json:"version"`
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	// Digest is the package's content hash: the version says which release
+	// someone claims, this says which bytes are registered here.
+	Digest      string         `json:"digest,omitempty"`
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	Kind        string         `json:"kind"`
@@ -135,6 +138,7 @@ func viewOf(t *tool.Tool, storages []StorageView) ToolView {
 	return ToolView{
 		ID:          t.ID,
 		Version:     t.Version,
+		Digest:      tool.ShortDigest(t.Digest),
 		Name:        t.Name,
 		Description: t.Description,
 		Kind:        string(t.Kind),

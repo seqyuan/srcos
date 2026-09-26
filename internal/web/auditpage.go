@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/audit"
+	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // AuditPage renders the audit console: the structured stream, newest first,
@@ -99,6 +100,9 @@ func auditRow(e audit.Event) string {
 		target = esc(e.Target.Type) + " " + esc(e.Target.ID)
 		if e.Target.Version != "" {
 			target += "@" + esc(e.Target.Version)
+		}
+		if e.Target.Digest != "" {
+			target += `<span class="audit-muted">#` + esc(tool.ShortDigest(e.Target.Digest)) + `</span>`
 		}
 	}
 

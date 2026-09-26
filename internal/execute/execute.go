@@ -185,6 +185,7 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *
 	defer func() {
 		ev := audit.NewEvent(ident.AuditActor(), "submit").
 			WithTarget("tool", toolID, versionOf(t)).
+			WithDigest(digestOf(t)).
 			WithParams(req.Params)
 		if replayed {
 			if ev.Params == nil {
@@ -718,4 +719,13 @@ func versionOf(t *tool.Tool) string {
 		return ""
 	}
 	return t.Version
+}
+
+// digestOf is the tool package's content hash, when one is known: the version
+// says which release someone claims, the digest says which bytes ran.
+func digestOf(t *tool.Tool) string {
+	if t == nil {
+		return ""
+	}
+	return t.Digest
 }

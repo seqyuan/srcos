@@ -7,12 +7,15 @@
 package tool
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -130,6 +133,10 @@ type Tool struct {
 	// Dir is the tool package directory this manifest was loaded from. It is
 	// not part of tool.yaml.
 	Dir string `yaml:"-"`
+	// Digest is a content hash of the package (see Digest), computed at load.
+	// Like Dir it is not part of tool.yaml: it describes the files, not the
+	// declaration.
+	Digest string `yaml:"-"`
 }
 
 // AgentSpec declares what an agent hosted by this service needs from SRCOS
@@ -407,6 +414,11 @@ func Load(dir string) (*Tool, error) {
 	if err := t.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	digest, err := Digest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("%s: digest: %w", path, err)
+	}
+	t.Digest = digest
 	return &t, nil
 }
 
@@ -982,4 +994,95 @@ func ExpandCommand(cmd, env []string) ([]string, error) {
 		out[i] = b.String()
 	}
 	return out, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 内容摘要（工具源码管理）
+// ─────────────────────────────────────────────────────────────────────────
+
+// digestSkip are names that are not part of a tool's source: version-control
+// metadata, language build caches and editor/OS junk. Hashing them would make
+// the digest move without the code moving.
+var digestSkip = map[string]bool{
+	".git": true, "node_modules": true, "__pycache__": true, ".DS_Store": true,
+}
+
+// Digest is a content hash of the tool package: manifest, scripts and templates,
+// in a stable order (path + mode + content).
+//
+// `version` is a string a human writes, and it does not have to change when the
+// files do. The digest is what makes "which code ran" answerable: it is recorded
+// on every instance and every audit event, so a mutated package is visible even
+// when the version string stayed the same.
+//
+// It is deliberately **not** a signature: it proves the content matches the
+// record, not that the content is trustworthy. That is the audit's external
+// anchor (ADR-024), and mixing the two would overstate this one.
+//
+// The package should not carry large blobs (images belong in `ro_mounts`): the
+// digest is recomputed whenever a tool is loaded.
+func Digest(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", nil
+	}
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && digestSkip[name] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if digestSkip[name] || strings.HasSuffix(name, ".pyc") {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files)
+
+	h := sha256.New()
+	for _, path := range files {
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s\x00%o\x00", rel, info.Mode().Perm())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		h.Write(data)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ShortDigest renders a digest for humans (logs, tables); the full value stays
+// in the record.
+func ShortDigest(d string) string {
+	if len(d) <= 12 {
+		return d
+	}
+	return d[:12]
+}
+
+// ShortDigestOrDash is ShortDigest with a placeholder for a tool whose package
+// was not loaded from disk (a test fixture), so a table stays aligned.
+func (t *Tool) ShortDigestOrDash() string {
+	if t.Digest == "" {
+		return "-"
+	}
+	return ShortDigest(t.Digest)
 }

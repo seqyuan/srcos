@@ -11,6 +11,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // srcos audit ... reads the structured audit stream (data/audit/audit-*.jsonl).
@@ -214,6 +215,9 @@ func formatAuditEvent(e audit.Event) string {
 		b.WriteString(e.Target.ID)
 		if e.Target.Version != "" {
 			b.WriteString("@" + e.Target.Version)
+		}
+		if e.Target.Digest != "" {
+			b.WriteString("#" + tool.ShortDigest(e.Target.Digest))
 		}
 	}
 	for _, k := range sortedKeys(e.Refs) {

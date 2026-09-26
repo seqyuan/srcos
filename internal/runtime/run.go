@@ -276,19 +276,20 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 	}
 
 	inst := &Instance{
-		ID:        InstanceID(r.opts.User, t.ID, loaded.ID),
-		User:      r.opts.User,
-		Tool:      t.ID,
-		Kind:      string(t.Kind),
-		JobName:   loaded.Job.Name,
-		State:     StatePending,
-		Backend:   string(t.Backend),
-		Sandbox:   string(t.Sandbox),
-		LogPath:   prep.paths.LogPath,
-		WorkDir:   prep.paths.JobDir,
-		Outputs:   loaded.Job.Outputs,
-		Tags:      loaded.Job.Tags,
-		StartedAt: time.Now().UTC(),
+		ID:         InstanceID(r.opts.User, t.ID, loaded.ID),
+		User:       r.opts.User,
+		Tool:       t.ID,
+		ToolDigest: t.Digest,
+		Kind:       string(t.Kind),
+		JobName:    loaded.Job.Name,
+		State:      StatePending,
+		Backend:    string(t.Backend),
+		Sandbox:    string(t.Sandbox),
+		LogPath:    prep.paths.LogPath,
+		WorkDir:    prep.paths.JobDir,
+		Outputs:    loaded.Job.Outputs,
+		Tags:       loaded.Job.Tags,
+		StartedAt:  time.Now().UTC(),
 	}
 	fail := func(format string, a ...any) *Instance {
 		inst.State = StateFailed
@@ -467,24 +468,7 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		return nil, err
 	}
 
-	inst := &Instance{
-		ID:        InstanceID(r.opts.User, t.ID, ""),
-		User:      r.opts.User,
-		Tool:      t.ID,
-		Kind:      string(t.Kind),
-		JobName:   t.Name,
-		State:     StatePending,
-		Backend:   string(t.Backend),
-		Sandbox:   string(t.Sandbox),
-		LogPath:   prep.paths.LogPath,
-		WorkDir:   prep.paths.Workspace,
-		RoutePath: route.DefaultPath(r.opts.User, t.ID),
-		StartedAt: time.Now().UTC(),
-	}
-	inst.LastActiveAt = inst.StartedAt
-	if j != nil {
-		inst.Tags = j.Tags
-	}
+	inst := newServiceInstance(t, prep, j)
 	fail := func(format string, a ...any) *Instance {
 		inst.State = StateFailed
 		inst.Error = fmt.Sprintf(format, a...)
@@ -610,30 +594,39 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	return inst, nil
 }
 
+// newServiceInstance is the record both service paths start from — the one
+// SRCOS instantiates and the one it forwards to. They differ in where the
+// endpoint comes from, not in what an instance *is*.
+func newServiceInstance(t *tool.Tool, prep *prepared, j *job.Job) *Instance {
+	inst := &Instance{
+		ID:         InstanceID(prep.paths.User, t.ID, ""),
+		User:       prep.paths.User,
+		Tool:       t.ID,
+		ToolDigest: t.Digest,
+		Kind:       string(t.Kind),
+		JobName:    t.Name,
+		State:      StatePending,
+		Backend:    string(t.Backend),
+		Sandbox:    string(t.Sandbox),
+		LogPath:    prep.paths.LogPath,
+		WorkDir:    prep.paths.Workspace,
+		RoutePath:  route.DefaultPath(prep.paths.User, t.ID),
+		StartedAt:  time.Now().UTC(),
+	}
+	inst.LastActiveAt = inst.StartedAt
+	if j != nil {
+		inst.Tags = j.Tags
+	}
+	return inst
+}
+
 // startExternal forwards to a backend that already runs (design §3).
 //
 // It shares everything it can with StartService — the record, the healthcheck,
 // the route — and differs only where "nothing is started" matters: no port
 // pool, no argv, no credential, and no ownership.
 func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, prep *prepared) (*Instance, error) {
-	inst := &Instance{
-		ID:        InstanceID(r.opts.User, t.ID, ""),
-		User:      r.opts.User,
-		Tool:      t.ID,
-		Kind:      string(t.Kind),
-		JobName:   t.Name,
-		State:     StatePending,
-		Backend:   string(t.Backend),
-		Sandbox:   string(t.Sandbox),
-		LogPath:   prep.paths.LogPath,
-		WorkDir:   prep.paths.Workspace,
-		RoutePath: route.DefaultPath(r.opts.User, t.ID),
-		StartedAt: time.Now().UTC(),
-	}
-	inst.LastActiveAt = inst.StartedAt
-	if j != nil {
-		inst.Tags = j.Tags
-	}
+	inst := newServiceInstance(t, prep, j)
 	fail := func(format string, a ...any) *Instance {
 		inst.State = StateFailed
 		inst.Error = fmt.Sprintf(format, a...)
@@ -1147,6 +1140,7 @@ func (r *Runner) auditInstance(inst *Instance, action string, params map[string]
 	}
 	r.opts.Audit.Record(audit.NewEvent(audit.Actor{User: inst.User, Kind: audit.KindSystem}, action).
 		WithTarget("instance", inst.ID, "").
+		WithDigest(inst.ToolDigest).
 		WithParams(params).
 		WithRefs(map[string]string{"tool": inst.Tool}).
 		Allowed())
