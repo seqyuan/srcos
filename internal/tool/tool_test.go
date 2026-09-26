@@ -640,3 +640,63 @@ lifecycle: {restart: never, max_lifetime: "1h"}
 		t.Fatalf("an explicit websocket: false must be accepted: %v", err)
 	}
 }
+
+// backend: external —— 转发一个已经跑着的后端。SRCOS 不启动它，所以描述
+// 「怎么跑」的字段全是死配置，逐个拒绝。
+func TestExternalBackendValidation(t *testing.T) {
+	base := func(extra string) string {
+		return `
+schemaVersion: 1
+id: shiny-server
+version: 0.1.0
+name: Shiny Server
+kind: service
+backend: external
+` + extra + `
+ingress: {healthcheck: {path: /}}
+`
+	}
+	load := func(extra string) (*Tool, error) {
+		return Load(writeTool(t, map[string]string{"tool.yaml": base(extra)}))
+	}
+
+	tl, err := load("external: {host: 127.0.0.1, port: 3838}")
+	if err != nil {
+		t.Fatalf("a forwarded backend needs no command/entry/lifecycle/resources: %v", err)
+	}
+	if tl.External.Endpoint() != "127.0.0.1:3838" {
+		t.Fatalf("endpoint = %q", tl.External.Endpoint())
+	}
+
+	for _, tc := range []struct{ name, extra, want string }{
+		{"no external block", "", "requires an `external:"},
+		{"remote host", "external: {host: 10.0.0.5, port: 80}", "must be loopback"},
+		{"port out of range", "external: {host: 127.0.0.1, port: 0}", "out of range"},
+		{"entry is dead config", "external: {host: 127.0.0.1, port: 3838}\nentry: work.sh", "would never run"},
+		{"environment is dead config", "external: {host: 127.0.0.1, port: 3838}\nenvironment: r-miniforge", "would never be used"},
+		{"storages are dead config", "external: {host: 127.0.0.1, port: 3838}\nrequires_storages: [data]", "would never be mounted"},
+		{"agent cannot be hosted", "external: {host: 127.0.0.1, port: 3838}\nagent: {mcp: [read]}", "cannot host an agent"},
+	} {
+		if _, err := load(tc.extra); err == nil {
+			t.Fatalf("%s: expected an error", tc.name)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error = %v, want it to mention %q", tc.name, err, tc.want)
+		}
+	}
+
+	// external is only meaningful with backend: external.
+	if _, err := Load(writeTool(t, map[string]string{"tool.yaml": `
+schemaVersion: 1
+id: web
+version: 0.1.0
+name: Web
+kind: service
+backend: local
+entry: work.sh
+external: {host: 127.0.0.1, port: 3838}
+ingress: {healthcheck: {path: /}}
+lifecycle: {max_lifetime: "1h"}
+`, "work.sh": minimalWork})); err == nil || !strings.Contains(err.Error(), "only meaningful with backend: external") {
+		t.Fatalf("external with a local backend must be rejected: %v", err)
+	}
+}

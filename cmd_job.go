@@ -493,7 +493,8 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 		Audit:        auditRec,
 		AgentTokens:  runtimeTokens,
 		Backends: map[string]runtime.Backend{
-			"local": &runtime.Local{},
+			"local":    &runtime.Local{},
+			"external": &runtime.External{},
 		},
 	})
 	runner.SetPorts(ports)

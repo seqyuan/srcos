@@ -493,6 +493,12 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		return inst
 	}
 
+	// An external backend runs nothing: forwarding has no argv, no port pool,
+	// no credential and no ownership (design §3).
+	if t.Backend == tool.BackendExternal {
+		return r.startExternal(ctx, t, j, prep)
+	}
+
 	backend, err := r.backendFor(t)
 	if err != nil {
 		return fail("%v", err), nil
@@ -504,8 +510,9 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	}
 	// Every exit from here on either releases the port or keeps the instance.
 	keepPort := false
+	released := false
 	defer func() {
-		if !keepPort {
+		if !released && !keepPort {
 			pool.Release(port)
 		}
 	}()
@@ -549,6 +556,20 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	}
 	inst.Command = h.Command()
 	inst.Limiter = h.Limiter()
+	// A backend that publishes its own endpoint is authoritative about where it
+	// is reachable: the local pool's guess does not apply (an SGE job tunnels to
+	// a compute node; an external backend is declared elsewhere). The pool
+	// reservation is handed back rather than held for a port nothing listens on.
+	if h.WantEndpoint() {
+		ep, ok := h.Endpoint()
+		if !ok {
+			_ = h.Stop(context.Background())
+			return fail("backend %s did not publish an endpoint", backend.Name()), nil
+		}
+		inst.Endpoint = ep.String()
+		pool.Release(port)
+		released = true
+	}
 	inst.Mounts = renderMounts(prep.spec)
 	inst.RequestedCPU, inst.RequestedMemory = requestedResources(t, j)
 	inst.State = StateStarting
@@ -575,25 +596,113 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		return nil, err
 	}
 
-	if r.opts.Routes != nil {
-		if err := r.opts.Routes.Put(route.Entry{
-			User:        inst.User,
-			Tool:        inst.Tool,
-			InstanceID:  inst.ID,
-			Path:        inst.RoutePath,
-			Target:      route.Target{Host: "127.0.0.1", Port: port},
-			WebSocket:   t.Ingress.WebSocketEnabled(),
-			BWLimit:     t.Ingress.BWLimit,
-			BackendPath: t.Ingress.BackendPath,
-			State:       string(inst.State),
-		}); err != nil {
-			_ = h.Stop(context.Background())
-			return fail("publish route: %v", err), nil
-		}
+	target, err := route.ParseTarget(inst.Endpoint)
+	if err != nil {
+		_ = h.Stop(context.Background())
+		return fail("%v", err), nil
+	}
+	if err := r.publishRoute(t, inst, target); err != nil {
+		_ = h.Stop(context.Background())
+		return fail("publish route: %v", err), nil
 	}
 
 	keepPort = true
 	return inst, nil
+}
+
+// startExternal forwards to a backend that already runs (design §3).
+//
+// It shares everything it can with StartService — the record, the healthcheck,
+// the route — and differs only where "nothing is started" matters: no port
+// pool, no argv, no credential, and no ownership.
+func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, prep *prepared) (*Instance, error) {
+	inst := &Instance{
+		ID:        InstanceID(r.opts.User, t.ID, ""),
+		User:      r.opts.User,
+		Tool:      t.ID,
+		Kind:      string(t.Kind),
+		JobName:   t.Name,
+		State:     StatePending,
+		Backend:   string(t.Backend),
+		Sandbox:   string(t.Sandbox),
+		LogPath:   prep.paths.LogPath,
+		WorkDir:   prep.paths.Workspace,
+		RoutePath: route.DefaultPath(r.opts.User, t.ID),
+		StartedAt: time.Now().UTC(),
+	}
+	inst.LastActiveAt = inst.StartedAt
+	if j != nil {
+		inst.Tags = j.Tags
+	}
+	fail := func(format string, a ...any) *Instance {
+		inst.State = StateFailed
+		inst.Error = fmt.Sprintf(format, a...)
+		inst.EndedAt = time.Now().UTC()
+		_ = SaveInstance(prep.paths.RecordPath, inst)
+		return inst
+	}
+
+	backend, err := r.backendFor(t)
+	if err != nil {
+		return fail("%v", err), nil
+	}
+	h, err := backend.Start(ctx, StartRequest{
+		Tool:         t,
+		Job:          j,
+		Spec:         prep.spec,
+		Paths:        prep.paths,
+		View:         prep.view,
+		LogPath:      prep.paths.LogPath,
+		InstanceID:   inst.ID,
+		WantEndpoint: true,
+	})
+	if err != nil {
+		return fail("%v", err), nil
+	}
+	target, ok := h.Endpoint()
+	if !ok {
+		return fail("backend %s did not publish an endpoint", backend.Name()), nil
+	}
+	inst.Endpoint = target.String()
+	inst.Limiter = h.Limiter()
+	inst.State = StateStarting
+	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+		return nil, err
+	}
+
+	path, timeout := healthcheckSpec(t)
+	if err := probeHTTP(ctx, target, path, timeout, h); err != nil {
+		return fail("healthcheck: %v", err), nil
+	}
+
+	inst.State = StateRunning
+	inst.Healthcheck = "ok"
+	if err := r.publishRoute(t, inst, target); err != nil {
+		return fail("publish route: %v", err), nil
+	}
+	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+		return nil, err
+	}
+	r.auditInstance(inst, "instance.forwarded", map[string]any{"endpoint": target.String()})
+	return inst, nil
+}
+
+// publishRoute puts one instance into the routing table the proxy reads.
+func (r *Runner) publishRoute(t *tool.Tool, inst *Instance, target route.Target) error {
+	if r.opts.Routes == nil {
+		return nil
+	}
+	return r.opts.Routes.Put(route.Entry{
+		User:        inst.User,
+		Tool:        inst.Tool,
+		InstanceID:  inst.ID,
+		Path:        inst.RoutePath,
+		Target:      target,
+		WebSocket:   t.Ingress.WebSocketEnabled(),
+		BWLimit:     t.Ingress.BWLimit,
+		BackendPath: t.Ingress.BackendPath,
+		State:       string(inst.State),
+	})
 }
 
 // issueAgentToken mints the credential a hosted agent uses (A1) and hands it to
@@ -631,18 +740,7 @@ func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance, prep *prepared) e
 // healthcheck polls the instance's ingress until it answers, because a process
 // that has started is not a service that is ready (Jupyter needs 5-15s).
 func (r *Runner) healthcheck(ctx context.Context, t *tool.Tool, h Handle, port int, prep *prepared) error {
-	path := "/"
-	timeout := 120 * time.Second
-	if hc := t.Ingress.Healthcheck; hc != nil {
-		if hc.Path != "" {
-			path = hc.Path
-		}
-		if hc.Timeout != "" {
-			if secs, err := tool.ParseWalltime(hc.Timeout); err == nil && secs > 0 {
-				timeout = time.Duration(secs) * time.Second
-			}
-		}
-	}
+	path, timeout := healthcheckSpec(t)
 
 	// A backend that publishes its own endpoint (SGE, over a rendezvous file)
 	// is authoritative: the local port pool's guess does not apply on a
@@ -655,6 +753,24 @@ func (r *Runner) healthcheck(ctx context.Context, t *tool.Tool, h Handle, port i
 		return probeHTTP(ctx, ep, path, timeout, h)
 	}
 	return probeHTTP(ctx, route.Target{Host: "127.0.0.1", Port: port}, path, timeout, h)
+}
+
+// healthcheckSpec is the probe path and deadline a tool declares, with the
+// defaults an app server needs (it can take a minute to load its libraries).
+func healthcheckSpec(t *tool.Tool) (string, time.Duration) {
+	path := "/"
+	timeout := 120 * time.Second
+	if hc := t.Ingress.Healthcheck; hc != nil {
+		if hc.Path != "" {
+			path = hc.Path
+		}
+		if hc.Timeout != "" {
+			if secs, err := tool.ParseWalltime(hc.Timeout); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+			}
+		}
+	}
+	return path, timeout
 }
 
 func probeHTTP(ctx context.Context, target route.Target, path string, timeout time.Duration, h Handle) error {
@@ -1114,6 +1230,11 @@ func splitHostPort(s string) (string, string, error) {
 
 func isReapable(inst *Instance) bool {
 	if inst.Kind != string(tool.KindService) {
+		return false
+	}
+	// A forwarded backend is not SRCOS's process: idleTTL / maxLifetime describe
+	// a lifetime the platform owns, and it owns nothing here.
+	if inst.Backend == string(tool.BackendExternal) {
 		return false
 	}
 	switch inst.State {

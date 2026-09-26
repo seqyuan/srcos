@@ -9,6 +9,7 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,9 @@ type Backend string
 const (
 	BackendLocal Backend = "local"
 	BackendSGE   Backend = "sge"
+	// BackendExternal forwards to a backend that already runs: SRCOS starts
+	// nothing, and therefore never stops or reaps it either.
+	BackendExternal Backend = "external"
 )
 
 // Sandbox is the isolation mechanism; it is an attribute of a backend, not a
@@ -117,6 +121,12 @@ type Tool struct {
 	// package portable.
 	Environment string `yaml:"environment,omitempty"`
 
+	// External, with `backend: external`, points at a backend that already runs.
+	// SRCOS only forwards to it (design §3): the "port forwarding" case that
+	// used to be a static service card, moved into the tool model so it shares
+	// one authorization policy, one audit stream and one catalogue.
+	External *ExternalSpec `yaml:"external,omitempty"`
+
 	// Dir is the tool package directory this manifest was loaded from. It is
 	// not part of tool.yaml.
 	Dir string `yaml:"-"`
@@ -134,6 +144,24 @@ type AgentSpec struct {
 	// use). It can only narrow — the owner's Grant is still the outer bound, and
 	// the usual tool × user checks run at submit time.
 	Tools []string `yaml:"tools,omitempty"`
+}
+
+// ExternalSpec is the endpoint of a backend that already runs.
+//
+// The host must be loopback: SRCOS's routing table accepts loopback targets
+// only, because a record is a file any local process can rewrite — the dial-time
+// allowlist (SafeDialContext) is the real boundary, but keeping the table
+// loopback-only means a tampered record cannot turn the gateway into a forwarder
+// to anything else. Reaching a backend on another host is a *static card* today
+// (or an ssh -L forwarder in front of it).
+type ExternalSpec struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+}
+
+// Endpoint renders the target as host:port.
+func (e *ExternalSpec) Endpoint() string {
+	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
 }
 
 // ROMount mounts a host path read-only into the sandbox. This is for
@@ -443,14 +471,19 @@ func (t *Tool) Validate() error {
 	if t.Name == "" {
 		bad("name is required")
 	}
-	if _, err := ParseWalltimeOrZero(t.Resources.Walltime); err != nil {
-		bad("resources.walltime: %v", err)
-	}
-	if _, err := ParseMemory(t.Resources.Memory); err != nil {
-		bad("resources.memory: %v", err)
-	}
-	if t.Resources.CPU < 1 {
-		bad("resources.cpu must be >= 1, got %d", t.Resources.CPU)
+	// resources describe what SRCOS runs. An external backend runs nothing, so
+	// declaring them there would be dead configuration.
+	external := t.Backend == BackendExternal
+	if !external {
+		if _, err := ParseWalltimeOrZero(t.Resources.Walltime); err != nil {
+			bad("resources.walltime: %v", err)
+		}
+		if _, err := ParseMemory(t.Resources.Memory); err != nil {
+			bad("resources.memory: %v", err)
+		}
+		if t.Resources.CPU < 1 {
+			bad("resources.cpu must be >= 1, got %d", t.Resources.CPU)
+		}
 	}
 
 	// ── kind ────────────────────────────────────────────────────────────
@@ -469,7 +502,7 @@ func (t *Tool) Validate() error {
 		if t.Ingress == nil {
 			bad("kind: service requires ingress")
 		}
-		if t.Lifecycle == nil {
+		if t.Lifecycle == nil && !external {
 			bad("kind: service requires lifecycle")
 		}
 	default:
@@ -478,9 +511,46 @@ func (t *Tool) Validate() error {
 
 	// ── backend / sandbox ───────────────────────────────────────────────
 	switch t.Backend {
-	case BackendLocal, BackendSGE:
+	case BackendLocal, BackendSGE, BackendExternal:
 	default:
-		bad("backend must be %q or %q, got %q", BackendLocal, BackendSGE, t.Backend)
+		bad("backend must be %q, %q or %q, got %q", BackendLocal, BackendSGE, BackendExternal, t.Backend)
+	}
+	// ── external（转发一个已经跑着的后端）─────────────────
+	//
+	// It runs nothing, so everything that describes *how to run* something is
+	// dead configuration rather than a harmless extra.
+	if t.Backend == BackendExternal {
+		if t.Kind != KindService {
+			bad("backend: external must be kind: service (a forwarded backend has an endpoint)")
+		}
+		if t.External == nil {
+			bad("backend: external requires an `external: {host, port}` block")
+		} else {
+			if !isLoopbackHost(t.External.Host) {
+				bad("external.host must be loopback (got %q) — reaching another host is a static service card's job, "+
+					"or an ssh -L forwarder in front of it", t.External.Host)
+			}
+			if t.External.Port <= 0 || t.External.Port > 65535 {
+				bad("external.port %d is out of range", t.External.Port)
+			}
+		}
+		if t.Entry != "" || len(t.Command) > 0 {
+			bad("backend: external starts nothing, so entry/command would never run")
+		}
+		if t.Environment != "" {
+			bad("backend: external starts nothing, so environment would never be used")
+		}
+		if t.Agent != nil {
+			bad("backend: external runs no unit, so it cannot host an agent")
+		}
+		if len(t.RequiresStorages) > 0 {
+			bad("backend: external runs no unit, so requires_storages would never be mounted")
+		}
+		if t.Ingress == nil {
+			bad("backend: external requires ingress (healthcheck / backend_path)")
+		}
+	} else if t.External != nil {
+		bad("external is only meaningful with backend: external")
 	}
 	switch t.Sandbox {
 	case "":
@@ -555,13 +625,15 @@ func (t *Tool) Validate() error {
 	// Exactly one: either a declarative argv (the common case for an app
 	// server) or a script (anything with loops, conditionals or several
 	// processes).
-	switch {
-	case t.Entry != "" && len(t.Command) > 0:
-		bad("entry and command are mutually exclusive (entry is the script escape hatch, command the declarative one)")
-	case t.Entry == "" && len(t.Command) == 0:
-		bad("one of entry or command is required")
-	case len(t.Command) > 0:
-		validateCommand(t.Command, t.Kind, bad)
+	if !external {
+		switch {
+		case t.Entry != "" && len(t.Command) > 0:
+			bad("entry and command are mutually exclusive (entry is the script escape hatch, command the declarative one)")
+		case t.Entry == "" && len(t.Command) == 0:
+			bad("one of entry or command is required")
+		case len(t.Command) > 0:
+			validateCommand(t.Command, t.Kind, bad)
+		}
 	}
 	if t.Entry != "" && t.Dir != "" {
 		if _, err := os.Stat(filepath.Join(t.Dir, t.Entry)); err != nil {
@@ -709,6 +781,17 @@ func splitFrom(from string) []string {
 }
 
 func pathIsAbs(p string) bool { return strings.HasPrefix(p, "/") }
+
+// isLoopbackHost reports whether a host names this machine's loopback — the only
+// place an external backend may point (see ExternalSpec).
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // 资源字符串解析

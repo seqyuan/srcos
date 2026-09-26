@@ -144,6 +144,9 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 - ❌ SRCOS 解析 `qstat` 跟踪任意子作业
 - ❌ 条件分支 / 循环 / 动态 DAG / 嵌套子流程
 - ❌ 工具 UI 平台化（表单引擎、拖拽式参数面板）
+- ❌ **非 HTTP（TCP/UDP）的端口转发** —— 代理层是 HTTP 反向代理，`backend: external` 也只转发 HTTP；
+  裸露 TCP 端口是另一个协议栈，与「单二进制零依赖」不成比例
+  （设计见 [`docs/plans/2026-09-26-unified-service-instantiation-design.md`](docs/plans/2026-09-26-unified-service-instantiation-design.md)）
 - ❌ **SRCOS 作为 MCP Client**（去调工具自己的 MCP server）——
   工具的执行契约是一个**同步阻塞、以退出码报状态**的命令（`entry: work.sh` 或声明式 `command:`），
   MCP 是"谁可以调它、怎么发现签名"的接口协议，

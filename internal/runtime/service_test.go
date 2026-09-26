@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,7 +83,7 @@ lifecycle:
 		ConfigDir: configDir,
 		ToolsDir:  filepath.Join(root, "tools"),
 		User:      "alice",
-		Backends:  map[string]Backend{"local": &Local{SystemdUser: boolPtr(false)}},
+		Backends:  map[string]Backend{"local": &Local{SystemdUser: boolPtr(false)}, "external": &External{}},
 		Routes:    routes,
 	})
 	runner.SetPorts(ports)
@@ -566,4 +567,103 @@ func TestRouteCarriesWebSocketAndBandwidth(t *testing.T) {
 	if e.BWLimit != 2<<20 {
 		t.Fatalf("route bwlimit = %d, want %d", e.BWLimit, 2<<20)
 	}
+}
+
+// An external backend forwards to something that already runs: SRCOS starts
+// nothing, so it also stops nothing — and the route must point at the declared
+// endpoint, never at a port from the pool.
+func TestExternalBackendForwardsToARunningServer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "forwarded-ok")
+	}))
+	defer upstream.Close()
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	tl.Backend = tool.BackendExternal
+	tl.External = &tool.ExternalSpec{Host: host, Port: port}
+	tl.Entry = ""
+
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.State != StateRunning {
+		t.Fatalf("state = %s (%s)", inst.State, inst.Error)
+	}
+	if want := strings.TrimPrefix(upstream.URL, "http://"); inst.Endpoint != want {
+		t.Fatalf("endpoint = %s, want the declared %s (not a pool port)", inst.Endpoint, want)
+	}
+	e, ok := h.routes.Get("alice", "web")
+	if !ok {
+		t.Fatal("no route was published")
+	}
+	if e.Target.Port != port {
+		t.Fatalf("route target = %+v, want the declared port %d", e.Target, port)
+	}
+	if isReapable(inst) {
+		t.Fatal("a forwarded backend must never be reaped: idleTTL is not ours to enforce")
+	}
+
+	// Stopping the instance withdraws the route and records it stopped — and
+	// leaves the upstream alone, because SRCOS did not start it.
+	if err := h.runner.StopService(context.Background(), tl, inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.routes.Get("alice", "web"); ok {
+		t.Fatal("the route should be withdrawn after a stop")
+	}
+	resp, err := http.Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("the upstream must survive the instance: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// A backend that publishes its own endpoint is authoritative; the pool port it
+// briefly reserved must be handed back (this is what SGE's ssh -L tunnel needs).
+func TestPublishedEndpointReplacesThePoolPort(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	target, err := route.ParseTarget(strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := newServiceHarness(t)
+	tl := h.tool(t)
+	fb := &publishingBackend{target: target}
+	h.runner.opts.Backends["publishes"] = fb
+	tl.Backend = tool.BackendSGE // any backend name the runner knows; the fake ignores it
+	h.runner.opts.Backends["sge"] = fb
+
+	inst, err := h.runner.StartService(context.Background(), tl, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	if inst.Endpoint != target.String() {
+		t.Fatalf("endpoint = %s, want the published %s", inst.Endpoint, target.String())
+	}
+	if e, ok := h.routes.Get("alice", "web"); !ok || e.Target.String() != target.String() {
+		t.Fatalf("route target = %+v, want %s", e, target.String())
+	}
+}
+
+// publishingBackend stands in for a backend that decides its own endpoint (SGE
+// over a rendezvous file, external from its manifest).
+type publishingBackend struct{ target route.Target }
+
+func (b *publishingBackend) Name() string { return "publishes" }
+
+func (b *publishingBackend) Start(ctx context.Context, req StartRequest) (Handle, error) {
+	return &externalHandle{target: b.target}, nil
 }

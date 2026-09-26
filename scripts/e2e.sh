@@ -27,6 +27,7 @@ PASSWORD=e2e-pass
 TOOL=e2e-ticker
 SVC=e2e-web
 ASK=e2e-ask
+EXT=e2e-ext
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
 TIMEOUT="${SRCOS_E2E_TIMEOUT:-60}"
 
@@ -70,6 +71,10 @@ cleanup() {
     kill "$COLLECTOR_PID" >/dev/null 2>&1 || true
     wait "$COLLECTOR_PID" 2>/dev/null || true
   fi
+  if [ -n "$UPSTREAM_PID" ]; then
+    kill "$UPSTREAM_PID" >/dev/null 2>&1 || true
+    wait "$UPSTREAM_PID" 2>/dev/null || true
+  fi
   if [ "${SRCOS_E2E_KEEP:-0}" = "1" ]; then
     echo "[e2e] kept temp dir: $TMP"
   else
@@ -94,6 +99,18 @@ BASE="http://127.0.0.1:$PORT"
 COLLECTOR_LOG="$TMP/collector.jsonl"
 COLLECTOR_PID=""
 COLLECTOR_PORT=""
+# An upstream that already runs, so the `external` backend (forwarding, not
+# starting) is covered too.
+UPSTREAM_DIR="$TMP/upstream"
+UPSTREAM_PID=""
+UPSTREAM_PORT=""
+if command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$UPSTREAM_DIR"
+  echo "upstream-ok" > "$UPSTREAM_DIR/index.html"
+  UPSTREAM_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+  (cd "$UPSTREAM_DIR" && exec python3 -m http.server "$UPSTREAM_PORT" --bind 127.0.0.1) >/dev/null 2>&1 &
+  UPSTREAM_PID=$!
+fi
 if command -v python3 >/dev/null 2>&1; then
   COLLECTOR_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
   python3 - "$COLLECTOR_PORT" "$COLLECTOR_LOG" <<'PY' >/dev/null 2>&1 &
@@ -228,6 +245,21 @@ resources:
 YAML
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TOOLS/$ASK/work.sh"
 chmod +x "$TOOLS/$ASK/work.sh"
+
+if [ -n "$UPSTREAM_PORT" ]; then
+  mkdir -p "$TOOLS/$EXT"
+  cat > "$TOOLS/$EXT/tool.yaml" <<YAML
+schemaVersion: 1
+id: $EXT
+version: 0.0.1
+name: "E2E External"
+description: "转发一个已经跑着的后端（external backend）"
+kind: service
+backend: external
+external: {host: 127.0.0.1, port: $UPSTREAM_PORT}
+ingress: {healthcheck: {path: "/", timeout: "10s"}}
+YAML
+fi
 
 "$BIN" tool validate -d "$CFG" --tools-dir "$TOOLS" >/dev/null || fail "tool validate failed"
 pass "tool package valid"
@@ -496,5 +528,30 @@ else
   info "  （无 python3，跳过采集端验证）"
 fi
 
+# ── 15. external backend：转发一个已经跑着的后端 ──────────────────
+step 15 "转发已跑着的后端（external backend）"
+if [ -n "$UPSTREAM_PORT" ]; then
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admin/instances" \
+    -H "Origin: $BASE" -H 'Content-Type: application/json' \
+    -d "{\"user\":\"$USER_NAME\",\"tool\":\"$EXT\"}")"
+  [ "$code" = "201" ] || fail "start forward = $code, want 201"
+
+  body="$(curl -fsS -b "$CJ" "$BASE/proxy/$USER_NAME/$EXT/")"
+  # The body also carries the proxy's <base> + polyfill injection — the same
+  # rewriting a static card gets, which is the point (one forwarding pipeline).
+  case "$body" in *upstream-ok*) ;; *) fail "forwarded body = '$body', want it to contain upstream-ok" ;; esac
+
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ2" -X POST "$BASE/api/admin/instances/$USER_NAME-$EXT-svc/stop" \
+    -H "Origin: $BASE")"
+  [ "$code" = "200" ] || fail "stop forward = $code, want 200"
+  # SRCOS stops nothing it did not start.
+  [ "$(curl -fsS "http://127.0.0.1:$UPSTREAM_PORT/")" = "upstream-ok" ] \
+    || fail "SRCOS stopped an upstream it does not own"
+  grep -rq '"action":"instance.forwarded"' "$AUDDIR" 2>/dev/null || fail "forwarding not audited"
+  pass "转发可用；停止只撤路由，上游不受影响；入审计"
+else
+  info "  （无 python3，跳过 external 验证）"
+fi
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发\n'

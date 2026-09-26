@@ -510,6 +510,7 @@ internal/runtime/           编排层
   ├ instance.go             Instance 记录（task/service 共用）+ Paths + PathView
   ├ backend.go              Backend / Handle 接口 + Limiter(spawn) + Runner(build)
   ├ local.go                local backend（task/service 都是 systemd 瞬时 unit）+ BuildInner + verdict*
+  ├ external.go             external backend：转发一个已经跑着的后端（不启动/不停止/不回收）
   ├ proc_unix.go            processAlive + pid starttime（降级模式停止进程的身份校验）
   ├ run.go                  RunTask / StartService / StopService / Reap / Reconcile / ReconcileTasks
   │                         （Reaper.LastActive：由调用方提供「最近一次流量」；

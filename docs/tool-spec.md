@@ -143,6 +143,12 @@ lifecycle:                          # kind=service 必需
   maxLifetime: "12h"
   idleTTL: "1h"                     # sge backend 下被忽略（改由 h_rt 决定）
 
+# ── 转发一个已经跑着的后端（另一种 kind: service 的形态）──────
+# backend: external
+# external: {host: 127.0.0.1, port: 3838}
+# ingress: {healthcheck: {path: "/"}}
+# 详见 §6.1：SRCOS 只发布路由，不启动/不停止/不回收
+
 # ── 托管 agent 的凭据（仅 kind=service，可选）──────────────
 # 声明后，SRCOS 在实例启动时签发一枚 agent token（scope 与白名单来自这里，
 # 所以它是 owner 权限的子集），放到虚拟 home 的 $HOME/.srcos/agent-token
@@ -584,6 +590,34 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 > 大多数 SGE 站点**禁止计算节点上嵌套 `qsub`**，所以"用 annotask 投递"的工具**必须**在登录节点当提交器。
 > 注册时会交叉校验并直接报错。
 
+### 6.1 `backend: external` —— 转发一个已经跑着的后端
+
+有些需求不是「给我起一个」，而是「这个服务已经在跑，给我一条受管、可授权的路径」：
+
+```yaml
+kind: service
+backend: external
+external: {host: 127.0.0.1, port: 3838}   # 目标后端（已经存在）
+ingress: {healthcheck: {path: "/"}}
+# 不需要 command/entry/environment/resources/lifecycle
+```
+
+SRCOS **只发布路由**，不启动、不停止、不回收：
+
+- `command` / `entry` / `environment` / `requires_storages` / `agent` 在这里是**死配置**，
+  注册期直接拒绝（没有人会去跑它们）；`lifecycle` 也不需要（生命周期不归 SRCOS 管）
+- **`svc stop` 只撤路由 + 把记录标 `stopped`**，进程继续跑 —— SRCOS 不杀不是它起的进程
+- **空闲回收不适用**（`idleTTL`/`maxLifetime` 描述的是平台拥有的生命周期）
+- 健康检查仍然做：探不到就启动失败（后端不在就是不在）
+- 审计里记一条 `instance.forwarded`（带 endpoint）
+
+**为什么它比静态卡片好**：同一条转发管线、同一个 `Grant` 授权模型、同一个审计流、同一个目录。
+卡片仍然可用（用户可自助添加），但新东西应当写成工具。
+
+**`external.host` 目前必须是回环**（`127.0.0.1` / `::1` / `localhost`）：路由表只收回环端点
+（记录是本地进程可改的文件，回环限制是一道兵防线）。要转发**另一个主机**上的后端，
+今天用静态卡片，或在前面放一个 `ssh -L` 转发器。
+
 ---
 
 ## 7. 完成判定
@@ -658,6 +692,9 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `kind: service` 必须有 `ingress` + `lifecycle`（`port` 可选） | 拒绝注册 |
 | `kind: task` 不能有 `ingress` / `lifecycle`，必须有 `resources.walltime` | 拒绝注册 |
 | `ingress.backend_path` 必须绝对；`ingress.port` ≥ 0；`ingress.bwlimit` ≥ 0 | 拒绝注册 |
+| `backend: external` 必须有 `external: {host, port}`，且 host 为回环、port 在范围内 | 拒绝注册 |
+| `backend: external` 不得声明 `command`/`entry`/`environment`/`requires_storages`/`agent`/`resources` | 拒绝注册（跑了也没人用） |
+| `external` 只能配 `backend: external` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |
 | `sandbox: none` 不能有 `requires_storages` —— 声明的 storage 要 bind 进 mount namespace，而 `none` 不建 namespace | 拒绝注册 |
 | `agent` 只对 `kind: service` 合法（托管 agent 是长驻单元） | 拒绝注册 |
