@@ -164,6 +164,11 @@ Options:
 `/proxy/<用户名>/<工具 id>/` 上可达（网关从实例记录里重建路由表，CLI 与网关是两个进程也不需要重启网关）。
 同名时**活着的实例优先于静态卡片**，因为卡片只是手写的指针、可能已经指向没人监听的端口。
 
+**普通用户可以自助实例化**：被授权了某个 `kind: service` 工具的用户，在 `/tools/<id>` 页直接点
+「启动服务」就能起自己的实例，起好后页面上出现「打开服务」与「停止」；`/tasks/<id>` 详情页同样有
+「停止」按钮。走的是同一个写路径（Grant + submit scope + 配额），和 agent 经 MCP 的
+`srcos_start_service` / `srcos_cancel_instance` 完全一致——启动服务不再是管理员/CLI 的专属操作。
+
 ## 配置文件
 
 ### 用户配置 (`config/users/<用户名>.yaml`)
@@ -434,7 +439,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/logout` | 退出登录 |
 | `/favicon.ico` | 网关自身图标 |
 | `/api/services`、`/api/services/*` | 卡片增删改、布局调整的 REST API |
-| `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface` |
+| `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface`；`POST /api/tools/<id>/start` 启动一个 `kind: service` 工具（自助实例化，需授权） |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
 | `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
 | `/api/flows/*` | `POST /api/flows/<id>/run` 用 CSV 样本表展开并启动一个流程 |
@@ -485,6 +490,10 @@ curl -b cj http://<gateway>:30152/proxy/alice/websvc/     # 实例的根路径
   （`data/service-activity.yaml`），有开着的 WebSocket 也算活跃，所以正在用的服务不会被回收。
 - **重启网关不丢服务**：网关启动时会 reconcile（还活着就收养、已死就标 stopped），
   不是简单相信记录。
+- **不需要重启也会发现服务死掉**：除了启动时对账，网关每 10 秒的扫描还会做一次**存活对账**，
+  把「记录说 running、进程却已不在」的实例结算为 `stopped` 并撤掉路由（`systemd` 正在重启的
+  单元不会被误判——那是 `activating`，不是死亡）。`backend: external` 不参与，因为 SRCOS
+  不拥有那个进程。
 
 ## WebSocket 代理
 
@@ -915,6 +924,7 @@ PY
 | 工具 | 作用 |
 |---|---|
 | `srcos_submit_job` | 提交一个任务**并立即执行**，返回 `jobId` + `instanceId`。可选 `idempotency_key`：同一个 key 重试返回**第一次的结果**（包括失败那次），不会起第二个任务 |
+| `srcos_start_service` | 实例化一个 `kind: service` 工具（长驻 Web 应用），返回 `instanceId` + `routePath`；已在跑就先停后起 |
 | `srcos_cancel_instance` | 停掉一个在跑的实例（幂等：已结束的返回它的终态） |
 | `srcos_run_flow` | 用 CSV 样本表展开一个流程并启动（每个节点的工具都要在 token 的白名单里） |
 
@@ -1040,6 +1050,10 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 #   浏览器打开 http://<网关>/proxy/alice/shiny-demo/
 ```
 
+> 一旦这个工具被授权给 alice，她**不需要 shell**：登录后打开 `/tools/shiny-demo`，点「启动服务」
+> 就得到同一个实例；页面会出现「打开服务」与「停止」。管理员也可以在 `/admin` 代为启动。
+> 三条路径（Web / admin / CLI）执行的是同一个启动实现。
+
 **它演示了四件事**：
 
 | | 怎么做的 |
@@ -1064,6 +1078,7 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
   `StopService`，所以记录与用户看到的状态保持一致。
 - **启动服务**：以某个注册用户的身份启动一个 `kind: service` 工具（等价于 `srcos svc start --user`）；
   已存在就先停后起。它复用网关自己的 supervisor（同一端口池与路由表），不是另建一个 runner。
+  用户自己也可以启动被授权的服务（见「自助实例化」），管理员这条用于代为管理其他人的实例。
 - **工具与授权**：每个工具当前「谁能用」、配额，并提供内联编辑器（用户 / 组 / public / 配额）；
   「删除授权」等于**下架**（默认拒绝 → 只有管理员还能看到）。
 - **用户与组**：组是授权的最小单位；管理员列表可增删（不允许清空到 0：那等于把自己锁在外面）。
@@ -1202,6 +1217,11 @@ environment: r-miniforge          # 管理端声明 root / PATH / provides
 
 只交付命令 + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
 想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。
+
+**授权不在工具包里。** `tool.yaml` 没有 `grants:` 字段，而且采用**严格解码** —— 写了未知字段或
+拼错键名（如把 `max_lifetime` 写成 `maxLifetime`）会在**注册期**直接报错，不会静默忽略。
+谁能用哪个工具、配额多少，由管理员在 `config/grants.yaml`（或 `/admin`）决定；
+上架（把目录放进 `--tools-dir`）与授权是两件事，中间隔着一条 grant。
 
 ## License
 

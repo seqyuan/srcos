@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-26（**移除 dsh 路 B**——未验证 + 逆向 developer preview + 与自带 viewer 重叠，git `93351fc` 可恢复；**文档仓库卫生**：goprox 时代的 7 份旧报告与 2 张截图归档 `docs/archive/`；技术债 P0/P2 完成（删路 B + 归档 · `make e2e` · sandbox 规则 · 构建守卫 · 路由表派生 · 拆 server.go；T6 评估后不做）；**审计流第一期+第二期完成**（ADR-024）；**CI**（`.github/workflows/ci.yml`）；**管理端可启动服务**；**工具访问申请/审批流**（B3）；**`docs/agent-mcp-positioning.md`**。上一轮 2026-09-25：Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
+> 最后更新：2026-09-27（**服务实例化补齐三条**：①**自助启动**——被授权用户可在 `/tools/<id>` 点「启动服务」，`POST /api/tools/<id>/start` 走 `execute.StartService`（Grant × submit scope × 配额，与 MCP 的 `srcos_start_service` 同一实现）；②**运行期存活对账**——网关每 tick（10s）把「记录说 running、进程已不在」的 service 结算为 `stopped` 并撤路由（新增 `UnitGone`，不误判 systemd 重启中的 `activating`；`external` 跳过）；③**任务详情页可直接停止**。另：**`tool.yaml` 改严格解码**（未知字段/拼错键名在注册期拒绝，`grants:` 带提示），tool-spec 修正了三处与实现不符的表述（`grants:` 块、camelCase 键、workspace 共享/投递通道）。`make e2e` 扩到 16 步（新增自助启动/停止 + 杀死进程后由周期对账结算）。上一轮 2026-09-26：移除 dsh 路 B、审计流两期、CI、管理端可启动服务、B3 申请审批、统一服务实例化（ADR-026/027/028）；Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
 
 ---
 
@@ -19,8 +19,8 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，**25 个包 / 143 个 Go 文件 / 约 4.6 万行 /
-65 个测试文件 / 514 个测试函数**），在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，**28 个包 / 164 个 Go 文件 / 约 5.3 万行 /
+73 个测试文件 / 580+ 个测试函数**），在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了
 **工具平台**四层：工具契约、实例化运行时、存储 provider、授权模型。认证面两扇门：浏览器的 session
 cookie，与程序（agent / MCP 客户端）的 **agent token**（`Authorization: Bearer`，可在 `/tokens`
 自助生成、随时撤销）。全部在 node01 上端到端实测过。
@@ -496,7 +496,8 @@ internal/api/               管理 API（services）+ 工具/存储/任务 API�
   └ execute.go              POST /api/jobs（run）｜/api/jobs/<id>/cancel｜/api/flows/<id>/run
 internal/web/               内嵌模板（Go html 字符串）+ toolpages.go（生成式表单）
   ├ admin.go                /admin 控制台（服务端渲染 + 少量 JS 动作）
-  ├ service_status.go       「启动中」进度页 / 失败说明页
+  ├ templates.go            PageShell / 登录页 / 「启动中」进度页 / 失败说明页
+  ├ toolpages.go            工具目录 + 生成式表单；service 页含「启动/停止/打开」生命周期面板
   ├ resourcepage.go         /view 的 viewer 页面（文本/Markdown/表格/图片/PDF/HTML/目录 + 根选择页）+ NoticePage
   ├ markdown.go             服务端 Markdown（子集：先转义再自行输出标签，无需额外清洗器）
   ├ tasks.go                /tasks 与 /tasks/<id>（状态/产物/日志面板 + EventSource 客户端）

@@ -859,6 +859,34 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
+### ADR-029：服务实例化的默认受众是**用户**，不是管理员
+
+- **背景**：`kind: service`（shiny / Jupyter / 面板）的实例化最初只有两条路：CLI
+  `srcos svc start`（需 shell）与管理员控制台。被 Grant 授权的普通用户在 `/tools/<id>` 看到表单，
+  点「运行」却会被 `execute.Submit` 以「services are started, not submitted」拒绝 ——
+  他能“使用”一个服务工具，却不能自己把它起起来。这与 ADR-017（不碰 UI，但要给可用的 fallback 界面）
+  自相矛盾。
+- **决策**：实例化（启动 / 停止）是**服务工具的一种用法**，与提交任务同级，因此**走同一条写路径、
+  同一套授权**：
+  1. `execute.StartService` 是唯一实现：`visibleTool`（Grant）× `CanSubmitTool`（submit scope +
+     每工具白名单）× `checkQuota`（服务的资源占用与任务同一本账）× `kind == service`。
+  2. HTTP `POST /api/tools/<id>/start`、MCP `srcos_start_service`、Web `/tools/<id>` 的「启动服务」
+     三个前端都调它；停止复用已存在的 `POST /api/jobs/<id>/cancel` / `srcos_cancel_instance`。
+  3. 缓存失效：一个 `(用户, 工具)` 只有一个活实例，已在跑就先停后起（与 `svc start` 同一条
+     converge-on-one 规则），顺带释放替换所需的配额位。
+  4. 新 runner = 网关自己的 `Supervisor.ForUser(user)`：带上用户，**不**另建端口池/路由表
+     （否则同一端口会被发给两个实例）。
+- **不新开一整套服务生命周期 API**：停止、日志、产物、审计全部复用实例既有面；只新增
+  `start` 一个动词。
+- **与 ADR-027 的关系**：`external`（转发，不拥有进程）仍然只能由声明它的工具决定，与这条
+  的自助实例化不冲突 —— 用户能启动的是 `backend: local`/`sge` 的服务。
+- **运行期监控的补完**（实现层，不是新决策）：服务此前只在网关**启动**时对账（`Reconcile`），
+  启动后死掉的服务会永远停在 `running`（且路由指向死端口）。新增 `Runner.ReconcileServices`
+  放在扫描 tick（10s）上，用严格的 `UnitGone` 区分「systemd 正在重启（`activating`）」与「真正死亡」，
+  只后者才结算；`external` 跳过（不是 SRCOS 的进程）。
+
+---
+
 ## 6. 路线图
 
 ### Phase 0：基线 ✅
@@ -908,6 +936,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `internal/route` 动态路由表（非回环目标被拒；`DeleteInstance` 有归属栅栏）
 - [x] `internal/portpool` 端口池（真 bind 探测、并发安全、`Reserve` 供 reconcile）
 - [x] **`Reconcile`**：重启后收养仍活着的实例（重新占端口 + 重发路由），把记录与真实状态对齐
+- [x] **`ReconcileServices`**（2026-09-27，ADR-029）：把服务存活对账从「只在启动时」搬到扫描 tick（10s）；
+      `Local.UnitGone` 区分 systemd 正在重启（`activating`，不动）与真正死亡（结算 `stopped` + 撤路由 +
+      撤销实例凭据）；`external` 跳过（不是 SRCOS 的进程）。以前服务死后会永远停在 `running`
 - [x] **`Reaper`**：`maxLifetime` / `idleTTL`；有开放 WebSocket 时不算空闲；SGE 上默认不做空闲回收（ADR-015）。
       2026-09-22 补：`Reaper.LastActive` 让调用方（网关）提供「最近一次流量」，
       `idleTTL` 才真的是"没人用"而不是"启动久"；网关侧每次扫描 tick 自动回收
@@ -943,6 +974,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] **用户级配额聚合**：`max_cpu` / `max_memory` / `max_instances`，按存活实例求和；终态实例不占名额
 - [x] CLI `srcos grant list|show|set|rm|group|admin|allow|deny`
 - [x] HTTP 面：`/api/tools`、`/api/tools/<id>`、`/api/paths`、`/api/jobs` + `/tools`、`/tools/<id>` 生成式表单
+- [x] **服务自助实例化**（2026-09-27，ADR-029）：被授权用户在 `/tools/<id>` 点「启动服务」即起自己的实例
+      （`POST /api/tools/<id>/start` → `execute.StartService`，Grant × submit scope × 配额）；
+      停止复用 `/api/jobs/<id>/cancel`；MCP 对称工具 `srcos_start_service`
 - [x] **原语控件 `srcos-path-picker`**（Web Component，工具自建 UI 也能用）
 - [x] **生成式表单**（ADR-017 的必要补全：只有 `work.sh` + `interface` 的工具立即可用）
 - [x] **agent token 认证面**（`config/agent-tokens.yaml`，只存 hash，scope + 过期 + 标签）：
@@ -1134,4 +1168,6 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **统一服务实例化 · 步骤 4：`ingress` 补齐与语义澄清** —— `ingress.websocket`（`*bool`，**默认开**：app server 通常需要，没人升级时也无害）与 `ingress.bwlimit`（字节/秒，0=不限）接进 `route.Entry`——代理侧与 `serviceForEntry` 早就支持，缺的只是实例这条线；`ingress.port` 变**可选**并写清语义（**只对 sge 有意义**：作业在计算节点上偏好的端口，实际端口由 rendezvous 公布；local 一律用 `$SRCOS_PORT`）。样例与 e2e 的服务工具去掉无意义的 `port: 8080`；shiny-demo 显式写 `websocket: true` 当文档。单测：未写 port 合法、负值被拒、websocket 默认开、两者确实到达 route.Entry |
 | 2026-09-26 | **统一服务实例化 · 步骤 5：`backend: external`（转发既存后端成为工具的一种后端）** —— `external: {host, port}`；SRCOS **只发布路由**：不启动、不停止（`svc stop` 只撤路由）、不回收（`isReapable` 跳过）、不接资源限；`command`/`entry`/`environment`/`requires_storages`/`agent`/`resources` 在这里是死配置，注册期直接拒绝；`lifecycle` 也不需要。端点为回环（路由表只收回环，是一道兵防线），另一主机上的后端仍走静态卡片或 `ssh -L`。健康检查照做；审计记 `instance.forwarded`。**顺手修了一个真 bug**：`inst.Endpoint` 从不取自 `h.Endpoint()`，而会自己发布端点的后端（SGE 的 ssh -L 隧道）本该用它 —— 于是它的记录与路由都指向端口池的端口（只有真集群能撞上）。验收：机器上真实在跑的 `shiny-server:3838` 作为 external 工具 → 经网关 200 + `Welcome to Shiny Server!` → 停止后路由撤、上游仍 200。e2e 第 15 步覆盖 |
 | 2026-09-26 | **统一服务实例化 · 步骤 6：content digest（工具源码管理）** —— `tool.Digest(dir)`：包内容的 sha256（相对路径 + 权限 + 内容，稳定排序），加载时算一次；排除 `__pycache__`/`node_modules`/`.git`/`.DS_Store`/`*.pyc`（否则代码没动摘要也会变）。记进 **实例记录**（`tool_digest`）、**审计**（`Target.Digest`，CLI 与管理页显示 `demo@0.1.0#a58e88795f2a`）与 **`tool list` / `/api/tools`**。意义：`version` 是人写的声明，digest 是实际字节 —— “到底跑的哪份代码”变得可答。**明确不是签名**（那是审计外发那一层，ADR-024）。git 记录（HEAD + dirty）**暂不做**：它要为每次加载起一个子进程，收益不足以现在付；需要时再加。单测：内容变→摘要变、加载稳定、垃圾目录不参与 |
+| 2026-09-27 | **tool.yaml 严格解码 + 上架契约三处文档修正** —— ① `tool.Load` 用 `yaml.Decoder{KnownFields:true}`：未知字段（尤其是 tool-spec 曾举例、但代码从未支持的 `grants:`）与拼错键名（`maxLifetime`/`idleTTL`/`startupGrace`）在**注册期直接报错**，不再静默忽略（`grants:` 带一条指向 `config/grants.yaml` 的提示）；② tool-spec 修正：删除 `grants:` 块与 camelCase 键（改为 `max_lifetime`/`idle_ttl`/`startup_grace`）、修正 §0.2「service 与 task 共享 workspace」（workspace 是 per `(user, tool)`）、改清 §3 的投递通道（文件系统通道 vs `POST /api/jobs`；沙箱 UI 不能写别的工具的 `$SRCOS_JOB_DIR`）；③ 新增 §9 规则行与 §11 清单项。单测：未知字段被拒（含 `grants:`）+ `tool validate` 两个示例仍绿 |
+| 2026-09-27 | **服务实例化对用户开放 + 运行期存活对账（ADR-029）** —— ① 自助实例化：`execute.StartService`（Grant × submit scope × 配额 × kind）是唯一实现；`POST /api/tools/<id>/start`、MCP `srcos_start_service`、`/tools/<id>` 的「启动/停止/打开服务」面板三个前端共用；停止复用 `/api/jobs/<id>/cancel`（任务页也加了「停止」按钮）。② 运行期对账：`Runner.ReconcileServices` 进扫描 tick，`Local.UnitGone` 区分`activating`（重启中，不动）与真死（结算 stopped + 撤路由 + 撤销实例凭据），`external` 跳过。③ 单测（reconcile×5、StartService 授权、web 渲染×4）+ **e2e 扩到 16 步**（自助启动/访问/停止 + 杀死进程后由周期对账结算）全绿 |
 | 2026-09-26 | **统一服务实例化 · 步骤 7：ADR-026/027/028 + 文档收尾** —— 三条决策落到 roadmap §5：**026 服务只有一条实例化路径**（具名环境 + 声明式命令 + ingress 补齐；两级校验；不做宿主路径入包/环境当数据/shell）· **027 转发既存后端是一种 backend**（`external`：不启动/不停止/不回收；死配置拒绝；回环限制写明；顺手修 SGE 端点记录 bug）· **028 工具内容摘要**（digest 记入实例/审计/目录；明确不是签名；git 记录暂不做）。合同文档（tool-spec §2.1–2.4 / §5.4.1 / §6.1 / §9）、README、AGENTS「明确不做」已同步。计划文档标记为已实现 |

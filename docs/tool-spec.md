@@ -26,16 +26,19 @@ SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构�
 | | `kind: service` | `kind: task` |
 |---|---|---|
 | 形态 | 长驻服务（shiny、Jupyter、agent…） | 一次性任务（跑完即止） |
-| 生命周期 | 无限（`lifecycle.maxLifetime` 封顶），崩溃自动重启 | `resources.walltime` 封顶，跑完即止，不重启 |
+| 生命周期 | 无限（`lifecycle.max_lifetime` 封顶），崩溃自动重启 | `resources.walltime` 封顶，跑完即止，不重启 |
 | 对外端口 | 有（`ingress.port`，网关代理） | 无（只有退出码） |
 | 提交路径 / 资源限额 / 挂载隔离 | **完全相同** | **完全相同** |
 
-**一个工具可以同时提供两者**：例如 `shiny-qc` 是 `service`（用户在页面上配参数），而它产生的运行请求是 `task`。
-两者共享同一个 workspace，因此 `service` 写下的数据，`task` 直接可读。
+**"UI + 执行"成对时，注册两个工具**：一个 `kind: service` 的 UI 工具（如 `shiny-qc`），
+一个 `kind: task` 的执行工具（如 `qc-run`），让前者产生后者的任务。
 
-> **注意**：`service` 与 `task` 是**两个独立的工具注册项**（两个 `tool.yaml`）还是一个 `tool.yaml` 带两个 `kind`，
-> 由 Phase 1 的实现决定；本 spec 按**一个 `tool.yaml` 一个 `kind`** 描述（更简单）。
-> 需要"UI + 执行"成对时，注册两个工具（如 `shiny-qc` 与 `qc-run`），让前者产生后者的任务。
+> **注意**：workspace 是 **per `(用户, 工具)`** 的（`data/ws/<user>/<tool>`），所以**两个工具不共享 workspace**。
+> UI 工具把任务提交给执行工具走 `POST /api/jobs`（`execute.Submit` 会写进**目标任务**的投递目录，
+> 并执行完整的授权/配额校验）；跨工具共享**数据**要显式走 `requires_storages`（管理端声明），
+> 不要假设 `/workspace` 互通。详见 §3 与 §5.4。
+>
+> 本 spec 按**一个 `tool.yaml` 一个 `kind`** 描述。
 
 ---
 
@@ -134,14 +137,14 @@ ingress:                            # kind=service 必需
   healthcheck:
     path: "/"                       # 探活路径（不要与 backend_path 搞混）
     timeout: "120s"                 # 单次探活超时
-    startupGrace: "180s"            # 冷启动宽限期
+    startup_grace: "180s"           # 冷启动宽限期
   backend_path: "/app"               # 可选：后端自己期望的前缀（默认在它自己的根）
   websocket: true                   # 可选，默认 true：是否允许协议升级穿过代理
   bwlimit: 10485760                 # 可选，字节/秒，0 = 不限（与静态卡片共用同一套限速）
 lifecycle:                          # kind=service 必需
   restart: always                   # always | on-failure | never
-  maxLifetime: "12h"
-  idleTTL: "1h"                     # sge backend 下被忽略（改由 h_rt 决定）
+  max_lifetime: "12h"
+  idle_ttl: "1h"                     # sge backend 下被忽略（改由 h_rt 决定）
 
 # ── 转发一个已经跑着的后端（另一种 kind: service 的形态）──────
 # backend: external
@@ -167,11 +170,12 @@ workspace:
   init_from: workspace-template/     # 可选，首次实例化时 copy
 home:
   init_from: home-template/          # 可选
-
-# ── 授权（也可集中放 config/grants.yaml）───────────────────
-grants:
-  allow_groups: [bio-team]
 ```
+
+> **`tool.yaml` 里没有授权字段，也不接受任何未知字段。** 授权只存在于 `config/grants.yaml`
+> （或 `srcos grant`）—— 一个工具包不能给自己授权。`Load` 用**严格解码**：写错键名（如把
+> `max_lifetime` 写成 `maxLifetime`）或写一个平台不认识的键（如 `grants:`）都会在**注册期**
+> 直接报错，而不是被静默忽略（见 §9）。
 
 ### 2.2 `interface.inputs[]`
 
@@ -242,7 +246,22 @@ grants:
 
 ## 3. `job.json` 规范
 
-工具 UI 往 `$SRCOS_JOB_DIR/<job-name>/` 写 `job.json` + `work.sh`，SRCOS 扫描目录发现任务。
+一个任务 = 投递目录里的一个 `job.json`（可选再加一个 `work.sh`）。**投递目录即队列**：
+SRCOS 扫描它、发现任务，没有提交守护进程、没有消息中间件。
+
+**谁能在哪写这个目录**（两条通道，能力不同）：
+
+| 通道 | 谁用 | 能带每-run 脚本吗 | 授权/配额 |
+|---|---|---|---|
+| **文件系统**：目标 **task 工具**的 `data/ws/<user>/<tool>/jobs/`（沙箱内即该工具的 `$SRCOS_JOB_DIR`） | CLI、宿主机上有文件权限的应用 | ✅ `job.json.command` 或同目录 `work.sh` | 队列消费时校验 |
+| **REST**：`POST /api/jobs`（`{"tool":…, "params":…}`） | 沙箱内的 UI（用 `$SRCOS_API` + 实例凭据，见 §5.4.2） | ❌ 只收 params/resources/outputs/tags/idempotencyKey | 立即校验（`execute.Submit`） |
+
+> **重要：workspace 是 per `(用户, 工具)` 的。** 每个工具只能看到**自己**的 `/workspace`，
+> 所以一个 `kind: service` 的 UI **不能**写 `$SRCOS_JOB_DIR` 去驱动**另一个** task 工具
+> （那是它自己的队列位置，而且队列只扫 `kind: task` 的工具）。
+> UI 要发起任务，用 **`POST /api/jobs`**（把 `tool` 指向那个 task 工具）；
+> 要每次运行带自定义脚本，用**文件系统通道**（CLI `srcos job submit ... [work.sh]`，
+> 或宿主机上有写权限的应用），或在那个 task 工具的 `command:`/`entry:` 里把逻辑做成参数化。
 
 `work.sh` 的来源有两条路，SRCOS 按以下顺序决定（**Phase 1 实现已冻结此规则**）：
 
@@ -252,7 +271,8 @@ grants:
 | 2 | 任务目录里有 `work.sh` | `bash work.sh` | `$SRCOS_JOB_ROOT` |
 | 3 | 都没有 | `bash /tool/<tool.yaml 的 entry>` | `$SRCOS_JOB_ROOT` |
 
-规则 2 就是"工具 UI 为本次运行生成 `work.sh`"的通道；规则 3 是"直接用工具包里的入口"。
+规则 2 是“提交方为本次运行提供 `work.sh`”的通道（**文件系统通道**：CLI 或宿主机上有写权限的应用；
+沙箱内的 UI 走 REST，见上表）；规则 3 是“直接用工具包里的入口”。
 两者都以任务目录为 cwd，所以脚本可以引用同目录的兄弟文件而不写绝对路径。
 
 ```json
@@ -627,7 +647,7 @@ SRCOS **只发布路由**，不启动、不停止、不回收：
 - `command` / `entry` / `environment` / `requires_storages` / `agent` 在这里是**死配置**，
   注册期直接拒绝（没有人会去跑它们）；`lifecycle` 也不需要（生命周期不归 SRCOS 管）
 - **`svc stop` 只撤路由 + 把记录标 `stopped`**，进程继续跑 —— SRCOS 不杀不是它起的进程
-- **空闲回收不适用**（`idleTTL`/`maxLifetime` 描述的是平台拥有的生命周期）
+- **空闲回收不适用**（`idle_ttl`/`max_lifetime` 描述的是平台拥有的生命周期）
 - 健康检查仍然做：探不到就启动失败（后端不在就是不在）
 - 审计里记一条 `instance.forwarded`（带 endpoint）
 
@@ -704,6 +724,7 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 
 | 规则 | 违反后果 |
 |---|---|
+| `tool.yaml` 出现**未知字段**（含已被移除的 `grants:`）或**拼错键名**（如 `maxLifetime`） | 拒绝注册（严格解码；不静默忽略） |
 | `id` 全局唯一且合法 | 拒绝注册 |
 | `command` 与 `entry` **恰好给一个**（都给/都不给都不行） | 拒绝注册 |
 | `command[0]` 非空；`${...}` 只能引用 SRCOS 给这个 `kind` 注入的变量，括号必须闭合 | 拒绝注册（错在注册时，不是运行时） |
@@ -846,7 +867,13 @@ srcos job submit -n "hello S001-S005" \
   --tag demo=1 \
   work.sh
 
-# 方式二：工具 UI 往 $SRCOS_JOB_DIR/demo/ 写 job.json + work.sh
+# 方式二：宿主机上有文件权限的应用，往 hello-fanout 的投递目录写 job.json（+ 可选 work.sh）
+#         <config>/data/ws/<user>/hello-fanout/jobs/<job-name>/
+
+# 方式三：沙箱内的 UI —— POST $SRCOS_API/jobs（params 形式，不带自定义脚本）
+#         curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+#              -d '{"tool":"hello-fanout","params":{"samples":"S001,S002"}}' \
+#              $SRCOS_API/jobs
 ```
 
 **预期结果**：任务列表出现一条 `hello S001-S005`，状态 `succeeded`，产物里有 `/workspace/out/S001.txt … S005.txt`，日志含 `[run]` 与 `[done]`。
@@ -863,6 +890,8 @@ srcos job submit -n "hello S001-S005" \
 - [ ] `work.sh` 会阻塞到所有工作完成吗？如果内部是提交器，声明 `doneWhen` 了吗？
 - [ ] 没有 `&` / `nohup` 后台化吧？
 - [ ] `resources` 是**聚合需求**吗（内部并行度乘过了）？
+- [ ] 没有写平台不认识的键吧（尤其是 `grants:` —— 授权在 `config/grants.yaml`，不在 `tool.yaml`）？
+      严格解码会在注册期报错，不会静默忽略。
 - [ ] `backend` 与 `internal.executor` 的组合合法吗（§6）？
 - [ ] `type: path` 的 `from` 在 `requires_storages` 里吗？
 - [ ] 把目录单独拷给别人，对方能看懂它在干什么、需要什么吗？
