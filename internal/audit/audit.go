@@ -53,8 +53,8 @@ type Actor struct {
 	Kind string `json:"kind,omitempty"`
 	// TokenID/Label identify the agent token when Kind is agent_token. The
 	// plaintext is never stored anywhere, so an auditor matches an id.
-	TokenID string   `json:"token_id,omitempty"`
-	Label   string   `json:"label,omitempty"`
+	TokenID string `json:"token_id,omitempty"`
+	Label   string `json:"label,omitempty"`
 	// Instance, when set, names the hosted service instance a minted token
 	// belongs to (A1): it is how the audit distinguishes "an instance did this"
 	// from "a person did this".
