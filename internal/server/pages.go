@@ -367,7 +367,16 @@ func (s *Server) handleToolFormPage(w http.ResponseWriter, r *http.Request) {
 		if t.ID != id {
 			continue
 		}
-		sendHTML(w, 200, web.ToolFormPage(s.siteTitle, username, t, s.storagesForTool(t)))
+		// A service page is also its lifecycle surface: show the caller's own
+		// instance (there is at most one per user+tool), so the page can offer
+		// "open" and "stop" without a second request.
+		var inst *inspect.InstanceView
+		if t.Kind == tool.KindService {
+			if views, verr := s.reader().Instances(username, t.ID, string(tool.KindService)); verr == nil && len(views) > 0 {
+				inst = &views[0]
+			}
+		}
+		sendHTML(w, 200, web.ToolFormPage(s.siteTitle, username, t, s.storagesForTool(t), inst))
 		return
 	}
 	sendHTML(w, 404, web.NotFoundPage(s.siteTitle))

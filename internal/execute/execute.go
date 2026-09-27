@@ -387,6 +387,134 @@ func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, need
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// start a service
+// ─────────────────────────────────────────────────────────────────────────
+
+// StartServiceRequest is one service instantiation: which tool, and the
+// parameters it runs with.
+type StartServiceRequest struct {
+	Tool   string            `json:"tool"`
+	Name   string            `json:"name"`
+	Params map[string]any    `json:"params"`
+	Tags   map[string]string `json:"tags"`
+	// Resources may only *lower* the tool's ceiling (job.Validate enforces it),
+	// exactly as for a task: a service holds its resources for as long as it
+	// runs, so the user may want to shrink one that is too hungry.
+	Resources *tool.Resources `json:"resources,omitempty"`
+}
+
+// StartServiceResult is a service that has been started. State is running when
+// the healthcheck passed; a tool that came up and then failed is reported with
+// its own state and error rather than as a transport error, because "it
+// started and died" is information the caller needs.
+type StartServiceResult struct {
+	InstanceID string `json:"instanceId"`
+	Tool       string `json:"tool"`
+	State      string `json:"state"`
+	Error      string `json:"error,omitempty"`
+	RoutePath  string `json:"routePath,omitempty"`
+	Endpoint   string `json:"endpoint,omitempty"`
+}
+
+// StartService instantiates a long-running service tool for the caller.
+//
+// It is the self-service half of the service lifecycle (the admin console and
+// `srcos svc start` are the operator half), and it applies exactly the same
+// authorization a submission does:
+//
+//   - the tool must be within the caller's Grant (visibleTool),
+//   - the credential must carry submit scope for it (CanSubmitTool), so a
+//     read-only agent token cannot start a service,
+//   - the aggregate quota still applies (a service holds its resources for as
+//     long as it runs).
+//
+// A service is one live instance per (user, tool), so a live predecessor is
+// stopped first — the same converge-on-one-service rule `svc start` uses —
+// which also frees the quota slot the replacement needs. The runner is the
+// gateway's own (via Supervisor.ForUser): a second runner would hand the same
+// port to two instances.
+func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity, req StartServiceRequest) (res *StartServiceResult, err error) {
+	toolID := strings.TrimSpace(req.Tool)
+	var t *tool.Tool
+	defer func() {
+		ev := audit.NewEvent(ident.AuditActor(), "instance.started").
+			WithTarget("tool", toolID, versionOf(t)).
+			WithDigest(digestOf(t)).
+			WithParams(req.Params)
+		if res != nil {
+			ev = ev.WithRefs(map[string]string{"instance": res.InstanceID})
+		}
+		c.recordAudit(ev, err)
+	}()
+	if toolID == "" {
+		return nil, fmt.Errorf("%w: tool is required", ErrBadRequest)
+	}
+	if !ident.CanSubmitTool(toolID) {
+		return nil, fmt.Errorf("%w: this credential may not start tool %s%s", ErrForbidden, toolID, allowlistHint(ident))
+	}
+	t, err = c.visibleTool(ident.User, toolID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Kind != tool.KindService {
+		return nil, fmt.Errorf("%w: tool %s is a %s; tasks are submitted, not started", ErrBadRequest, t.ID, t.Kind)
+	}
+
+	j := &job.Job{
+		SchemaVersion: 1,
+		Name:          strings.TrimSpace(req.Name),
+		Params:        req.Params,
+		Tags:          req.Tags,
+		Resources:     req.Resources,
+	}
+	if j.Name == "" {
+		j.Name = t.Name
+	}
+	if verr := job.Validate(j, t); verr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadRequest, verr)
+	}
+
+	runner, err := c.startRunner(ident.User)
+	if err != nil {
+		return nil, err
+	}
+
+	// Serialize the stop-then-quota decision with other write-path operations:
+	// the predecessor holds the quota slot the replacement needs, and two
+	// concurrent starts must not both pass the check. The start itself is *not*
+	// under the lock — it blocks on the healthcheck for up to a minute.
+	c.mu.Lock()
+	prevPath := runtime.InstancePath(c.opts.ConfigDir, runtime.InstanceID(ident.User, t.ID, ""))
+	if prev, lerr := runtime.LoadInstance(prevPath); lerr == nil && !prev.State.Terminal() {
+		_ = runner.StopService(ctx, t, prev)
+	}
+	if qerr := c.checkQuota(ident.User, t, j); qerr != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, qerr)
+	}
+	c.mu.Unlock()
+
+	inst, err := runner.StartService(ctx, t, j)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	// Persist the parameters next to the workspace so a gateway restart (or a
+	// later restart of the service) can rebuild it with the same inputs.
+	if werr := runtime.WriteServiceManifest(c.opts.ConfigDir, ident.User, t.ID, j); werr != nil {
+		log.Printf("[srcos] service manifest %s/%s: %v", ident.User, t.ID, werr)
+	}
+	auditLine(ident, "instance.started", fmt.Sprintf("tool=%s instance=%s state=%s", t.ID, inst.ID, inst.State))
+	return &StartServiceResult{
+		InstanceID: inst.ID,
+		Tool:       t.ID,
+		State:      string(inst.State),
+		Error:      inst.Error,
+		RoutePath:  inst.RoutePath,
+		Endpoint:   inst.Endpoint,
+	}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // run flow
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -637,6 +765,19 @@ func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
 func (c *Controller) supervisor(user string) (*runtime.Runner, error) {
 	if c.opts.Supervisor != nil {
 		return c.opts.Supervisor, nil
+	}
+	return c.runnerFor(user)
+}
+
+// startRunner is the runner used to *start* a service. Unlike supervisor it
+// carries the user (the instance is theirs) while still sharing the gateway's
+// port pool and routing table — `ForUser` is a shallow copy for exactly this.
+// A deployment without a Supervisor falls back to the per-user runner, which
+// for a service has no port pool and fails loudly rather than handing out a
+// port it does not own.
+func (c *Controller) startRunner(user string) (*runtime.Runner, error) {
+	if c.opts.Supervisor != nil {
+		return c.opts.Supervisor.ForUser(user), nil
 	}
 	return c.runnerFor(user)
 }

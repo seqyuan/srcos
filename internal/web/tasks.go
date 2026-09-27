@@ -141,6 +141,20 @@ func TaskPage(siteTitle string, view inspect.InstanceView, artifacts []inspect.A
 	}
 	fmt.Fprintf(&b, `<h1>%s <span class="tk-tag %s" id="state-tag">%s</span></h1>`, esc(name), esc(m.Class), esc(m.Label))
 
+	// The actions a live instance affords: open it (a service) or stop it (a
+	// task or a service). Both go through the same endpoints the tool page and
+	// the MCP server use, so the control surface has one implementation.
+	acts := ""
+	if !stateFinished(view.State) && view.RoutePath != "" {
+		acts += fmt.Sprintf(`<a class="tk-open" href="%s/">打开服务</a>`, esc(view.RoutePath))
+	}
+	if !stateFinished(view.State) {
+		acts += fmt.Sprintf(`<button type="button" class="tk-stop" onclick="tkStop('%s')">停止</button>`, esc(view.ID))
+	}
+	if acts != "" {
+		fmt.Fprintf(&b, `<p class="tk-actions">%s</p>`, acts)
+	}
+
 	// Metadata: only what this instance actually has (a task has no endpoint,
 	// a service has no exit code).
 	rows := [][2]string{
@@ -299,6 +313,22 @@ const taskLogScript = `
   var ind = document.getElementById('live-ind');
   var auto = document.getElementById('autoscroll');
   var tag = document.getElementById('state-tag');
+
+  // The stop button must work whether or not the log panel streamed, so it is
+  // installed before the early return below.
+  window.tkStop = function (id) {
+    if (!confirm('停止这个实例？')) return;
+    fetch('/api/jobs/' + encodeURIComponent(id) + '/cancel', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: '{}'
+    }).then(function (r) {
+      return r.json().then(function (b) { return { ok: r.ok, body: b }; });
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : '停止失败');
+      location.reload();
+    }).catch(function (err) { alert('错误：' + (err.message || err)); });
+  };
+
   if (!pre) return;
   // Without EventSource (or without an id) the server-rendered tail stands.
   if (!boot.id || !window.EventSource) {
@@ -365,6 +395,11 @@ const tasksCSS = `<style>
 .tk-tag.live { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-bg); }
 .dark .tk-tag.ok { color: #4cc46a; }
 .dark .tk-tag.warn { color: #e3b341; }
+.tk-actions { display: flex; gap: 12px; align-items: center; margin: 10px 0 4px; }
+.tk-actions a { font-size: 13px; color: var(--accent); text-decoration: none; }
+.tk-actions a:hover { text-decoration: underline; }
+.tk-stop { padding: 5px 16px; border-radius: var(--r-pill); border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); background: transparent; color: var(--danger); font-size: 12.5px; cursor: pointer; }
+.tk-stop:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .tk-meta dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; padding: 14px 18px; font-size: 13px; }
 .tk-meta dt { color: var(--text-muted); }
 .tk-meta dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }

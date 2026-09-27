@@ -400,6 +400,36 @@ func writeTools() []tool {
 			},
 		},
 		{
+			name:  "srcos_start_service",
+			title: "Start a service",
+			description: "Instantiate a kind=service tool (a long-running web app: Shiny, Jupyter, a dashboard). " +
+				"A service is one live instance per (user, tool), so starting one that is already running replaces " +
+				"it. Returns instanceId, state and routePath once the healthcheck passes (a first start can take a " +
+				"minute). Requires an agent token with the submit scope, and (when the token carries a submit " +
+				"allowlist) this tool must be in it.",
+			write: true,
+			inputSchema: objectSchema(map[string]any{
+				"tool":      stringProp("Tool id, as listed by srcos_list_tools; must be kind=service"),
+				"params":    objectProp("Interface inputs, keyed by input name (see srcos_describe_tool)"),
+				"name":      stringProp("Optional display name for the instance"),
+				"tags":      objectProp("Optional: key/value tags recorded with the instance"),
+				"resources": objectProp("Optional: lower the tool's resource ceiling (cpu / memory)"),
+			}, []string{"tool"}),
+			call: func(ctx context.Context, e env, args map[string]any) (any, error) {
+				toolID, err := requireString(args, "tool")
+				if err != nil {
+					return nil, err
+				}
+				return e.exec.StartService(ctx, e.ident, execute.StartServiceRequest{
+					Tool:      toolID,
+					Name:      optString(args, "name"),
+					Params:    optObject(args, "params"),
+					Tags:      optStringMap(args, "tags"),
+					Resources: optResources(args, "resources"),
+				})
+			},
+		},
+		{
 			name:  "srcos_cancel_instance",
 			title: "Cancel an instance",
 			description: "Stop a running task or service instance. Idempotent: cancelling something that " +

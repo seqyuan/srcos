@@ -366,6 +366,44 @@ func TestSubmitHonoursGrantAndAllowlist(t *testing.T) {
 	}
 }
 
+// Starting a service applies the same two-dimensional authorization as a
+// submission, plus the kind check: a task is submitted, not started. Every one
+// of these decisions is made before a runner is touched, so no process or port
+// is involved.
+func TestStartServiceChecksAuthorityAndKind(t *testing.T) {
+	policy, err := grant.New(nil, nil, []grant.Grant{
+		{Tool: "web", Public: true},
+		{Tool: "demo", Public: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, policy)
+	ctx := context.Background()
+	open := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, nil)
+
+	if _, err := f.StartService(ctx, open, StartServiceRequest{}); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("no tool = %v, want ErrBadRequest", err)
+	}
+	if _, err := f.StartService(ctx, open, StartServiceRequest{Tool: "nope"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown tool = %v, want ErrNotFound", err)
+	}
+	// A task tool is a submission, not a service instantiation.
+	if _, err := f.StartService(ctx, open, StartServiceRequest{Tool: "demo"}); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("task tool = %v, want ErrBadRequest", err)
+	}
+	// A read-only credential may not start anything.
+	readOnly := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeRead}, nil)
+	if _, err := f.StartService(ctx, readOnly, StartServiceRequest{Tool: "web"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("read-only token = %v, want ErrForbidden", err)
+	}
+	// The submit allowlist narrows the tool dimension, exactly as for submit.
+	narrowed := tokenIdentity(t, "alice", []agenttoken.Scope{agenttoken.ScopeSubmit}, []string{"demo"})
+	if _, err := f.StartService(ctx, narrowed, StartServiceRequest{Tool: "web"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("allowlist miss = %v, want ErrForbidden", err)
+	}
+}
+
 // A submission is a drop-box entry (ADR-004) plus a *pending* record, so the
 // id is addressable before anything runs — and the queue, not the request, is
 // what starts it.

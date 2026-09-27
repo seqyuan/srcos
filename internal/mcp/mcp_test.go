@@ -512,7 +512,7 @@ func TestWriteToolsAreOfferedOnlyToSubmitTokens(t *testing.T) {
 
 	// A read-only token sees exactly the read surface it has.
 	read := h.toolNames(t)
-	for _, name := range []string{"srcos_submit_job", "srcos_cancel_instance", "srcos_run_flow"} {
+	for _, name := range []string{"srcos_submit_job", "srcos_start_service", "srcos_cancel_instance", "srcos_run_flow"} {
 		if _, ok := read[name]; ok {
 			t.Errorf("a read-only token was offered %s", name)
 		}
@@ -526,7 +526,7 @@ func TestWriteToolsAreOfferedOnlyToSubmitTokens(t *testing.T) {
 	// A submit token sees them, annotated as writes.
 	var write map[string]map[string]any
 	h.useToken(h.submitToken, func() { write = h.toolNames(t) })
-	for _, name := range []string{"srcos_submit_job", "srcos_cancel_instance", "srcos_run_flow"} {
+	for _, name := range []string{"srcos_submit_job", "srcos_start_service", "srcos_cancel_instance", "srcos_run_flow"} {
 		tool, ok := write[name]
 		if !ok {
 			t.Fatalf("a submit token was not offered %s", name)
@@ -566,9 +566,14 @@ func TestWriteToolRefusedWithoutTheSubmitScope(t *testing.T) {
 	h := newHarness(t)
 	// The read token knows the name (the listing hides it, the name is guessable)
 	// and must still be refused.
-	text := h.callToolError(t, "srcos_submit_job", `{"tool":"demo","params":{"ref":"/data","samples":"S1"}}`)
-	if !strings.Contains(text, "submit") {
-		t.Errorf("refusal = %q", text)
+	for _, call := range []struct{ name, args string }{
+		{"srcos_submit_job", `{"tool":"demo","params":{"ref":"/data","samples":"S1"}}`},
+		{"srcos_start_service", `{"tool":"web"}`},
+	} {
+		text := h.callToolError(t, call.name, call.args)
+		if !strings.Contains(text, "submit") {
+			t.Errorf("%s refusal = %q", call.name, text)
+		}
 	}
 }
 

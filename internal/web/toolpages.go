@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/inspect"
@@ -103,8 +104,14 @@ function reqAsk(tool) {
 </script>`
 
 // ToolFormPage renders a form for one tool, built entirely from its interface.
-func ToolFormPage(siteTitle, username string, t *tool.Tool, storages []storage.Storage) string {
+//
+// For a `kind: service` tool the page is also its lifecycle surface: the same
+// form starts (or replaces) the instance, and a live instance gets an "open"
+// link and a stop button. `inst` is the caller's current instance of this tool,
+// or nil when there is none (and nil for a task, which has no lifecycle).
+func ToolFormPage(siteTitle, username string, t *tool.Tool, storages []storage.Storage, inst *inspect.InstanceView) string {
 	var b strings.Builder
+	b.WriteString(toolFormCSS)
 	b.WriteString(`<main class="wrap">`)
 	fmt.Fprintf(&b, `<p class="crumb"><a href="/tools">工具</a> / %s</p>`, esc(t.Name))
 	fmt.Fprintf(&b, `<h1>%s <span class="badge">%s</span></h1>`, esc(t.Name), esc(string(t.Kind)))
@@ -112,10 +119,19 @@ func ToolFormPage(siteTitle, username string, t *tool.Tool, storages []storage.S
 		fmt.Fprintf(&b, `<p class="muted">%s</p>`, esc(t.Description))
 	}
 
+	service := t.Kind == tool.KindService
+	if service {
+		b.WriteString(servicePanel(inst))
+	}
+
 	fmt.Fprintf(&b, `<form id="tool-form" data-tool="%s" data-kind="%s">`, esc(t.ID), esc(string(t.Kind)))
 
+	hint := "点「运行」即可。"
+	if service {
+		hint = "点「启动服务」即可。"
+	}
 	if len(t.Interface.Inputs) == 0 {
-		b.WriteString(`<p class="muted">该工具没有输入参数，点「运行」即可。</p>`)
+		fmt.Fprintf(&b, `<p class="muted">该工具没有输入参数，%s</p>`, hint)
 	}
 
 	for _, in := range t.Interface.Inputs {
@@ -133,13 +149,66 @@ func ToolFormPage(siteTitle, username string, t *tool.Tool, storages []storage.S
 		t.Resources.CPU, esc(t.Resources.Memory), esc(t.Resources.Walltime),
 		t.Resources.CPU, t.Resources.CPU, esc(t.Resources.Memory), esc(t.Resources.Walltime))
 
+	action := "运行"
+	if service {
+		action = "启动服务"
+	}
 	fmt.Fprintf(&b, `<label>任务名 <input type="text" name="__name" placeholder="%s"></label>`, esc(t.Name))
-	b.WriteString(`<div class="actions"><button type="submit">运行</button></div></form>
-<div id="result" class="muted"></div>
-</main>`)
+	fmt.Fprintf(&b, `<div class="actions"><button type="submit">%s</button></div></form>`, action)
+	b.WriteString(`<div id="result" class="muted"></div></main>`)
 
 	return PageShell(siteTitle, t.Name, b.String()+
 		`<script src="/assets/srcos-path-picker.js"></script><script>`+toolFormScript+`</script>`)
+}
+
+// servicePanel is the lifecycle half of a service tool page: whether the caller
+// has a live instance, where it is reachable, and how to stop it. It is
+// rendered server-side so it is correct without JavaScript; only the stop
+// button needs a script (the start button is the form's submit).
+func servicePanel(inst *inspect.InstanceView) string {
+	if inst == nil {
+		return `<div class="svc-card"><span class="svc-dot off"></span>未运行。填好参数后点「启动服务」。</div>`
+	}
+	label, cls := serviceStateLabel(inst.State)
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div class="svc-card"><span class="svc-dot %s"></span>%s`, cls, esc(label))
+	if inst.Error != "" {
+		fmt.Fprintf(&b, ` <span class="muted">（%s）</span>`, esc(inst.Error))
+	}
+	live := !stateFinished(inst.State)
+	if live && inst.RoutePath != "" {
+		fmt.Fprintf(&b, ` · <a href="%s/">打开服务</a>`, esc(inst.RoutePath))
+	}
+	if !live {
+		fmt.Fprintf(&b, ` · <a href="/tasks/%s">上次运行</a>`, esc(url.PathEscape(inst.ID)))
+	} else {
+		fmt.Fprintf(&b, ` · <a href="/tasks/%s">详情与日志</a>`, esc(url.PathEscape(inst.ID)))
+		fmt.Fprintf(&b, `<button type="button" class="svc-stop" onclick="svcStop('%s')">停止</button>`, esc(inst.ID))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+// serviceStateLabel maps a lifecycle state to a Chinese label and a dot class.
+// It is the service-page half of the same vocabulary tasks.go ships to its
+// live-log client, kept here because this page renders server-side and only
+// needs the two strings.
+func serviceStateLabel(state string) (string, string) {
+	switch state {
+	case "running":
+		return "运行中", "on"
+	case "idle":
+		return "空闲", "on"
+	case "starting", "pending", "submitted":
+		return "启动中", "warn"
+	case "stopping":
+		return "停止中", "warn"
+	case "failed":
+		return "启动失败", "bad"
+	case "succeeded", "stopped":
+		return "已停止", "off"
+	}
+	return state, "off"
 }
 
 // field renders one input as the control its type calls for.
@@ -231,18 +300,42 @@ func defaultString(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// toolFormScript collects the form into a job submission.
+// toolFormScript collects the form and routes it to the right write endpoint.
 //
 // It deliberately sends the interface-declared inputs separately from the
 // resource overrides, mirroring the job.json shape: a tool's parameters and the
 // resources it runs with are different kinds of thing, and only the resources
 // are clamped by the server.
+//
+// The one branch that matters is task vs service: a task is submitted to the
+// drop-box queue (POST /api/jobs) and runs to completion; a service is
+// instantiated (POST /api/tools/<id>/start) and keeps running. Both go through
+// the platform's single write path, so the grant, the submit scope and the
+// quota are enforced identically.
 var toolFormScript = `
 (function () {
   var form = document.getElementById('tool-form');
   var out = document.getElementById('result');
   if (!form) return;
   var toolID = form.dataset.tool;
+  var kind = form.dataset.kind;
+  var service = kind === 'service';
+
+  // svcStop is the lifecycle page's second verb. It stops the caller's own
+  // instance through the same cancel endpoint the task pages and the MCP
+  // server use.
+  window.svcStop = function (instanceID) {
+    if (!confirm('停止这个服务实例？')) return;
+    fetch('/api/jobs/' + encodeURIComponent(instanceID) + '/cancel', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: '{}'
+    }).then(function (r) {
+      return r.json().then(function (b) { return { ok: r.ok, body: b }; });
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : '停止失败');
+      location.reload();
+    }).catch(function (err) { alert('错误：' + (err.message || err)); });
+  };
 
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -259,15 +352,19 @@ var toolFormScript = `
       params[key] = value;
     });
 
-    var body = {
-      tool: toolID,
-      name: fd.get('__name') || '',
-      params: params
-    };
+    var body = { name: fd.get('__name') || '', params: params };
+    var url;
+    if (service) {
+      url = '/api/tools/' + encodeURIComponent(toolID) + '/start';
+    } else {
+      body.tool = toolID;
+      url = '/api/jobs';
+    }
+    // Both paths accept resource overrides (clamped to the tool's ceiling).
     if (Object.keys(res).length) body.resources = res;
 
-    out.textContent = '提交中…';
-    fetch('/api/jobs', {
+    out.textContent = service ? '启动中（要等探活，可能要几十秒）…' : '提交中…';
+    fetch(url, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -275,7 +372,16 @@ var toolFormScript = `
     }).then(function (r) {
       return r.json().then(function (b) { return { ok: r.ok, body: b }; });
     }).then(function (r) {
-      if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : '提交失败');
+      if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : '请求失败');
+      if (service) {
+        if (r.body.state === 'running') {
+          out.textContent = '服务已启动，正在刷新…';
+          setTimeout(function () { location.reload(); }, 600);
+        } else {
+          out.textContent = '服务未能运行：' + (r.body.error || r.body.state || '未知原因');
+        }
+        return;
+      }
       out.innerHTML = '已提交任务 <code>' + r.body.jobId + '</code>，网关的队列会立即开始执行。' +
         '到 <a href="/tasks">任务</a> 看状态与实时日志。';
     }).catch(function (err) {
@@ -283,3 +389,17 @@ var toolFormScript = `
     });
   });
 })();`
+
+// toolFormCSS styles the service lifecycle card. Injected with the markup that
+// uses it, the same way the task pages and the viewer do.
+const toolFormCSS = `<style>
+.svc-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; margin: 14px 0 18px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--r-card); font-size: 13px; }
+.svc-card a { color: var(--accent); text-decoration: none; }
+.svc-card a:hover { text-decoration: underline; }
+.svc-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--text-muted); }
+.svc-dot.on { background: #1a7f37; }
+.svc-dot.warn { background: #9a6700; }
+.svc-dot.bad { background: var(--danger); }
+.svc-stop { margin-left: auto; padding: 4px 14px; border-radius: var(--r-pill); border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); background: transparent; color: var(--danger); font-size: 12.5px; cursor: pointer; }
+.svc-stop:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+</style>`

@@ -187,15 +187,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	// Scope gate. An agent token is a read credential in this phase: the write
-	// surface (submit / cancel / run_flow) is the second half of ADR-019, and
-	// no token can hold `submit` yet — so the check is here to make the rule
-	// explicit at the one place that would have to change.
+	// Scope gate. A browser session is the person and carries every scope; an
+	// agent token carries exactly what was issued, so a read-only token must not
+	// reach the write surface (submit / start a service / cancel / run_flow).
+	// The tool dimension of the decision is applied by execute, the one write
+	// path.
 	if ident.Agent && !isReadMethod(r.Method) && !ident.Has(agenttoken.ScopeSubmit) {
 		log.Printf("[srcos] agent %s refused (read-only token): %s %s", ident.Describe(), r.Method, r.URL.Path)
 		h.auditDeny(r, &ident, "scope", "agent token is read-only; writing requires the submit scope")
 		writeJSON(w, 403, map[string]string{
-			"error": "agent token is read-only (scope \"read\"); writing requires the \"submit\" scope, which is reserved for the second phase of ADR-019",
+			"error": "agent token is read-only (scope \"read\"); writing requires the \"submit\" scope",
 		})
 		return true
 	}
@@ -219,6 +220,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	// the srcos-path-picker primitive control.
 	case path == "/api/tools" && r.Method == "GET":
 		h.handleListTools(w, username)
+	// Starting a service is a write (submit scope + the tool allowlist); it
+	// goes through execute, the one write path, exactly like a submission.
+	case strings.HasPrefix(path, "/api/tools/") && r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+		id, ok := startServiceID(path)
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "not found"})
+			return true
+		}
+		h.handleStartService(w, r, ident, id)
 	case strings.HasPrefix(path, "/api/tools/") && r.Method == "GET":
 		h.handleDescribeTool(w, username, strings.TrimPrefix(path, "/api/tools/"))
 	case path == "/api/paths" && r.Method == "GET":

@@ -303,7 +303,9 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		FlowsDir:      flowsDir,
 		Audit:         auditRec,
 		RenderToolForm: func(username string, t *tool.Tool, sts []storage.Storage) string {
-			return web.ToolFormPage(siteTitle, username, t, sts)
+			// This fallback renderer has no instance handle; the lifecycle panel
+			// simply reports "not running" (the server page passes the real one).
+			return web.ToolFormPage(siteTitle, username, t, sts, nil)
 		},
 	}
 
