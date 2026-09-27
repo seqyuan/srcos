@@ -44,6 +44,11 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// "running" record that nothing backs is a lie that also holds the
 			// user's quota.
 			s.reconcileTasks()
+			// The same for services, whose liveness was previously only checked
+			// at startup: a service that dies later must not keep saying
+			// "running" (and keep a route to a dead port) until a lifecycle
+			// ceiling happens to fire.
+			s.reconcileServices()
 		case <-stop:
 			return
 		}

@@ -830,15 +830,27 @@ func (r *Runner) StopService(ctx context.Context, t *tool.Tool, inst *Instance) 
 	// The credential's lifetime is the instance's: revoke it on the way out,
 	// whichever way the instance is leaving (explicit stop, the reaper, an admin
 	// stopping someone else's service).
-	if r.opts.AgentTokens != nil {
-		if _, rerr := r.opts.AgentTokens.RevokeInstance(inst.ID); rerr != nil {
-			log.Printf("[srcos] revoke instance credential %s: %v", inst.ID, rerr)
-		} else {
-			_ = os.Remove(filepath.Join(config.HomeDir(r.opts.ConfigDir, inst.User), ".srcos", "agent-token"))
-			r.auditInstance(inst, "agenttoken.revoke", nil)
-		}
-	}
+	r.revokeInstanceCredential(inst)
 	return SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+}
+
+// revokeInstanceCredential ends the credential minted for one instance (A1).
+//
+// The credential's lifetime is the instance's, and an instance can end without
+// StopService running (a crash, or a periodic reconcile that found the process
+// gone), so the revoke lives here rather than inside StopService alone. A
+// missing credential is not an error: an instance without `agent:` never had
+// one.
+func (r *Runner) revokeInstanceCredential(inst *Instance) {
+	if r.opts.AgentTokens == nil || inst == nil {
+		return
+	}
+	if _, err := r.opts.AgentTokens.RevokeInstance(inst.ID); err != nil {
+		log.Printf("[srcos] revoke instance credential %s: %v", inst.ID, err)
+		return
+	}
+	_ = os.Remove(filepath.Join(config.HomeDir(r.opts.ConfigDir, inst.User), ".srcos", "agent-token"))
+	r.auditInstance(inst, "agenttoken.revoke", nil)
 }
 
 // UnitStopper is implemented by backends that can stop a unit without holding
@@ -973,9 +985,16 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 			continue
 		}
 
+		// Prefer the stricter "definitively gone" question when the backend can
+		// answer it: UnitAlive calls an `activating` unit dead, and orphaning a
+		// service systemd is restarting would withdraw a route that is about to
+		// come back. A backend that only implements UnitAlive (external) keeps
+		// its old behavior.
 		alive := false
 		if b, ok := r.opts.Backends[inst.Backend]; ok {
-			if prober, ok := b.(UnitProber); ok {
+			if goner, ok := b.(UnitGoner); ok {
+				alive = !goner.UnitGone(ctx, inst)
+			} else if prober, ok := b.(UnitProber); ok {
 				alive = prober.UnitAlive(ctx, inst)
 			}
 		}
@@ -1027,6 +1046,77 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 		err = errors.New(strings.Join(problems, "; "))
 	}
 	return adopted, orphaned, err
+}
+
+// ReconcileServices settles *service* records whose process is definitively
+// gone.
+//
+// Reconcile (the startup pass) decides adopt-vs-orphan once; this is its
+// periodic counterpart. It asks the stricter UnitGone question, so a unit
+// systemd is restarting is left alone rather than orphaned, and it runs on the
+// scan tick so a service that dies *after* startup does not leave a record
+// saying "running" forever — with a route republished to a port nothing listens
+// on. A task has ReconcileTasks for the same reason; a service had only the
+// startup pass.
+//
+// `external` is skipped: SRCOS does not own that process, so a momentarily
+// unreachable upstream (a restart, a brief outage) must not be recorded as a
+// dead instance — that would withdraw a route the operator relies on. The
+// backend must also implement UnitGoner to be considered; a backend that cannot
+// tell "restarting" from "dead" is skipped rather than guessed at.
+func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err error) {
+	insts, err := ListInstances(r.opts.ConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	for _, inst := range insts {
+		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
+			continue
+		}
+		if inst.Backend == string(tool.BackendExternal) {
+			continue
+		}
+		b, ok := r.opts.Backends[inst.Backend]
+		if !ok {
+			continue
+		}
+		goner, ok := b.(UnitGoner)
+		if !ok {
+			continue
+		}
+		if !goner.UnitGone(ctx, inst) {
+			continue
+		}
+
+		_, port, perr := splitEndpoint(inst.Endpoint)
+		if perr == nil && r.ports != nil {
+			r.ports.Release(port)
+		}
+		if r.opts.Routes != nil {
+			r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
+		}
+		inst.State = StateStopped
+		inst.EndedAt = time.Now().UTC()
+		if !inst.StartedAt.IsZero() {
+			inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
+		}
+		if inst.Error == "" {
+			inst.Error = "the process is gone; settled by the periodic service reconcile"
+		}
+		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, serr))
+			continue
+		}
+		r.revokeInstanceCredential(inst)
+		orphaned = append(orphaned, inst.ID)
+		r.auditInstance(inst, "instance.orphaned", map[string]any{"error": inst.Error})
+	}
+	sort.Strings(orphaned)
+	if len(problems) > 0 {
+		err = errors.New(strings.Join(problems, "; "))
+	}
+	return orphaned, err
 }
 
 // ReconcileTasks settles task records that no live process backs any more.
@@ -1165,6 +1255,17 @@ type TaskProber interface {
 // it; the degraded mode has only the pid SRCOS recorded.
 type UnitProber interface {
 	UnitAlive(ctx context.Context, inst *Instance) bool
+}
+
+// UnitGoner is implemented by backends that can answer the stricter question
+// "is this unit definitively gone" — as opposed to "it is not serving right
+// now, but systemd is still managing it (restarting, reloading)".
+//
+// It exists because UnitAlive cannot distinguish a dead unit from a restart in
+// progress, and periodic reconciliation must not orphan a service that is
+// coming back (see ReconcileServices).
+type UnitGoner interface {
+	UnitGone(ctx context.Context, inst *Instance) bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────

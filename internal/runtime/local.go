@@ -654,6 +654,40 @@ func unitIsGone(message string) bool {
 	return false
 }
 
+// UnitGone implements runtime.UnitGoner: it answers the *stricter* question
+// "is this unit definitively gone", which periodic reconciliation needs in
+// order to avoid mistaking a restart in progress for a death.
+//
+// UnitAlive deliberately treats every non-active state as "not alive", which is
+// right at startup (choose adopt vs orphan once) but wrong on a timer: a unit
+// systemd is bringing back (`activating`, including `auto-restart`) or is
+// reloading reports neither active nor gone, and orphaning it would delete the
+// route of a service that is coming back. Only a state systemd has *finished*
+// with (failed, inactive, dead, unknown) counts as gone. In the degraded mode
+// there is no unit, so the recorded pid — pinned by its start time — is the
+// only signal.
+func (l *Local) UnitGone(ctx context.Context, inst *Instance) bool {
+	if l.useSystemd() && inst.BackendRef != "" {
+		out, _ := exec.CommandContext(ctx, "systemctl", "--user", "is-active", inst.BackendRef).Output()
+		switch strings.TrimSpace(string(out)) {
+		case "active", "activating", "reloading", "deactivating":
+			return false
+		case "failed", "inactive", "dead", "unknown":
+			return true
+		}
+		// An empty or unrecognized answer (a transient systemctl error) is not
+		// evidence of death: a later tick can ask again, whereas orphaning a
+		// live service tears down its route. Deny-by-default is the right
+		// instinct for authorization and the wrong one for liveness.
+		return false
+	}
+	if inst.PID <= 0 || inst.PIDStart == 0 {
+		return true
+	}
+	start, ok := pidStartTime(inst.PID)
+	return !ok || start != inst.PIDStart
+}
+
 // UnitAlive implements runtime.UnitProber.
 //
 // A systemd unit is alive when it is "active" — activating, deactivating and

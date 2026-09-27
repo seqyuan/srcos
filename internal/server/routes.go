@@ -118,6 +118,33 @@ func (s *Server) reconcileTasks() {
 	}
 }
 
+// reconcileServices settles service records whose process is definitively gone.
+//
+// reconcile (the startup pass) decides adopt-vs-orphan once; without this, a
+// service that dies *after* startup — a crashed unit whose restart budget is
+// spent, a backend that exited cleanly under `restart: on-failure` — would keep
+// saying "running" and keep a route to a port nothing listens on, while every
+// request got a 502. Running the strict liveness check on the scan tick is
+// what makes the record honest for the life of the gateway, not just at boot.
+func (s *Server) reconcileServices() {
+	if s.runner == nil {
+		return
+	}
+	orphaned, err := s.runner.ReconcileServices(context.Background())
+	if err != nil {
+		log.Printf("[srcos] services reconcile: %v", err)
+	}
+	if len(orphaned) == 0 {
+		return
+	}
+	for _, id := range orphaned {
+		log.Printf("[srcos] services reconcile: settled %s as stopped (the process is gone)", id)
+	}
+	// Drop the routes immediately rather than waiting a tick: the record is no
+	// longer routable, and a stale entry keeps sending traffic at a dead port.
+	s.syncRoutes()
+}
+
 // reloadPolicyIfChanged re-reads grants.yaml when its modification time moved.
 //
 // It exists so the two ways an operator edits authorization behave the same:

@@ -12,7 +12,10 @@ import (
 // there, and (when it is not) how did it end. It never starts anything, so
 // these tests need no processes.
 type stubBackend struct {
-	alive      bool
+	alive bool
+	// gone answers the stricter UnitGone question: a unit that systemd is still
+	// managing (restarting) is not alive but is also not gone.
+	gone       bool
 	verdict    ExitStatus
 	hasVerdict bool
 }
@@ -28,6 +31,8 @@ func (b *stubBackend) Start(ctx context.Context, req StartRequest) (Handle, erro
 }
 
 func (b *stubBackend) UnitAlive(ctx context.Context, inst *Instance) bool { return b.alive }
+
+func (b *stubBackend) UnitGone(ctx context.Context, inst *Instance) bool { return b.gone }
 
 // saveTestInstance writes a record the way a run would have.
 func saveTestInstance(t *testing.T, configDir, id, kind string, state State) *Instance {

@@ -553,5 +553,53 @@ else
   info "  （无 python3，跳过 external 验证）"
 fi
 
+# ── 16. 普通用户自助启动 service + 周期存活对账 ─────────────────
+step 16 "普通用户自助启动 service（POST /api/tools/<id>/start）+ 周期存活对账"
+if [ -n "$UPSTREAM_PORT" ]; then
+  # Start as alice (a normal user's session cookie), not as the admin.
+  RESP="$(curl -s -w '\n%{http_code}' -b "$CJ" -X POST "$BASE/api/tools/$SVC/start" \
+    -H "Origin: $BASE" -H 'Content-Type: application/json' -d '{}')"
+  code="$(printf '%s' "$RESP" | tail -1)"
+  [ "$code" = "201" ] || fail "user start service = $code: $(printf '%s' "$RESP" | head -1)"
+  USVC_INST="$(printf '%s' "$RESP" | head -1 | grep -o '"instanceId":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  [ -n "$USVC_INST" ] || fail "could not read the instance id from the start response"
+  printf '%s' "$RESP" | head -1 | grep -q '"state":"running"' \
+    || fail "self-service start did not report running: $(printf '%s' "$RESP" | head -1)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/proxy/$USER_NAME/$SVC/")"
+  [ "$code" = "200" ] || fail "self-started service = $code, want 200"
+  grep -rq '"action":"instance.started"' "$AUDDIR" 2>/dev/null || fail "self-service start not audited"
+  pass "普通用户可自助启动并访问（$USVC_INST）"
+
+  # The stop button on the pages uses the cancel endpoint; cover it too.
+  code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" -X POST "$BASE/api/jobs/$USVC_INST/cancel" \
+    -H "Origin: $BASE" -H 'Content-Type: application/json' -d '{}')"
+  [ "$code" = "200" ] || fail "user cancel = $code, want 200"
+  pass "普通用户可自助停止"
+
+  # Liveness: start again, then kill the process behind SRCOS's back. The
+  # periodic reconcile must settle the record (no gateway restart required).
+  curl -s -o /dev/null -b "$CJ" -X POST "$BASE/api/tools/$SVC/start" \
+    -H "Origin: $BASE" -H 'Content-Type: application/json' -d '{}' || fail "restart for liveness failed"
+  REC="$DATA/instances/$USVC_INST.yaml"
+  limiter="$(grep -m1 '^limiter:' "$REC" | awk '{print $2}')"
+  if [ "$limiter" = "systemd-run" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user stop "srcos-$USVC_INST" >/dev/null 2>&1 || true
+  else
+    # Degraded mode: the recorded pid is the only handle.
+    pid="$(grep -m1 '^pid:' "$REC" | awk '{print $2}')"
+    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+  fi
+  settled=0
+  for _ in $(seq 1 60); do
+    if grep -q '^state: stopped' "$REC" 2>/dev/null; then settled=1; break; fi
+    sleep 0.5
+  done
+  [ "$settled" = "1" ] || fail "the periodic reconcile did not settle a dead service in 30s"
+  grep -rq '"action":"instance.orphaned"' "$AUDDIR" 2>/dev/null || fail "service orphan not audited"
+  pass "服务死后被周期对账结算为 stopped（无需重启网关）"
+else
+  info "  （无 python3，跳过自助启动与存活对账）"
+fi
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账\n'
