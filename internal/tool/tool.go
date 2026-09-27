@@ -7,10 +7,13 @@
 package tool
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -406,9 +409,21 @@ func Load(dir string) (*Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Strict decoding: an unknown key is a registration error, not something to
+	// ignore. tool.yaml is the contract, and a silently-dropped key is the worst
+	// kind of mistake — the author believes they configured something (a typo
+	// like `maxLifetime` for `max_lifetime`, or a `grants:` block the platform
+	// has never supported) while the runtime never saw it. "错误在注册时暴露，
+	// 不在运行时" is the same rule the rest of this package follows.
 	var t Tool
-	if err := yaml.Unmarshal(data, &t); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&t); err != nil {
+		// An empty (or comments-only) manifest is not a parse error; let
+		// Validate report the missing required fields with its own message.
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%s: %w%s", path, err, unknownFieldHint(err))
+		}
 	}
 	t.Dir = dir
 	if err := t.Validate(); err != nil {
@@ -420,6 +435,16 @@ func Load(dir string) (*Tool, error) {
 	}
 	t.Digest = digest
 	return &t, nil
+}
+
+// unknownFieldHint turns the one mistake that has actually happened — writing
+// authorization into tool.yaml — into an actionable message. Authorization is a
+// platform policy (config/grants.yaml): a tool package cannot grant itself.
+func unknownFieldHint(err error) string {
+	if strings.Contains(err.Error(), "field grants not found") {
+		return "\n  authorization lives in config/grants.yaml (or `srcos grant`), not in tool.yaml — a tool package cannot grant itself"
+	}
+	return ""
 }
 
 // Discover scans a tools directory for <id>/tool.yaml packages.

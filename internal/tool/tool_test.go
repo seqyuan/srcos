@@ -57,6 +57,41 @@ func TestLoadValidTask(t *testing.T) {
 	}
 }
 
+// An unknown key must fail at registration rather than be silently dropped: a
+// tool author who writes `grants:` (or a typo like `maxLifetime` for
+// `max_lifetime`) believes they configured something, and the runtime would
+// never see it. Strict decoding is what turns that into a registration error.
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantSub string
+	}{
+		{
+			name:    "authorization belongs in grants.yaml",
+			yaml:    minimalTask + "\ngrants:\n  allow_groups: [bio-team]\n",
+			wantSub: "config/grants.yaml",
+		},
+		{
+			name:    "a misspelled lifecycle key",
+			yaml:    minimalTask + "\nlifecycle:\n  maxLifetime: \"1h\"\n",
+			wantSub: "maxLifetime",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := writeTool(t, map[string]string{"tool.yaml": c.yaml, "work.sh": minimalWork})
+			_, err := Load(dir)
+			if err == nil {
+				t.Fatal("Load accepted an unknown field")
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Fatalf("error = %q, want it to mention %q", err, c.wantSub)
+			}
+		})
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := []struct {
 		name    string
