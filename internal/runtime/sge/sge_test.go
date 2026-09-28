@@ -442,3 +442,211 @@ func TestParseQsubOutput(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// SRCOS_PORT threading (services choose their port on the compute node)
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestWithPortPlaceholderReplacesThePoolPort(t *testing.T) {
+	got := withPortPlaceholder([]string{"PATH=/bin", "SRCOS_PORT=54321", "HOME=/h"})
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "SRCOS_PORT=") && kv != "SRCOS_PORT="+portPlaceholder {
+			t.Fatalf("pool port survived: %v", got)
+		}
+	}
+	if !strings.Contains(strings.Join(got, " "), "SRCOS_PORT="+portPlaceholder) {
+		t.Fatalf("placeholder not added: %v", got)
+	}
+	// The placeholder must appear exactly once, whatever the caller passed.
+	n := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "SRCOS_PORT=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("SRCOS_PORT appears %d times: %v", n, got)
+	}
+}
+
+func TestShellJoinPortExpandsEnvI(t *testing.T) {
+	inner := []string{"env", "-i", "SRCOS_PORT=" + portPlaceholder, "bash", "/tool/work.sh"}
+	got := shellJoinPort(inner)
+	if !strings.Contains(got, `SRCOS_PORT="$PORT"`) {
+		t.Fatalf("env -i form not expanded: %s", got)
+	}
+	if strings.Contains(got, portPlaceholder) {
+		t.Fatalf("placeholder leaked: %s", got)
+	}
+}
+
+func TestShellJoinPortExpandsBwrapSetenv(t *testing.T) {
+	inner := []string{"bwrap", "--setenv", "SRCOS_PORT", portPlaceholder, "--", "bash", "/tool/work.sh"}
+	got := shellJoinPort(inner)
+	if !strings.Contains(got, `'SRCOS_PORT' "$PORT"`) {
+		t.Fatalf("bwrap --setenv form not expanded: %s", got)
+	}
+	if strings.Contains(got, portPlaceholder) {
+		t.Fatalf("placeholder leaked: %s", got)
+	}
+}
+
+// TestStartThreadsTheComputePortToTheTool is the end-to-end form: the script
+// written for the cluster must expand the port, never the login node's pool
+// value and never the literal string "$PORT".
+func TestStartThreadsTheComputePortToTheTool(t *testing.T) {
+	cfg := testConfig(t, nil)
+	b := &Backend{Config: cfg}
+	req := testRequest(t, cfg)
+	req.WantEndpoint = true
+	req.Tool.Kind = tool.KindService
+	req.Tool.Ingress = &tool.Ingress{Port: 3838}
+	req.Env = append(req.Env, "SRCOS_PORT=54321")
+	if _, err := b.Start(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.SubmitDir, req.UnitName+".sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	if !strings.Contains(script, `SRCOS_PORT="$PORT"`) {
+		t.Errorf("the tool is never given the port it must bind:\n%s", script)
+	}
+	if strings.Contains(script, "SRCOS_PORT=54321") {
+		t.Errorf("the login node's pool port leaked into a compute-node job:\n%s", script)
+	}
+	if strings.Contains(script, portPlaceholder) {
+		t.Errorf("placeholder leaked into the rendered script:\n%s", script)
+	}
+	if strings.Contains(script, `SRCOS_PORT='$PORT'`) {
+		t.Errorf("SRCOS_PORT is a literal, not an expansion:\n%s", script)
+	}
+}
+
+func TestServiceScriptWithoutPython3StillChecksReadiness(t *testing.T) {
+	cfg := testConfig(t, nil)
+	b := &Backend{Config: cfg}
+	req := testRequest(t, cfg)
+	req.WantEndpoint = true
+	req.Tool.Kind = tool.KindService
+	req.Tool.Ingress = &tool.Ingress{Port: 3838}
+	script := b.renderScript(req, []string{"bash", "/tool/work.sh"})
+
+	// With no python3 there is no bind-probe, but readiness must still be
+	// observed (via bash /dev/tcp) instead of being skipped silently, and an
+	// empty port must fail loudly rather than publish "host:".
+	for _, want := range []string{
+		`/dev/tcp/127.0.0.1/$PORT`,
+		"_ready",
+		"no usable port",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "  else\n    break\n  fi\n  sleep 0.5") {
+		t.Error("readiness is still skipped when python3 is absent")
+	}
+}
+
+func TestScriptRecordsTheCanonicalJobIDField(t *testing.T) {
+	cfg := testConfig(t, nil)
+	b := &Backend{Config: cfg}
+	script := b.renderScript(testRequest(t, cfg), []string{"bash", "/tool/work.sh"})
+	if !strings.Contains(script, "_pub "+FileJobID+" ") {
+		t.Errorf("script does not publish %q:\n%s", FileJobID, script)
+	}
+	if strings.Contains(script, "_pub job_id ") {
+		t.Errorf("script still publishes the non-canonical job_id field:\n%s", script)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wait robustness against transient qstat failures
+// ─────────────────────────────────────────────────────────────────────────
+
+// runningJob is a minimal positive qstat -xml document for job 4242.
+const runningJob = `<job_info><job_list><JB_job_number>4242</JB_job_number><state>r</state></job_list></job_info>`
+
+func TestWaitIgnoresATransientQstatBlip(t *testing.T) {
+	// One miss, then the scheduler answers "running" again: the job must not be
+	// declared finished on the strength of that single miss. It takes three
+	// consecutive misses (or a terminal rendezvous state) to conclude it is gone.
+	qstatCalls := 0
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qsub") {
+			return `Your job 4242 ("x") has been submitted`, nil
+		}
+		qstatCalls++
+		switch qstatCalls {
+		case 1:
+			return "", os.ErrNotExist // blip: job unknown, but it is not gone
+		case 2, 3:
+			return runningJob, nil
+		default:
+			return "", os.ErrNotExist // now really gone
+		}
+	}}
+	cfg := testConfig(t, fake)
+	b := &Backend{Config: cfg}
+	h, err := b.Start(context.Background(), testRequest(t, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRendezvous(cfg.rendezvousFor("alice-demo-j1"), FileExitCode, "0"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := h.Wait(context.Background())
+	if st.Code != 0 {
+		t.Fatalf("exit code = %d (%v)", st.Code, st.Err)
+	}
+	// Calls 4,5,6 are the three consecutive misses; the first blip must have
+	// reset rather than terminated the loop.
+	if qstatCalls != 6 {
+		t.Fatalf("qstat called %d times, want 6 (a blip ended the wait early?)", qstatCalls)
+	}
+}
+
+func TestWaitTrustsATerminalRendezvousStateImmediately(t *testing.T) {
+	qstatCalls := 0
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qsub") {
+			return `Your job 4242 ("x") has been submitted`, nil
+		}
+		qstatCalls++
+		return "", os.ErrNotExist
+	}}
+	cfg := testConfig(t, fake)
+	b := &Backend{Config: cfg}
+	h, err := b.Start(context.Background(), testRequest(t, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd := cfg.rendezvousFor("alice-demo-j1")
+	// The job wrote its own testimony before leaving the scheduler's view.
+	if err := WriteRendezvous(rd, FileState, StateExited); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRendezvous(rd, FileExitCode, "3"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := h.Wait(context.Background())
+	if st.Code != 3 {
+		t.Fatalf("exit code = %d (%v)", st.Code, st.Err)
+	}
+	if qstatCalls != 1 {
+		t.Fatalf("qstat called %d times, want 1 (a terminal state should settle it at once)", qstatCalls)
+	}
+}
+
+func TestParseLeadingIntRejectsNonNumeric(t *testing.T) {
+	if _, err := parseLeadingInt("smp"); err == nil {
+		t.Fatal("a non-numeric slot count must not parse as 0")
+	}
+	if n, err := parseLeadingInt("4"); err != nil || n != 4 {
+		t.Fatalf("parseLeadingInt(4) = %d, %v", n, err)
+	}
+}

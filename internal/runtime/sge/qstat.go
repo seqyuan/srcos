@@ -245,15 +245,17 @@ func (x *xmlJobList) toJob() (Job, bool) {
 
 func parseLeadingInt(s string) (int, error) {
 	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("empty")
-	}
 	n := 0
+	digits := 0
 	for _, c := range s {
 		if c < '0' || c > '9' {
 			break
 		}
 		n = n*10 + int(c-'0')
+		digits++
+	}
+	if digits == 0 {
+		return 0, fmt.Errorf("no leading integer in %q", s)
 	}
 	return n, nil
 }

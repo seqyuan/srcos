@@ -186,7 +186,16 @@ func (b *Backend) Start(ctx context.Context, req runtime.StartRequest) (runtime.
 	if err := b.Config.Validate(); err != nil {
 		return nil, err
 	}
-	t, err := runtime.BuildInner(req.Tool, req.View, req.Spec, req.Cwd, req.Argv, req.Env)
+	// The caller hands us the login node's port-pool value in SRCOS_PORT, but on
+	// a cluster the port is chosen by the job on the compute node and is only
+	// known once the script runs. Replace it with a placeholder the rendered
+	// script expands (see portPlaceholder), so a service is never told to bind
+	// the login node's port.
+	env := req.Env
+	if req.WantEndpoint {
+		env = withPortPlaceholder(env)
+	}
+	t, err := runtime.BuildInner(req.Tool, req.View, req.Spec, req.Cwd, req.Argv, env)
 	if err != nil {
 		return nil, err
 	}
@@ -381,8 +390,8 @@ func (h *jobHandle) Alive() bool {
 	if err != nil {
 		// The scheduler is unreachable. Fall back to the rendezvous, which the
 		// job itself maintains — but never claim liveness on no evidence.
-		rs, rerr := ReadRendezvous(h.rd(), "state")
-		return rerr == nil && rs != "exited" && rs != "failed"
+		rs, rerr := ReadRendezvous(h.rd(), FileState)
+		return rerr == nil && !terminalState(rs)
 	}
 	return st.Alive()
 }
@@ -406,6 +415,14 @@ func (h *jobHandle) queryState(ctx context.Context) (JobState, error) {
 	return JobState{Unknown: true}, nil
 }
 
+// goneConfirmations is how many consecutive "the scheduler does not know this
+// job" readings are required before Wait believes the job is gone.
+//
+// One is not enough: qstat exits non-zero both when a job is unknown and when
+// the scheduler or the shared filesystem hiccups, so a single bad reading must
+// not report a running job as finished.
+const goneConfirmations = 3
+
 // Wait polls until the job is gone, then reports its exit status from the
 // rendezvous file the job wrote.
 //
@@ -416,13 +433,27 @@ func (h *jobHandle) queryState(ctx context.Context) (JobState, error) {
 func (h *jobHandle) Wait(ctx context.Context) runtime.ExitStatus {
 	t := time.NewTicker(h.cfg.pollEvery())
 	defer t.Stop()
+	misses := 0
 	for {
 		st, err := h.queryState(ctx)
-		if err == nil && st.Unknown {
-			return h.exitStatus()
-		}
-		if err == nil && st.Failed {
-			return runtime.ExitStatus{Code: -1, Err: fmt.Errorf("job %s entered state %s", h.jobID, st.Raw)}
+		if err == nil {
+			switch {
+			case st.Failed:
+				return runtime.ExitStatus{Code: -1, Err: fmt.Errorf("job %s entered state %s", h.jobID, st.Raw)}
+			case st.Unknown:
+				// The job's own record is the stronger signal: a terminal state
+				// written by the script settles it at once, while a bare qstat miss
+				// must repeat before it is believed.
+				if rs, rerr := ReadRendezvous(h.rd(), FileState); rerr == nil && terminalState(rs) {
+					return h.exitStatus()
+				}
+				misses++
+				if misses >= goneConfirmations {
+					return h.exitStatus()
+				}
+			default:
+				misses = 0
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -430,6 +461,12 @@ func (h *jobHandle) Wait(ctx context.Context) runtime.ExitStatus {
 		case <-t.C:
 		}
 	}
+}
+
+// terminalState reports whether the job script has recorded a state that no
+// later transition follows.
+func terminalState(s string) bool {
+	return s == StateExited || s == StateFailed || s == StateDeleted
 }
 
 func (h *jobHandle) exitStatus() runtime.ExitStatus {
@@ -535,8 +572,11 @@ _pub() { printf '%s\n' "$2" > "$RD/$1.tmp" && mv "$RD/$1.tmp" "$RD/$1"; }
 trap '_pub state failed; _pub exit_code 143' TERM INT
 _pub state starting
 _pub node "$(hostname)"
-_pub job_id "${JOB_ID:-}"
-_pub pid "$$"
+`)
+	// The login node records the id qsub returned under the same name, so a
+	// reader has one field to look at no matter which side wrote it last.
+	fmt.Fprintf(&sb, "_pub %s \"${JOB_ID:-}\"\n", FileJobID)
+	sb.WriteString(`_pub pid "$$"
 
 `)
 	if isService {
@@ -584,6 +624,8 @@ s.close()
 PY
     return
   fi
+  # No portable bind-and-release without python3: the declared port is the only
+  # answer, and the caller fails loudly when there is none.
   echo "$DECLARED_PORT"
 }
 _port_in_use() {
@@ -599,7 +641,20 @@ finally:
     s.close()
 PY
   else
-    return 1
+    # Approximate "in use" by "something already accepts connections there".
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+  fi
+}
+_ready() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$PORT" <<'PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(1)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+PY
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1
   fi
 }
 
@@ -607,14 +662,23 @@ PORT="$DECLARED_PORT"
 if [ -z "$PORT" ] || [ "$PORT" = "0" ] || _port_in_use "$PORT"; then
   PORT="$(_free_port)"
 fi
+if [ -z "$PORT" ] || [ "$PORT" = "0" ]; then
+  # Without python3 SRCOS cannot pick a free port, and a tool must never be
+  # handed an empty one. Fail here, where the reason is visible, instead of
+  # advertising an endpoint nothing listens on.
+  _pub state failed
+  _pub exit_code 1
+  echo "no usable port: install python3 on the compute node or set a free ingress.port" >&2
+  exit 1
+fi
 export SRCOS_PORT="$PORT"
 
 `)
-	// The sandbox argv already carries the environment, but SRCOS_PORT is only
-	// known here, so the inner command is preceded by an explicit export for
-	// the cases where the environment is inherited rather than set.
-	fmt.Fprintf(&sb, "export SRCOS_PORT=%s\n", shellQuote("$PORT"))
-	fmt.Fprintf(&sb, "%s &\n", shellJoin(inner))
+	// SRCOS_PORT is only known here, so the inner command carries a placeholder
+	// (withPortPlaceholder) that shellJoinPort expands to the port the job
+	// actually got. It reaches both wrappers BuildInner can emit (`env -i` and
+	// bwrap `--setenv`).
+	fmt.Fprintf(&sb, "%s &\n", shellJoinPort(inner))
 	sb.WriteString(`CHILD=$!
 _pub pid "$CHILD"
 
@@ -627,17 +691,7 @@ for _ in $(seq 1 240); do
     wait "$CHILD"
     exit $?
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    if python3 - "$PORT" <<'PY'
-import socket, sys
-s = socket.socket()
-s.settimeout(1)
-sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
-PY
-    then
-      break
-    fi
-  else
+  if _ready; then
     break
   fi
   sleep 0.5
@@ -661,6 +715,39 @@ exit "$_code"
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// portPlaceholder stands in for the runtime-chosen port until the job script
+// expands it. The port is only known on the compute node, so it cannot be baked
+// into the script text; the shell variable reference has to reach the tool
+// unquoted, which shellQuote cannot express. A fixed token substituted after
+// quoting is the way through both wrappers BuildInner emits.
+const portPlaceholder = "__SRCOS_PORT__"
+
+// withPortPlaceholder drops any SRCOS_PORT the caller supplied (it is the login
+// node's port-pool value, meaningless on a compute node) and appends one whose
+// value is the placeholder.
+func withPortPlaceholder(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "SRCOS_PORT=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "SRCOS_PORT="+portPlaceholder)
+}
+
+// shellJoinPort is shellJoin for a service command, with the port placeholder
+// replaced by an unquoted reference to the shell variable the job script sets.
+// Substitution happens after quoting on purpose: the placeholder is present
+// either as `SRCOS_PORT=<ph>` (env -i) or as a bare `<ph>` value following
+// bwrap's `--setenv SRCOS_PORT`.
+func shellJoinPort(inner []string) string {
+	s := shellJoin(inner)
+	s = strings.ReplaceAll(s, "'SRCOS_PORT="+portPlaceholder+"'", `SRCOS_PORT="$PORT"`)
+	s = strings.ReplaceAll(s, "'"+portPlaceholder+"'", `"$PORT"`)
+	return s
 }
 
 // shellJoin renders argv as a shell command with every argument quoted, so a
