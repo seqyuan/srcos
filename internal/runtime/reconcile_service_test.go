@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,5 +319,66 @@ func TestWarnExpiringLeasesDedupesPerDeadline(t *testing.T) {
 	}
 	if moved, _ := runner.WarnExpiringLeases(context.Background()); len(moved) != 1 {
 		t.Fatalf("a moved deadline must re-arm the warning: %+v", moved)
+	}
+}
+
+// tunnelBackend owns runtime state (an ssh tunnel) but, unlike stubBackend, has
+// no UnitGone: it answers "is it reachable" by trying to re-establish the
+// tunnel. That is the SGE shape.
+type tunnelBackend struct{ err error }
+
+func (b *tunnelBackend) Name() string { return "sge" }
+func (b *tunnelBackend) Start(context.Context, StartRequest) (Handle, error) {
+	return nil, errors.New("tunnelBackend does not start units")
+}
+func (b *tunnelBackend) ReattachUnit(context.Context, *Instance) error { return b.err }
+
+// A tunnel that dies mid-run must be detected on the scan tick: without this,
+// the record keeps saying "running" and every request 502s until a restart.
+func TestReconcileServicesSettlesAServiceWhoseTunnelDied(t *testing.T) {
+	configDir := t.TempDir()
+	routes, ports := newDeadServiceFixture(t, configDir, "sge")
+	runner := NewRunner(Options{
+		ConfigDir: configDir,
+		Routes:    routes,
+		Backends:  map[string]Backend{"sge": &tunnelBackend{err: errors.New("tunnel gone")}},
+	})
+	runner.SetPorts(ports)
+
+	orphaned, err := runner.ReconcileServices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphaned) != 1 || orphaned[0] != "alice-web-svc" {
+		t.Fatalf("orphaned = %v, want the unreachable service", orphaned)
+	}
+	rec := loadTestInstance(t, configDir, "alice-web-svc")
+	if rec.State != StateStopped || !strings.Contains(rec.Error, "tunnel gone") {
+		t.Fatalf("record = %+v", rec)
+	}
+	if _, _, ok := routes.GetByPath("/proxy/alice/web"); ok {
+		t.Fatal("the route of an unreachable service must be withdrawn")
+	}
+}
+
+func TestReconcileServicesLeavesAServiceWithALiveTunnelAlone(t *testing.T) {
+	configDir := t.TempDir()
+	routes, ports := newDeadServiceFixture(t, configDir, "sge")
+	runner := NewRunner(Options{
+		ConfigDir: configDir,
+		Routes:    routes,
+		Backends:  map[string]Backend{"sge": &tunnelBackend{}},
+	})
+	runner.SetPorts(ports)
+
+	orphaned, err := runner.ReconcileServices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphaned) != 0 {
+		t.Fatalf("a reattachable service must be left alone: %v", orphaned)
+	}
+	if rec := loadTestInstance(t, configDir, "alice-web-svc"); rec.State != StateRunning {
+		t.Fatalf("a reattached service must keep running: %+v", rec)
 	}
 }

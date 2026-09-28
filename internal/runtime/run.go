@@ -1128,9 +1128,13 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 //
 // `external` is skipped: SRCOS does not own that process, so a momentarily
 // unreachable upstream (a restart, a brief outage) must not be recorded as a
-// dead instance — that would withdraw a route the operator relies on. The
-// backend must also implement UnitGoner to be considered; a backend that cannot
-// tell "restarting" from "dead" is skipped rather than guessed at.
+// dead instance — that would withdraw a route the operator relies on.
+//
+// A backend is considered when it can answer the question one of two ways: the
+// strict UnitGone check (a unit systemd is restarting is not gone), or — for a
+// backend that owns runtime state the record cannot describe — UnitReattacher,
+// where re-establishing the state (an SGE ssh tunnel) is the same question. A
+// backend that can do neither is skipped rather than guessed at.
 func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err error) {
 	insts, err := ListInstances(r.opts.ConfigDir)
 	if err != nil {
@@ -1148,11 +1152,25 @@ func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err 
 		if !ok {
 			continue
 		}
-		goner, ok := b.(UnitGoner)
-		if !ok {
+
+		// Two ways a backend answers "is this service still reachable": the
+		// strict UnitGone question (a systemd unit that is restarting is not
+		// gone), or — for a backend that owns runtime state the record cannot
+		// describe, like an SGE ssh tunnel — by trying to re-establish it. A
+		// tunnel that survived needs nothing; one that did not is settled here
+		// rather than left routing traffic at a dead loopback port until the
+		// next gateway restart.
+		dead := false
+		var deadErr error
+		if goner, ok := b.(UnitGoner); ok {
+			dead = goner.UnitGone(ctx, inst)
+		} else if reattacher, ok := b.(UnitReattacher); ok {
+			deadErr = reattacher.ReattachUnit(ctx, inst)
+			dead = deadErr != nil
+		} else {
 			continue
 		}
-		if !goner.UnitGone(ctx, inst) {
+		if !dead {
 			continue
 		}
 
@@ -1169,7 +1187,11 @@ func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err 
 			inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
 		}
 		if inst.Error == "" {
-			inst.Error = "the process is gone; settled by the periodic service reconcile"
+			if deadErr != nil {
+				inst.Error = "unreachable: " + deadErr.Error()
+			} else {
+				inst.Error = "the process is gone; settled by the periodic service reconcile"
+			}
 		}
 		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, serr))

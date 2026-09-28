@@ -1067,6 +1067,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `qstat` 状态映射：区分 `S`（挂起/抢占）与真死
 - [x] 真集群验证（集群 `annuo`，2026-09-28）：task `exit 0`/`exit 7`、service + `ssh -L` 隧道 HTTP 200、
       `qalter` 续期；暴露并修掉 `qstat -xml -j` 查询格式与 task 体 `exec` 两个 bug
+- [x] 运行中隧道掉线检测（`ReconcileServices` 对 `UnitReattacher` 后端重连，失败则结算并停作业）
 - [x] `h_rt` 到期续期（`qalter`，`renew_before`/`renew_for`；续期时必须重述 `h_vmem`）与
       到期**预警**（`warn_before` → 审计 `instance.lease_expiring` + 日志，按 deadline 去重）
 - [x] apptainer sandbox 物化（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`；
