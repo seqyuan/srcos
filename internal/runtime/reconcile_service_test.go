@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
@@ -276,5 +277,46 @@ func TestReconcileAdoptsAfterASuccessfulReattach(t *testing.T) {
 	}
 	if _, _, ok := routes.GetByPath(inst.RoutePath); !ok {
 		t.Fatal("a reattached service must have its route published")
+	}
+}
+
+// leaseWarnBackend embeds the plain stub and answers the lease-warning question.
+type leaseWarnBackend struct {
+	*stubBackend
+	reason string
+	due    bool
+}
+
+func (b *leaseWarnBackend) LeaseWarning(*Instance) (string, bool) { return b.reason, b.due }
+
+func TestWarnExpiringLeasesDedupesPerDeadline(t *testing.T) {
+	configDir := t.TempDir()
+	inst := saveTestInstance(t, configDir, "alice-demo-svc", "service", StateRunning)
+	inst.LeaseExpiresAt = time.Now().Add(time.Minute)
+	if err := SaveInstance(InstancePath(configDir, inst.ID), inst); err != nil {
+		t.Fatal(err)
+	}
+	lb := &leaseWarnBackend{stubBackend: &stubBackend{alive: true}, reason: "soon", due: true}
+	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": lb}})
+
+	warnings, err := runner.WarnExpiringLeases(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 1 || warnings[0].InstanceID != inst.ID || warnings[0].Reason != "soon" {
+		t.Fatalf("warnings = %+v", warnings)
+	}
+	// The same deadline must not warn again on the next tick.
+	if again, _ := runner.WarnExpiringLeases(context.Background()); len(again) != 0 {
+		t.Fatalf("repeated warning for the same deadline: %+v", again)
+	}
+	// A renewal moves the deadline, which re-arms the warning.
+	rec := loadTestInstance(t, configDir, inst.ID)
+	rec.LeaseExpiresAt = time.Now().Add(2 * time.Minute)
+	if err := SaveInstance(InstancePath(configDir, inst.ID), rec); err != nil {
+		t.Fatal(err)
+	}
+	if moved, _ := runner.WarnExpiringLeases(context.Background()); len(moved) != 1 {
+		t.Fatalf("a moved deadline must re-arm the warning: %+v", moved)
 	}
 }

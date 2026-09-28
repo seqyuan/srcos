@@ -42,6 +42,9 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// Push out the scheduler's own ceiling on long-running services
 			// (`qalter -l h_rt=...`) before it kills work the platform wants.
 			s.renewServices()
+			// Warn (audit + log) when a service is close to its scheduler ceiling and
+			// renewal has not moved it.
+			s.warnExpiringLeases()
 			// Settle task records whose process died while the gateway was away:
 			// a task's verdict is written by the process that started it, and a
 			// "running" record that nothing backs is a lie that also holds the

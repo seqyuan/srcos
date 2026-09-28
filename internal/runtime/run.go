@@ -893,6 +893,20 @@ type UnitReattacher interface {
 	ReattachUnit(ctx context.Context, inst *Instance) error
 }
 
+// UnitLeaseWarner is implemented by backends that can tell whether a unit is
+// close to a ceiling the platform cannot move (or has failed to move). It
+// returns a human-readable reason and whether a warning is due; the caller owns
+// deduplication and the record.
+type UnitLeaseWarner interface {
+	LeaseWarning(inst *Instance) (string, bool)
+}
+
+// LeaseWarning is one service that is close to its scheduler ceiling.
+type LeaseWarning struct {
+	InstanceID string
+	Reason     string
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 回收
 // ─────────────────────────────────────────────────────────────────────────
@@ -1227,6 +1241,54 @@ func (r *Runner) RenewServices(ctx context.Context) (renewed []string, err error
 		err = errors.New(strings.Join(problems, "; "))
 	}
 	return renewed, err
+}
+
+// WarnExpiringLeases records a warning for services close to a scheduler ceiling
+// that SRCOS has not pushed out.
+//
+// On a cluster idle reaping is off (queue wait is expensive), so h_rt is what
+// ends a service. Renewal usually moves it, but when renewal is disabled — or
+// has stalled — the operator needs advance notice rather than a service that
+// vanishes. One warning per deadline: a renewal changes the deadline and
+// re-arms it.
+func (r *Runner) WarnExpiringLeases(ctx context.Context) (warnings []LeaseWarning, err error) {
+	insts, err := ListInstances(r.opts.ConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	for _, inst := range insts {
+		if inst.Kind != string(tool.KindService) || inst.State.Terminal() || inst.LeaseExpiresAt.IsZero() {
+			continue
+		}
+		b, ok := r.opts.Backends[inst.Backend]
+		if !ok {
+			continue
+		}
+		warner, ok := b.(UnitLeaseWarner)
+		if !ok {
+			continue
+		}
+		reason, due := warner.LeaseWarning(inst)
+		if !due || inst.LeaseWarnedDeadline.Equal(inst.LeaseExpiresAt) {
+			continue
+		}
+		inst.LeaseWarnedDeadline = inst.LeaseExpiresAt
+		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, serr))
+			continue
+		}
+		warnings = append(warnings, LeaseWarning{InstanceID: inst.ID, Reason: reason})
+		r.auditInstance(inst, "instance.lease_expiring", map[string]any{
+			"reason":  reason,
+			"expires": inst.LeaseExpiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].InstanceID < warnings[j].InstanceID })
+	if len(problems) > 0 {
+		err = errors.New(strings.Join(problems, "; "))
+	}
+	return warnings, err
 }
 
 // ReconcileTasks settles task records that no live process backs any more.

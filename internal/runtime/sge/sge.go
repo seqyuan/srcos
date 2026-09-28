@@ -117,6 +117,9 @@ type SchedulerDefaults struct {
 	// RenewBefore > 0 turns it on; RenewFor defaults to one more full walltime.
 	RenewBefore time.Duration
 	RenewFor    time.Duration
+	// WarnBefore emits a lease warning when the job is this close to its h_rt.
+	// Zero disables it.
+	WarnBefore time.Duration
 }
 
 // PortAllocator hands out the loopback port a tunnel listens on. The runtime's
@@ -208,6 +211,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Scheduler.RenewFor > 0 && c.Scheduler.RenewBefore <= 0 {
 		problems = append(problems, "Scheduler.RenewFor is set but RenewBefore is zero (renewal would never fire)")
+	}
+	if c.Scheduler.WarnBefore > 0 && c.Scheduler.RenewBefore > 0 && c.Scheduler.WarnBefore < c.Scheduler.RenewBefore {
+		// Renewal would fire first and move the lease, so the warning threshold
+		// would never be reached: the setting would be a silent no-op.
+		problems = append(problems, "Scheduler.WarnBefore is smaller than RenewBefore, so the warning would never fire")
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("sge backend: %s", strings.Join(problems, "; "))
@@ -757,6 +765,38 @@ func (b *Backend) UnitRenew(ctx context.Context, inst *runtime.Instance, t *tool
 	}
 	inst.LeaseExpiresAt = now.Add(renewFor)
 	return true, nil
+}
+
+// LeaseWarning reports whether a live service is close enough to its scheduler
+// ceiling to deserve a warning, with a human-readable reason.
+//
+// The caller (Runner.WarnExpiringLeases) owns deduplication and the record; this
+// is only the site's judgement of "close enough". When renewal is enabled the
+// warning is the signal that renewal is not keeping up; when it is disabled it
+// is the only advance notice the operator gets before SGE kills the job.
+func (b *Backend) LeaseWarning(inst *runtime.Instance) (string, bool) {
+	if inst == nil || inst.LeaseExpiresAt.IsZero() {
+		return "", false
+	}
+	sd := b.Config.Scheduler
+	if sd.WarnBefore <= 0 {
+		return "", false
+	}
+	remaining := time.Until(inst.LeaseExpiresAt)
+	if remaining > sd.WarnBefore {
+		return "", false
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	msg := fmt.Sprintf("the job's h_rt ceiling expires in %s (at %s UTC)",
+		remaining.Round(time.Second), inst.LeaseExpiresAt.UTC().Format(time.RFC3339))
+	if sd.RenewBefore > 0 {
+		msg += "; renewal is enabled but has not moved the lease"
+	} else {
+		msg += "; renewal is disabled, so the scheduler will end the job"
+	}
+	return msg, true
 }
 
 // ReattachUnit re-establishes an SGE service's data channel after a gateway

@@ -27,6 +27,10 @@ func FromState(s config.SGEState) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("sge.renew_for: %w", err)
 	}
+	warnBefore, err := parseOptionalDuration(s.WarnBefore)
+	if err != nil {
+		return Config{}, fmt.Errorf("sge.warn_before: %w", err)
+	}
 	cfg := Config{
 		Qsub:          s.Qsub,
 		Qstat:         s.Qstat,
@@ -47,6 +51,7 @@ func FromState(s config.SGEState) (Config, error) {
 			Project:        s.Project,
 			RenewBefore:    renewBefore,
 			RenewFor:       renewFor,
+			WarnBefore:     warnBefore,
 		},
 		PollEvery: time.Duration(s.PollSeconds) * time.Second,
 	}

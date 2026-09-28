@@ -117,6 +117,10 @@ type Instance struct {
 	// killed while the platform still wants it. Zero when no such ceiling
 	// applies (local units, SGE jobs without a declared walltime).
 	LeaseExpiresAt time.Time `yaml:"lease_expires_at,omitempty"`
+	// LeaseWarnedDeadline is the LeaseExpiresAt value already warned about, so a
+	// scan tick does not repeat the same warning; a renewal changes the deadline
+	// and re-arms it.
+	LeaseWarnedDeadline time.Time `yaml:"lease_warned_deadline,omitempty"`
 
 	Outputs []string          `yaml:"outputs,omitempty"`
 	Tags    map[string]string `yaml:"tags,omitempty"`

@@ -1016,3 +1016,43 @@ func TestReattachUnitIsANoOpWithoutATunnel(t *testing.T) {
 		t.Fatalf("unexpected calls: %v", fake.calls)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// h_rt lease warning
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestLeaseWarningOnlyWhenClose(t *testing.T) {
+	cfg := testConfig(t, nil)
+	cfg.Scheduler.WarnBefore = 10 * time.Minute
+	cfg.Scheduler.RenewBefore = 5 * time.Minute
+	b := &Backend{Config: cfg}
+
+	if _, due := b.LeaseWarning(&runtime.Instance{}); due {
+		t.Fatal("warned for an instance with no lease")
+	}
+	if _, due := b.LeaseWarning(&runtime.Instance{LeaseExpiresAt: time.Now().Add(time.Hour)}); due {
+		t.Fatal("warned far from the ceiling")
+	}
+	msg, due := b.LeaseWarning(&runtime.Instance{LeaseExpiresAt: time.Now().Add(5 * time.Minute)})
+	if !due || !strings.Contains(msg, "h_rt") || !strings.Contains(msg, "renewal is enabled") {
+		t.Fatalf("msg=%q due=%v", msg, due)
+	}
+
+	// With renewal off, the message must say the scheduler will end the job.
+	cfg.Scheduler.RenewBefore = 0
+	b = &Backend{Config: cfg}
+	msg, due = b.LeaseWarning(&runtime.Instance{LeaseExpiresAt: time.Now().Add(5 * time.Minute)})
+	if !due || !strings.Contains(msg, "renewal is disabled") {
+		t.Fatalf("msg=%q due=%v", msg, due)
+	}
+}
+
+func TestValidateRejectsWarnBeforeSmallerThanRenewBefore(t *testing.T) {
+	cfg := Config{
+		SubmitDir: "/s", RendezvousDir: "/r",
+		Scheduler: SchedulerDefaults{PE: "smp", RenewBefore: 20 * time.Minute, WarnBefore: 10 * time.Minute},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("warn_before < renew_before would never fire; expected a validation error")
+	}
+}

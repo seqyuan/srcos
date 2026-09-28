@@ -220,6 +220,22 @@ func (s *Server) renewServices() {
 	}
 }
 
+// warnExpiringLeases records a warning for services close to their scheduler
+// ceiling (SGE's h_rt) that renewal has not moved, so the operator gets advance
+// notice instead of a service that vanishes.
+func (s *Server) warnExpiringLeases() {
+	if s.runner == nil {
+		return
+	}
+	warnings, err := s.runner.WarnExpiringLeases(context.Background())
+	if err != nil {
+		log.Printf("[srcos] lease warning: %v", err)
+	}
+	for _, w := range warnings {
+		log.Printf("[srcos] lease expiring for %s: %s", w.InstanceID, w.Reason)
+	}
+}
+
 // syncRoutes rebuilds the dynamic routing table from the instance records.
 //
 // Two directions matter equally: a live service must become reachable, and a

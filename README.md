@@ -324,6 +324,7 @@ sge:
   # poll_seconds: 2
   # renew_before: "10m"                # 开启 h_rt 续期：剩余不足 10m 时用 qalter 延长
   # renew_for: "1h"                    # 每次延长 1h（省略则用工具声明的 walltime）
+  # warn_before: "15m"                 # 剩余不足 15m 时写一条到期预警（审计 + 日志）
 ```
 
 - **共享盘是必须的**：`submit_dir` 与 `rendezvous_dir` 必须在登录节点与计算节点都可见。
@@ -331,8 +332,9 @@ sge:
   不需要 agent，也不需要长连接。
 - **数据通道**：`tunnel: true` 时，工具在计算节点上绑定回环端口，`ssh -L` 把它转发到登录节点的回环端口，
   网关照常代理。这样「实例只监听回环」在集群上依然成立。
-- **`h_rt` 续期**：服务声明的 walltime 会被 SGE 当作硬上限。配置 `renew_before`/`renew_for` 后，
-  到期前 SRCOS 用 `qalter -l h_rt=...`（并重述 `h_vmem`，否则 SGE 拒绝改运行中作业）把上限推后。
+- **`h_rt` 续期与预警**：服务声明的 walltime 会被 SGE 当作硬上限。配置 `renew_before`/`renew_for` 后，
+  到期前 SRCOS 用 `qalter -l h_rt=...`（并重述 `h_vmem`，否则 SGE 拒绝改运行中作业）把上限推后；
+  `warn_before` 则在到期前写一条预警到审计流与日志（续期开启但未生效时也靠它发现）。
 - **提交主机限制**：不少集群只有提交主机能跑 `qsub`/`qdel`/`qalter`，其余机器能 `qstat` 但投递被拒。
   若网关不在提交主机上，把 `qsub`/`qdel`/`qalter` 指向转发脚本（如 `ssh <submit-host> qsub "$@"`）即可；
   `qstat` 一般本机可用。

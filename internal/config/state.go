@@ -66,6 +66,10 @@ type SGEState struct {
 	// and then a service simply ends when its declared walltime does.
 	RenewBefore string `yaml:"renew_before,omitempty"`
 	RenewFor    string `yaml:"renew_for,omitempty"`
+	// WarnBefore emits a warning (audit + log) when a service is within this
+	// window of its h_rt. It is the fallback when renewal is off, and the
+	// signal when renewal is on but failing. Zero disables it.
+	WarnBefore string `yaml:"warn_before,omitempty"`
 }
 
 // AuditState configures where the structured audit stream is forwarded.

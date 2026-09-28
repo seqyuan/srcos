@@ -120,3 +120,16 @@ func TestFromStateRejectsBadRenewal(t *testing.T) {
 		t.Fatal("RenewFor without RenewBefore must be rejected")
 	}
 }
+
+func TestFromStateParsesWarnBefore(t *testing.T) {
+	cfg, err := FromState(config.SGEState{
+		Enabled: true, SubmitDir: "/s", RendezvousDir: "/r", PE: "smp",
+		RenewBefore: "5m", WarnBefore: "10m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scheduler.WarnBefore != 10*time.Minute {
+		t.Fatalf("warn_before = %v", cfg.Scheduler.WarnBefore)
+	}
+}
