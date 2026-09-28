@@ -42,6 +42,7 @@ import (
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/runtime/sge"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -748,6 +749,16 @@ func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
 	if strings.TrimSpace(c.opts.ToolsDir) == "" {
 		return nil, fmt.Errorf("%w: no tool directory is configured", ErrUnavailable)
 	}
+	backends := map[string]runtime.Backend{"local": &runtime.Local{}}
+	// The scheduler, when the site declares one. This fallback has no port pool,
+	// so an SGE service fails with a clear error; SGE tasks work.
+	if strings.TrimSpace(c.opts.ConfigDir) != "" {
+		if b, ok, err := sge.FromStateFile(c.opts.ConfigDir); err != nil {
+			log.Printf("[srcos] sge backend disabled: %v", err)
+		} else if ok {
+			backends["sge"] = b
+		}
+	}
 	return runtime.NewRunner(runtime.Options{
 		ConfigDir:    c.opts.ConfigDir,
 		ToolsDir:     c.opts.ToolsDir,
@@ -755,7 +766,7 @@ func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
 		Storages:     c.opts.Storages,
 		Environments: c.opts.Environments,
 		Audit:        c.opts.Audit,
-		Backends:     map[string]runtime.Backend{"local": &runtime.Local{}},
+		Backends:     backends,
 	}), nil
 }
 

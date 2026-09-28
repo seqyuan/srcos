@@ -16,6 +16,50 @@ type StateConfig struct {
 	Auth   AuthState   `yaml:"auth"`
 	SSO    SSOState    `yaml:"sso"`
 	Audit  AuditState  `yaml:"audit,omitempty"`
+	SGE    SGEState    `yaml:"sge,omitempty"`
+}
+
+// SGEState configures the qsub/SGE backend: a cluster where the tool runs on a
+// compute node while the gateway stays on a login node.
+//
+// It lives in state.yaml, not in a tool manifest, because it describes the
+// *site* rather than the tool — the same 环境与数据 split that keeps cluster
+// defaults out of tool.yaml. An absent or Enabled:false section means this host
+// has no scheduler, and a `backend: sge` tool is refused with a clear error
+// instead of running in the wrong place.
+type SGEState struct {
+	Enabled bool `yaml:"enabled"`
+	// SubmitDir and RendezvousDir must be on a filesystem shared by the login
+	// node and the compute nodes: the job script is read from the first, and the
+	// control channel (endpoint, state, exit code) is written to the second.
+	SubmitDir     string `yaml:"submit_dir"`
+	RendezvousDir string `yaml:"rendezvous_dir"`
+	// PE is the parallel environment name; cpu is mapped onto `-pe <PE> <n>`.
+	PE             string `yaml:"pe"`
+	PEAccounting   string `yaml:"pe_accounting,omitempty"` // cores | threads
+	ThreadsPerCore int    `yaml:"threads_per_core,omitempty"`
+	DefaultQueue   string `yaml:"default_queue,omitempty"`
+	Project        string `yaml:"project,omitempty"`
+	// Binary paths; empty means "find on PATH".
+	Qsub   string `yaml:"qsub,omitempty"`
+	Qstat  string `yaml:"qstat,omitempty"`
+	Qdel   string `yaml:"qdel,omitempty"`
+	Qalter string `yaml:"qalter,omitempty"`
+	// SSH is the binary used for the local forward; empty means "ssh".
+	SSH string `yaml:"ssh,omitempty"`
+	// SSHUser is the login name for `ssh -L`; empty means the current user.
+	SSHUser string `yaml:"ssh_user,omitempty"`
+	// SSHArgs are extra ssh options (ProxyJump, a ControlMaster socket, ...).
+	SSHArgs []string `yaml:"ssh_args,omitempty"`
+	// Tunnel enables the ssh -L data channel. It is a *bool because the default
+	// is true and "absent" must be distinguishable from "explicitly false".
+	Tunnel *bool `yaml:"tunnel,omitempty"`
+	// DirectDial publishes the compute node's own address instead of tunnelling.
+	// The route layer only accepts loopback targets, so this works only when the
+	// gateway itself runs on the compute node; prefer Tunnel.
+	DirectDial bool `yaml:"direct_dial,omitempty"`
+	// PollSeconds is how often the rendezvous and qstat are consulted.
+	PollSeconds int `yaml:"poll_seconds,omitempty"`
 }
 
 // AuditState configures where the structured audit stream is forwarded.
@@ -164,8 +208,11 @@ func LoadState(path string) (*StateConfig, error) {
 		}
 		s.Auth.SessionSecret = hex.EncodeToString(secret)
 
-		// Persist it
-		raw := make(map[string]interface{})
+		// Persist it without dropping any section written by another command
+		// (audit, sge, ...): state.yaml is hand-edited too, so a rewrite must
+		// preserve what it does not itself understand.
+		raw := map[string]interface{}{}
+		_ = yaml.Unmarshal(data, &raw)
 		raw["server"] = map[string]interface{}{
 			"host":          s.Server.Host,
 			"port":          s.Server.Port,

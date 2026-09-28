@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/job"
@@ -67,6 +68,16 @@ type Config struct {
 
 	// SSH is the binary used for the local forward; empty means "ssh".
 	SSH string
+	// SSHUser is the login name for `ssh -L`; empty means the current user.
+	SSHUser string
+	// SSHArgs are extra ssh options (ProxyJump, a ControlMaster socket, ...).
+	SSHArgs []string
+	// Ports allocates the loopback port the tunnel listens on. Nil means a
+	// service that needs a tunnel fails with a clear error instead of guessing.
+	Ports PortAllocator
+	// NewTunnel starts the data channel. Nil uses the real `ssh -L`; tests
+	// replace it so the backend stays testable without a cluster.
+	NewTunnel TunnelFactory
 	// Tunnel enables the ssh -L data channel. When false the backend assumes
 	// the gateway can dial the compute node directly (some clusters allow it),
 	// which is faster and involves one less moving part.
@@ -101,6 +112,32 @@ type SchedulerDefaults struct {
 	ThreadsPerCore int
 	// Project is passed as `-P` when set (many sites gate fair-share on it).
 	Project string
+}
+
+// PortAllocator hands out the loopback port a tunnel listens on. The runtime's
+// shared port pool implements it, so a tunnel cannot collide with a local
+// service's port.
+type PortAllocator interface {
+	Acquire(owner string) (int, error)
+	Release(port int)
+}
+
+// TunnelRuntime is a started data channel (an `ssh -L` session in production).
+type TunnelRuntime interface {
+	Alive() bool
+	Stop(ctx context.Context) error
+}
+
+// TunnelFactory starts the data channel for t. It exists so the backend can be
+// tested without a cluster (and without spawning ssh).
+type TunnelFactory func(ctx context.Context, t *Tunnel) (TunnelRuntime, error)
+
+// defaultTunnelFactory runs the real `ssh -L`.
+func defaultTunnelFactory(ctx context.Context, t *Tunnel) (TunnelRuntime, error) {
+	if err := t.Start(ctx); err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 // rendezvousFor is the per-instance control directory.
@@ -341,6 +378,10 @@ type jobHandle struct {
 	endpointOnce bool
 	endpoint     route.Target
 	endpointErr  error
+
+	tunnelMu   sync.Mutex
+	tunnel     TunnelRuntime
+	tunnelPort int
 }
 
 func (h *jobHandle) Ref() string       { return h.jobID }
@@ -353,32 +394,110 @@ func (h *jobHandle) WantEndpoint() bool { return h.isService }
 
 func (h *jobHandle) rd() string { return h.cfg.rendezvousFor(h.instance) }
 
-// Endpoint blocks until the job has published the address it ended up on.
+// Endpoint blocks until the job has published the address it ended up on, then
+// makes it reachable from this host.
 //
 // This is the control channel in action: the job writes, the login node reads,
-// and the shared filesystem is the only thing they share.
+// and the shared filesystem is the only thing they share. On a cluster the
+// published address names a compute node, so a tunnel turns it into a loopback
+// port the gateway can proxy to.
 func (h *jobHandle) Endpoint() (route.Target, bool) {
 	if h.endpointOnce {
 		return h.endpoint, h.endpointErr == nil
 	}
 	h.endpointOnce = true
 
+	compute, err := h.waitComputeEndpoint()
+	if err != nil {
+		h.endpointErr = err
+		return route.Target{}, false
+	}
+	if h.cfg.Tunnel {
+		local, terr := h.startTunnel(compute)
+		if terr != nil {
+			h.endpointErr = terr
+			return route.Target{}, false
+		}
+		h.endpoint = local
+		return local, true
+	}
+	// No tunnel: publish the compute node's own address. The route layer only
+	// accepts loopback, so this is reachable only when the gateway and the job
+	// share a host (DirectDial).
+	h.endpoint = compute
+	return compute, true
+}
+
+// waitComputeEndpoint blocks until the job has published the address it ended
+// up on.
+func (h *jobHandle) waitComputeEndpoint() (route.Target, error) {
 	deadline := time.Now().Add(5 * time.Minute)
+	var last error
 	for time.Now().Before(deadline) {
 		ep, err := ReadEndpoint(h.rd())
 		if err == nil {
-			h.endpoint = ep
-			return ep, true
+			return ep, nil
 		}
-		h.endpointErr = err
-		st, _ := ReadRendezvous(h.rd(), "state")
-		if st == "exited" || st == "failed" {
-			h.endpointErr = fmt.Errorf("job %s %s before publishing an endpoint", h.jobID, st)
-			return route.Target{}, false
+		last = err
+		if st, _ := ReadRendezvous(h.rd(), FileState); terminalState(st) {
+			return route.Target{}, fmt.Errorf("job %s %s before publishing an endpoint", h.jobID, st)
 		}
 		time.Sleep(h.cfg.pollEvery())
 	}
-	return route.Target{}, false
+	return route.Target{}, fmt.Errorf("job %s published no endpoint within 5m: %w", h.jobID, last)
+}
+
+// startTunnel brings the compute node's loopback port to a loopback port on
+// this host. The tunnel is why "instances listen on loopback only" survives
+// contact with a scheduler.
+func (h *jobHandle) startTunnel(compute route.Target) (route.Target, error) {
+	if h.cfg.Ports == nil {
+		return route.Target{}, errors.New("sge service needs a port allocator for its ssh tunnel, but none is wired on this host")
+	}
+	port, err := h.cfg.Ports.Acquire(h.instance + "-tunnel")
+	if err != nil {
+		return route.Target{}, fmt.Errorf("allocate a tunnel port: %w", err)
+	}
+	factory := h.cfg.NewTunnel
+	if factory == nil {
+		factory = defaultTunnelFactory
+	}
+	tun := &Tunnel{
+		LocalPort:  port,
+		Node:       compute.Host,
+		RemoteHost: "127.0.0.1",
+		RemotePort: compute.Port,
+		User:       h.cfg.SSHUser,
+		SSHBin:     h.cfg.SSH,
+		ExtraArgs:  h.cfg.SSHArgs,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	started, err := factory(ctx, tun)
+	if err != nil {
+		h.cfg.Ports.Release(port)
+		return route.Target{}, fmt.Errorf("ssh -L to %s:%d: %w", compute.Host, compute.Port, err)
+	}
+	h.tunnelMu.Lock()
+	h.tunnel = started
+	h.tunnelPort = port
+	h.tunnelMu.Unlock()
+	return route.Target{Host: "127.0.0.1", Port: port}, nil
+}
+
+// stopTunnel tears down the data channel and returns its port to the pool.
+// Idempotent: Stop can race the reaper.
+func (h *jobHandle) stopTunnel(ctx context.Context) {
+	h.tunnelMu.Lock()
+	tun, port := h.tunnel, h.tunnelPort
+	h.tunnel, h.tunnelPort = nil, 0
+	h.tunnelMu.Unlock()
+	if tun != nil {
+		_ = tun.Stop(ctx)
+	}
+	if port != 0 && h.cfg.Ports != nil {
+		h.cfg.Ports.Release(port)
+	}
 }
 
 // Alive asks the scheduler, distinguishing "suspended" from "gone".
@@ -386,6 +505,15 @@ func (h *jobHandle) Endpoint() (route.Target, bool) {
 // A suspended job (SGE preemption, `s` state) is still the user's work; treating
 // it as dead would make SRCOS tear down a service that is merely paused.
 func (h *jobHandle) Alive() bool {
+	// A running job whose data channel is gone is not a reachable service,
+	// which is what Alive answers.
+	h.tunnelMu.Lock()
+	tun := h.tunnel
+	h.tunnelMu.Unlock()
+	if tun != nil && !tun.Alive() {
+		return false
+	}
+
 	st, err := h.queryState(context.Background())
 	if err != nil {
 		// The scheduler is unreachable. Fall back to the rendezvous, which the
@@ -488,6 +616,7 @@ func (h *jobHandle) exitStatus() runtime.ExitStatus {
 
 // Stop deletes the job. Idempotent: deleting an already-gone job is success.
 func (h *jobHandle) Stop(ctx context.Context) error {
+	defer h.stopTunnel(ctx)
 	out, err := h.cfg.runner().Run(ctx, h.cfg.bin("qdel"), h.jobID)
 	if err != nil {
 		// "job not found" is the expected outcome of a race with completion.

@@ -21,6 +21,7 @@ import (
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/runtime/sge"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -487,6 +488,18 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 	}
 	ports := portpool.New(0, 0)
 	routes := route.NewTable()
+	backends := map[string]runtime.Backend{
+		"local":    &runtime.Local{},
+		"external": &runtime.External{},
+	}
+	// The scheduler, when the site declares one. It shares the port pool so a
+	// service's ssh tunnel cannot collide with a local service's port.
+	if sgeBackend, ok, serr := sge.FromStateFile(configDir); serr != nil {
+		fmt.Fprintf(os.Stderr, "warning: sge backend disabled: %v\n", serr)
+	} else if ok {
+		sgeBackend.Config.Ports = ports
+		backends["sge"] = sgeBackend
+	}
 	runner := runtime.NewRunner(runtime.Options{
 		ConfigDir:    configDir,
 		ToolsDir:     toolsDir,
@@ -496,10 +509,7 @@ func buildRunner(configDir, toolsDir, user string, auditRec *audit.Recorder) (*r
 		Routes:       routes,
 		Audit:        auditRec,
 		AgentTokens:  runtimeTokens,
-		Backends: map[string]runtime.Backend{
-			"local":    &runtime.Local{},
-			"external": &runtime.External{},
-		},
+		Backends:     backends,
 	})
 	runner.SetPorts(ports)
 	return runner, routes, nil

@@ -650,3 +650,128 @@ func TestParseLeadingIntRejectsNonNumeric(t *testing.T) {
 		t.Fatalf("parseLeadingInt(4) = %d, %v", n, err)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// The data channel (ssh -L) for services
+// ─────────────────────────────────────────────────────────────────────────
+
+type fakePortAllocator struct {
+	acquired []string
+	released []int
+	next     int
+}
+
+func (f *fakePortAllocator) Acquire(owner string) (int, error) {
+	f.acquired = append(f.acquired, owner)
+	f.next++
+	return 41000 + f.next, nil
+}
+func (f *fakePortAllocator) Release(port int) { f.released = append(f.released, port) }
+
+type fakeTunnelRuntime struct {
+	alive   bool
+	stopped bool
+}
+
+func (f *fakeTunnelRuntime) Alive() bool                { return f.alive }
+func (f *fakeTunnelRuntime) Stop(context.Context) error { f.stopped = true; return nil }
+
+func TestServiceEndpointStartsATunnel(t *testing.T) {
+	runner := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qsub") {
+			return `Your job 4242 ("x") has been submitted`, nil
+		}
+		if strings.HasSuffix(name, "qdel") {
+			return "", nil
+		}
+		return "", os.ErrNotExist
+	}}
+	ports := &fakePortAllocator{}
+	tunRuntime := &fakeTunnelRuntime{alive: true}
+	var built *Tunnel
+
+	cfg := testConfig(t, runner)
+	cfg.Tunnel = true
+	cfg.Ports = ports
+	cfg.NewTunnel = func(_ context.Context, tun *Tunnel) (TunnelRuntime, error) {
+		built = tun
+		return tunRuntime, nil
+	}
+	b := &Backend{Config: cfg}
+	req := testRequest(t, cfg)
+	req.WantEndpoint = true
+	req.Tool.Kind = tool.KindService
+	req.Tool.Ingress = &tool.Ingress{Port: 3838}
+	h, err := b.Start(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rd := cfg.rendezvousFor("alice-demo-j1")
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = WriteRendezvous(rd, FileEndpoint, "node07:41234")
+	}()
+
+	ep, ok := h.Endpoint()
+	if !ok {
+		t.Fatalf("no endpoint: %v", h.(*jobHandle).endpointErr)
+	}
+	// The gateway may only route to loopback, so the compute node's address is
+	// replaced by the tunnel's local port.
+	if ep.Host != "127.0.0.1" || ep.Port != 41001 {
+		t.Fatalf("endpoint = %+v, want loopback:41001", ep)
+	}
+	if built == nil || built.Node != "node07" || built.LocalPort != 41001 || built.RemotePort != 41234 {
+		t.Fatalf("tunnel = %+v", built)
+	}
+	if built.RemoteHost != "127.0.0.1" {
+		t.Errorf("the tool binds loopback on the compute node, so RemoteHost must be 127.0.0.1: %+v", built)
+	}
+	if len(ports.acquired) != 1 {
+		t.Fatalf("port allocations = %v", ports.acquired)
+	}
+
+	// A dead data channel makes the service unreachable even while the job runs.
+	tunRuntime.alive = false
+	if h.Alive() {
+		t.Error("a dead tunnel must make the service not alive")
+	}
+	tunRuntime.alive = true
+
+	if err := h.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !tunRuntime.stopped {
+		t.Error("Stop did not stop the tunnel")
+	}
+	if len(ports.released) != 1 || ports.released[0] != 41001 {
+		t.Errorf("tunnel port not released: %v", ports.released)
+	}
+}
+
+func TestServiceWithoutAPortAllocatorFailsClearly(t *testing.T) {
+	cfg := testConfig(t, nil)
+	cfg.Tunnel = true
+	// Ports left nil: no allocator is wired on this host.
+	b := &Backend{Config: cfg}
+	req := testRequest(t, cfg)
+	req.WantEndpoint = true
+	req.Tool.Kind = tool.KindService
+	req.Tool.Ingress = &tool.Ingress{Port: 3838}
+	h, err := b.Start(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd := cfg.rendezvousFor("alice-demo-j1")
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = WriteRendezvous(rd, FileEndpoint, "node07:41234")
+	}()
+	if _, ok := h.Endpoint(); ok {
+		t.Fatal("a tunnel without a port allocator must not report an endpoint")
+	}
+	if msg := h.(*jobHandle).endpointErr; msg == nil || !strings.Contains(msg.Error(), "port allocator") {
+		t.Fatalf("error does not explain the missing allocator: %v", msg)
+	}
+}

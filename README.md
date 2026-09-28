@@ -302,6 +302,39 @@ auth:
 > 去掉启动参数不会清除它）。要关闭请编辑 `config/state.yaml`，删除 `trusted_proxy` 行
 > 后重启网关。每次启动时日志会打印当前生效值（`trusted proxy: ...`），可据此确认。
 
+### 调度器后端（`sge`，可选）
+
+`backend: sge` 的工具通过 `qsub` 提交到 SGE 集群，作业在计算节点上运行、网关留在登录节点。
+站点相关的设置写在 `config/state.yaml` 的 `sge` 段（它描述的是集群而不是工具，所以不进 `tool.yaml`）：
+
+```yaml
+sge:
+  enabled: true
+  submit_dir: /shared/srcos/submit      # 作业脚本落盘（登录节点与计算节点共享）
+  rendezvous_dir: /shared/srcos/rd      # 控制通道（endpoint/state/exit_code）
+  pe: smp                               # 并行环境：cpu → -pe smp N
+  pe_accounting: cores                  # cores（slots=cpu）| threads（slots=cpu×threads_per_core）
+  # threads_per_core: 2
+  # default_queue: sci.q
+  # project: myproject                  # 作为 -P 传入
+  # qsub/qstat/qdel/qalter: /opt/sge/bin/lx-amd64/qsub   # 默认从 PATH 查找
+  # tunnel: true                        # 默认 true：ssh -L 把计算节点的回环端口带到登录节点
+  # ssh_user: seqyuan                   # 默认当前用户
+  # ssh_args: ["-o", "ProxyJump=login"] # 站点特定的 ssh 选项
+  # poll_seconds: 2
+```
+
+- **共享盘是必须的**：`submit_dir` 与 `rendezvous_dir` 必须在登录节点与计算节点都可见。
+- **控制通道**：作业把 `endpoint`/`state`/`exit_code` 写进 `rendezvous_dir/<实例 id>/`，登录节点轮询读取——
+  不需要 agent，也不需要长连接。
+- **数据通道**：`tunnel: true` 时，工具在计算节点上绑定回环端口，`ssh -L` 把它转发到登录节点的回环端口，
+  网关照常代理。这样「实例只监听回环」在集群上依然成立。
+- 未配置（或 `enabled: false`）时，`backend: sge` 的工具会以「backend 未注册」被拒绝，不会在本机误跑。
+- 修改后需重启网关生效。
+
+> **重启注意**：网关重启后**不会**自动重建 SGE 服务的 `ssh -L` 隧道（隧道进程可能已随网关退出）。
+> 重启后用 `srcos svc list` 确认，必要时 `srcos svc stop` 后重新启动服务实例。
+
 ### 轻量级单点登录（`sso`，可选）
 
 登录网关一次后，把当前用户名以请求头的形式带给后端服务，后端信任该头即可

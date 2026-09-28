@@ -177,8 +177,10 @@ orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `
 防篡改：每文件 hash chain（`srcos audit verify`，多进程串链靠 flock + 重读文件尾）。
 保留：`srcos audit prune --keep 90d`（显式）。**外发**：`state.yaml` 的 `audit.forward_url` → HTTP 采集端（真正的信任锚；本地签名明确不做）。
 
-**在真实的 SGE 登录节点上跑一次** —— `sge` backend 的架构与测试都在（fake runner），
-`qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` 从未在真集群上验证（ADR-015）。
+**在真实的 SGE 登录节点上跑一次** —— `sge` backend 已完成注册与接线（`state.yaml` 的 `sge` 段；
+qsub/qstat/qdel 翻译、rendezvous 控制通道、`ssh -L` 数据通道含端口池与 Stop 回收），
+但只在 fake runner 上测过，`qsub`/`qstat -xml`/`qdel`、rendezvous、`ssh -L` **从未在真集群上验证**（ADR-015）；
+网关重启后的隧道重建也未做（重启后 SGE 服务需 `srcos svc stop` 后重启）。
 
 **统一服务实例化留下的**（ADR-026/027/028）：`external` 只支持**回环**后端（另一主机仍走卡片或 `ssh -L`）；
 digest 的 git 记录（HEAD + dirty）暂不做；`storages.yaml` 的管理端编辑**评估后不做**（以下同）。

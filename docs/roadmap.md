@@ -72,7 +72,8 @@
 - 工具契约：`tool.yaml` + 13 类注册期校验 + **机器可读 `interface`**（ADR-008/018）
 - 任务契约：`job.json` + **目录即队列** + 对工具的校验（参数子集、资源只能降、`doneWhen`）
 - 运行时：`Backend`/`Handle` 抽象；`local`（bwrap 沙箱；**task 与 service 都是 systemd 瞬时 unit**，
-  `prlimit` 兜底）与 `sge`（qsub 翻译 / `qstat -xml` 解析 / rendezvous / `ssh -L`）两个 backend
+  `prlimit` 兜底）与 `sge`（qsub 翻译 / `qstat -xml` 解析 / rendezvous / `ssh -L`；
+  **`state.yaml` 的 `sge` 段启用即注册**，未启用时 `backend: sge` 以「未注册」被拒）两个 backend
 - 生命周期：`RunTask` / `StartService` / `StopService` / `Reconcile` / `Reaper` / **`ReconcileTasks`**
   （每 tick 结算失去等待者的任务；判定由 systemd 的 `ExecStopPost` 落下，见 ADR-022）
 - **任务队列消费者**（ADR-022）：提交即自动执行（启动冲刷 + 提交唤醒 + tick；认领互斥）
@@ -130,7 +131,9 @@
 - ~~agent 提交幂等键（A2）~~ —— ✅ 完成（2026-09-26，ADR-019 第二期契约）
 - `storages` 的 rw 配额
 - `apptainer` sandbox
-- SGE 只在 fake runner 上测过，**从未在真登录节点运行**
+- SGE backend 已完成**注册与接线**（`state.yaml` 的 `sge` 段；qsub/qstat/qdel 翻译、rendezvous
+  控制通道、`ssh -L` 数据通道含端口池与 Stop 回收），但只在 fake runner 上测过，
+  **从未在真登录节点运行**；网关重启后的隧道重建未做
 
 ### 2.3 下一步
 
@@ -1058,10 +1061,10 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       白名单只能从自己可见的工具里选、**只认 session**（agent token 不能管理凭据）
 
 ### Phase 6：HPC / SGE
-- [ ] `sge` backend（`qsub` / `qstat -xml` / `qdel`）
-- [ ] rendezvous 文件协议 + `ssh -L` 隧道管理（含重连与回收）
-- [ ] `qstat` 状态映射：区分 `S`（挂起/抢占）与真死
-- [ ] `h_rt` 到期预警 + `qalter` 续期；空闲回收默认关闭
+- [x] `sge` backend 注册与站点配置（`state.yaml` 的 `sge` 段）—— 未接真集群
+- [x] rendezvous 文件协议 + `ssh -L` 隧道（含端口池分配与 Stop 回收）—— 未接真集群；网关重启后的隧道重建未做
+- [x] `qstat` 状态映射：区分 `S`（挂起/抢占）与真死
+- [ ] `h_rt` 到期预警 + `qalter` 续期（空闲回收默认关闭已做）
 - [ ] apptainer sandbox 物化（`-B` / `--containall` / SIF 镜像）
 - [ ] 镜像预热（`apptainer pull` 到共享盘）
 
