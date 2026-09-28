@@ -53,6 +53,7 @@ func realClusterConfig(t *testing.T) Config {
 		Qsub:          os.Getenv("SRCOS_SGE_QSUB"),
 		Qstat:         os.Getenv("SRCOS_SGE_QSTAT"),
 		Qdel:          os.Getenv("SRCOS_SGE_QDEL"),
+		Qalter:        os.Getenv("SRCOS_SGE_QALTER"),
 		SubmitDir:     need("SRCOS_SGE_SUBMIT_DIR"),
 		RendezvousDir: need("SRCOS_SGE_RD_DIR"),
 		Scheduler:     SchedulerDefaults{PE: pe, PEAccounting: "cores"},
@@ -216,4 +217,70 @@ func TestRealClusterServiceTunnel(t *testing.T) {
 		t.Fatal("no HTTP status through the tunnel")
 	}
 	t.Logf("GET through tunnel -> HTTP %d", resp.StatusCode)
+
+	// A gateway restart hands the record back to Reconcile: the ssh child
+	// outlives the process, so the surviving forward must be adopted rather than
+	// torn down or re-routed to a dead port.
+	rec := &runtime.Instance{ID: req.InstanceID, BackendRef: h.Ref(), Endpoint: ep.String()}
+	if err := b.ReattachUnit(ctx, rec); err != nil {
+		t.Fatalf("a live tunnel must be adopted on reattach: %v", err)
+	}
+}
+
+// TestRealClusterWalltimeRenewal exercises `qalter -l h_rt=...` against a real
+// scheduler: a job near its declared walltime must get its ceiling pushed out.
+func TestRealClusterWalltimeRenewal(t *testing.T) {
+	cfg := realClusterConfig(t)
+	cfg.Scheduler.RenewBefore = 3 * time.Minute
+	cfg.Scheduler.RenewFor = 10 * time.Minute
+
+	runID := time.Now().Format("150405.000000")
+	outDir := filepath.Join(os.Getenv("SRCOS_SGE_WORK_DIR"), "renew-"+runID)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := &tool.Tool{
+		ID:        "probe-renew",
+		Kind:      tool.KindTask,
+		Backend:   tool.BackendSGE,
+		Sandbox:   tool.SandboxNone,
+		Resources: tool.Resources{CPU: 1, Memory: "256Mi", Walltime: "0:02:00"},
+	}
+	req := runtime.StartRequest{
+		Tool:       tl,
+		Argv:       []string{"/bin/bash", "-c", "sleep 40"},
+		Env:        []string{"PATH=/usr/bin:/bin", "HOME=" + outDir},
+		UnitName:   "srcos-renew-" + runID,
+		LogPath:    filepath.Join(outDir, "job.log"),
+		InstanceID: "renew-" + runID,
+	}
+	b := &Backend{Config: cfg}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	h, err := b.Start(ctx, req)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = h.Stop(context.Background()) }()
+	t.Logf("submitted job %s", h.Ref())
+
+	// run.go seeds the lease from the declared walltime; this test drives the
+	// backend directly, so it seeds the same value.
+	inst := &runtime.Instance{
+		ID:             req.InstanceID,
+		BackendRef:     h.Ref(),
+		StartedAt:      time.Now(),
+		LeaseExpiresAt: time.Now().Add(2 * time.Minute),
+	}
+	did, err := b.UnitRenew(ctx, inst, tl)
+	if err != nil {
+		t.Fatalf("UnitRenew: %v", err)
+	}
+	if !did {
+		t.Fatal("renewal did not fire for a job inside renew_before")
+	}
+	if !inst.LeaseExpiresAt.After(time.Now().Add(5 * time.Minute)) {
+		t.Fatalf("lease not pushed out: %v", inst.LeaseExpiresAt)
+	}
+	t.Logf("renewed %s until %s", h.Ref(), inst.LeaseExpiresAt.Format(time.RFC3339))
 }

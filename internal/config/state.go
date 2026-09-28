@@ -60,6 +60,12 @@ type SGEState struct {
 	DirectDial bool `yaml:"direct_dial,omitempty"`
 	// PollSeconds is how often the rendezvous and qstat are consulted.
 	PollSeconds int `yaml:"poll_seconds,omitempty"`
+	// RenewBefore / RenewFor enable walltime renewal for long-running services
+	// (ADR-015): when a job is within RenewBefore of its h_rt, SRCOS extends it
+	// by RenewFor with `qalter -l h_rt=...`. Zero RenewBefore disables renewal,
+	// and then a service simply ends when its declared walltime does.
+	RenewBefore string `yaml:"renew_before,omitempty"`
+	RenewFor    string `yaml:"renew_for,omitempty"`
 }
 
 // AuditState configures where the structured audit stream is forwarded.

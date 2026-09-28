@@ -2,6 +2,8 @@ package sge
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,10 +130,10 @@ func TestQsubArgsTranslatesResources(t *testing.T) {
 	args := strings.Join(b.qsubArgs(req), " ")
 
 	for _, want := range []string{
-		"-pe smp 4",       // cpu -> slots
-		"-l h_vmem=2G",    // 8Gi / 4 slots, per-slot
-		"-l h_rt=0:10:00", // walltime, normalised
-		"-q sci.q",        // the tool's queue
+		"-pe smp 4",    // cpu -> slots
+		"-l h_vmem=2G", // 8Gi / 4 slots, per-slot
+		"h_rt=0:10:00", // walltime, normalised (kept in the same -l list)
+		"-q sci.q",     // the tool's queue
 		"-N srcos-alice-demo-j1",
 		"-j y",
 	} {
@@ -857,5 +859,160 @@ func TestQueryStateUsesPlainQstat(t *testing.T) {
 	}
 	if got := strings.Join(qstatArgs, " "); got != "-xml" {
 		t.Fatalf("qstat invoked as %q, want %q", got, "-xml")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// h_rt renewal (qalter)
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestUnitRenewOnlyWhenDue(t *testing.T) {
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qalter") {
+			return "", nil
+		}
+		return "", os.ErrNotExist
+	}}
+	cfg := testConfig(t, fake)
+	cfg.Scheduler.RenewBefore = 10 * time.Minute
+	cfg.Scheduler.RenewFor = time.Hour
+	b := &Backend{Config: cfg}
+	inst := &runtime.Instance{BackendRef: "4242", StartedAt: time.Now(), LeaseExpiresAt: time.Now().Add(time.Hour)}
+	// The tool declares memory, so a renewal must repeat h_vmem: `qalter -l`
+	// replaces the resource list and the scheduler refuses to drop a consumable
+	// a running job already holds (observed on a real cluster).
+	tl := &tool.Tool{Resources: tool.Resources{CPU: 4, Memory: "8Gi", Walltime: "1:00:00"}}
+
+	// Far from the ceiling: no qalter.
+	if did, err := b.UnitRenew(context.Background(), inst, tl); err != nil || did {
+		t.Fatalf("premature renewal: did=%v err=%v", did, err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("qalter called early: %v", fake.calls)
+	}
+
+	// Within the window: renew.
+	inst.LeaseExpiresAt = time.Now().Add(5 * time.Minute)
+	did, err := b.UnitRenew(context.Background(), inst, tl)
+	if err != nil || !did {
+		t.Fatalf("renewal did not fire: did=%v err=%v", did, err)
+	}
+	joined := strings.Join(fake.last(), " ")
+	if !strings.Contains(joined, "qalter") || !strings.Contains(joined, "-l") || !strings.Contains(joined, "h_rt=") {
+		t.Fatalf("qalter args = %v", fake.last())
+	}
+	if !strings.Contains(joined, "h_vmem=2G") {
+		t.Fatalf("renewal dropped h_vmem, which a running job's qalter must repeat: %v", fake.last())
+	}
+	if !inst.LeaseExpiresAt.After(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("lease not moved forward: %v", inst.LeaseExpiresAt)
+	}
+
+	// A second tick in the same window must not renew again.
+	if did, _ := b.UnitRenew(context.Background(), inst, tl); did {
+		t.Fatal("renewed twice for the same window")
+	}
+}
+
+func TestUnitRenewDisabledByDefault(t *testing.T) {
+	fake := &fakeRunner{}
+	cfg := testConfig(t, fake) // RenewBefore is zero
+	b := &Backend{Config: cfg}
+	inst := &runtime.Instance{BackendRef: "1", StartedAt: time.Now(), LeaseExpiresAt: time.Now()}
+	if did, err := b.UnitRenew(context.Background(), inst, &tool.Tool{}); err != nil || did {
+		t.Fatalf("renewal ran while disabled: did=%v err=%v", did, err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("qalter called while disabled: %v", fake.calls)
+	}
+}
+
+func TestFormatWalltimeSeconds(t *testing.T) {
+	cases := map[int64]string{0: "0:00:00", 60: "0:01:00", 3661: "1:01:01", 90000: "25:00:00"}
+	for secs, want := range cases {
+		if got := formatWalltimeSeconds(secs); got != want {
+			t.Errorf("formatWalltimeSeconds(%d) = %q, want %q", secs, got, want)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Reattach after a gateway restart
+// ─────────────────────────────────────────────────────────────────────────
+
+func TestReattachUnitAdoptsASurvivingTunnel(t *testing.T) {
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qdel") {
+			return "", nil
+		}
+		return "", os.ErrNotExist
+	}}
+	cfg := testConfig(t, fake)
+	cfg.Tunnel = true
+	b := &Backend{Config: cfg}
+
+	// A live loopback listener stands in for the ssh forward that outlived the
+	// gateway (the child is in its own process group and is not killed with it).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	inst := &runtime.Instance{ID: "svc1", BackendRef: "4242", Endpoint: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := WriteRendezvous(cfg.rendezvousFor(inst.ID), FileEndpoint, "node07:41234"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReattachUnit(context.Background(), inst); err != nil {
+		t.Fatalf("a surviving tunnel must be adopted: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("an adopted instance was stopped: %v", fake.calls)
+	}
+}
+
+func TestReattachUnitSettlesADeadTunnel(t *testing.T) {
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		if strings.HasSuffix(name, "qdel") {
+			return "", nil
+		}
+		return "", os.ErrNotExist
+	}}
+	cfg := testConfig(t, fake)
+	cfg.Tunnel = true
+	b := &Backend{Config: cfg}
+
+	// A port with nothing listening.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	inst := &runtime.Instance{ID: "svc1", BackendRef: "4242", Endpoint: fmt.Sprintf("127.0.0.1:%d", port)}
+	if err := WriteRendezvous(cfg.rendezvousFor(inst.ID), FileEndpoint, "node07:41234"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReattachUnit(context.Background(), inst); err == nil {
+		t.Fatal("a dead tunnel must not be adopted")
+	}
+	// The job must be stopped so it does not keep a slot with no route to it.
+	if len(fake.calls) == 0 || !strings.HasSuffix(fake.calls[len(fake.calls)-1][0], "qdel") {
+		t.Fatalf("the unadoptable job was not stopped: %v", fake.calls)
+	}
+}
+
+func TestReattachUnitIsANoOpWithoutATunnel(t *testing.T) {
+	fake := &fakeRunner{}
+	cfg := testConfig(t, fake)
+	cfg.Tunnel = false
+	b := &Backend{Config: cfg}
+	if err := b.ReattachUnit(context.Background(), &runtime.Instance{ID: "x", BackendRef: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("unexpected calls: %v", fake.calls)
 	}
 }

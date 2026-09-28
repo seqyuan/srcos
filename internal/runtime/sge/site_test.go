@@ -3,6 +3,7 @@ package sge
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
 )
@@ -90,5 +91,32 @@ func TestFromStateFileStaysDisabledWhenEnabledIsFalse(t *testing.T) {
 	}
 	if _, ok, err := FromStateFile(dir); err != nil || ok {
 		t.Fatalf("disabled sge registered: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFromStateParsesRenewal(t *testing.T) {
+	cfg, err := FromState(config.SGEState{
+		Enabled: true, SubmitDir: "/s", RendezvousDir: "/r", PE: "smp",
+		RenewBefore: "10m", RenewFor: "1h30m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scheduler.RenewBefore != 10*time.Minute || cfg.Scheduler.RenewFor != 90*time.Minute {
+		t.Fatalf("renewal = %v / %v", cfg.Scheduler.RenewBefore, cfg.Scheduler.RenewFor)
+	}
+}
+
+func TestFromStateRejectsBadRenewal(t *testing.T) {
+	if _, err := FromState(config.SGEState{
+		Enabled: true, SubmitDir: "/s", RendezvousDir: "/r", PE: "smp", RenewBefore: "soon",
+	}); err == nil {
+		t.Fatal("an unparsable renew_before must be rejected")
+	}
+	// RenewFor without RenewBefore would never fire: reject it at validation.
+	if _, err := FromState(config.SGEState{
+		Enabled: true, SubmitDir: "/s", RendezvousDir: "/r", PE: "smp", RenewFor: "1h",
+	}); err == nil {
+		t.Fatal("RenewFor without RenewBefore must be rejected")
 	}
 }

@@ -322,6 +322,8 @@ sge:
   # ssh_user: seqyuan                   # 默认当前用户
   # ssh_args: ["-o", "ProxyJump=login"] # 站点特定的 ssh 选项
   # poll_seconds: 2
+  # renew_before: "10m"                # 开启 h_rt 续期：剩余不足 10m 时用 qalter 延长
+  # renew_for: "1h"                    # 每次延长 1h（省略则用工具声明的 walltime）
 ```
 
 - **共享盘是必须的**：`submit_dir` 与 `rendezvous_dir` 必须在登录节点与计算节点都可见。
@@ -329,11 +331,17 @@ sge:
   不需要 agent，也不需要长连接。
 - **数据通道**：`tunnel: true` 时，工具在计算节点上绑定回环端口，`ssh -L` 把它转发到登录节点的回环端口，
   网关照常代理。这样「实例只监听回环」在集群上依然成立。
+- **`h_rt` 续期**：服务声明的 walltime 会被 SGE 当作硬上限。配置 `renew_before`/`renew_for` 后，
+  到期前 SRCOS 用 `qalter -l h_rt=...`（并重述 `h_vmem`，否则 SGE 拒绝改运行中作业）把上限推后。
+- **提交主机限制**：不少集群只有提交主机能跑 `qsub`/`qdel`/`qalter`，其余机器能 `qstat` 但投递被拒。
+  若网关不在提交主机上，把 `qsub`/`qdel`/`qalter` 指向转发脚本（如 `ssh <submit-host> qsub "$@"`）即可；
+  `qstat` 一般本机可用。
 - 未配置（或 `enabled: false`）时，`backend: sge` 的工具会以「backend 未注册」被拒绝，不会在本机误跑。
 - 修改后需重启网关生效。
 
-> **重启注意**：网关重启后**不会**自动重建 SGE 服务的 `ssh -L` 隧道（隧道进程可能已随网关退出）。
-> 重启后用 `srcos svc list` 确认，必要时 `srcos svc stop` 后重新启动服务实例。
+> **重启行为**：`ssh -L` 子进程在独立进程组里，通常能活过网关重启——重启时若隧道仍可用，
+> SRCOS 直接采纳并恢复路由；若隧道已断，该实例无法再被采纳，SRCOS 会撤回路由、标记为已停止并
+> `qdel` 掉作业（避免占着计算节点），需重新启动服务。
 
 ### 轻量级单点登录（`sso`，可选）
 

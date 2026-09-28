@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,10 @@ type SchedulerDefaults struct {
 	ThreadsPerCore int
 	// Project is passed as `-P` when set (many sites gate fair-share on it).
 	Project string
+	// RenewBefore / RenewFor configure walltime renewal for services (ADR-015).
+	// RenewBefore > 0 turns it on; RenewFor defaults to one more full walltime.
+	RenewBefore time.Duration
+	RenewFor    time.Duration
 }
 
 // PortAllocator hands out the loopback port a tunnel listens on. The runtime's
@@ -200,6 +205,9 @@ func (c *Config) Validate() error {
 	case "", "cores", "threads":
 	default:
 		problems = append(problems, "Scheduler.PEAccounting must be cores|threads")
+	}
+	if c.Scheduler.RenewFor > 0 && c.Scheduler.RenewBefore <= 0 {
+		problems = append(problems, "Scheduler.RenewFor is set but RenewBefore is zero (renewal would never fire)")
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("sge backend: %s", strings.Join(problems, "; "))
@@ -303,45 +311,67 @@ func (b *Backend) qsubArgs(req runtime.StartRequest) []string {
 		"-V", // forward the submission environment (the sandbox clears it anyway)
 	}
 
-	slots := res.CPU
-	if slots < 1 {
-		slots = 1
-	}
-	if sd.PEAccounting == "threads" && sd.ThreadsPerCore > 0 {
-		slots *= sd.ThreadsPerCore
-	}
+	slots := b.slotsFor(res)
 	if sd.PE != "" {
 		args = append(args, "-pe", sd.PE, strconv.Itoa(slots))
 	}
-
-	if res.Memory != "" {
-		if b, err := tool.ParseMemory(res.Memory); err == nil {
-			// h_vmem is a per-slot limit on SGE, so a tool asking for N cores
-			// and M total needs M/N per slot. Getting this wrong either
-			// under-requests (jobs OOM) or over-reserves (jobs never start).
-			perSlot := b / uint64(slots)
-			if perSlot == 0 {
-				perSlot = b
-			}
-			args = append(args, "-l", "h_vmem="+tool.FormatMemory(perSlot))
-		}
-	}
-	if res.Walltime != "" {
-		args = append(args, "-l", "h_rt="+normalizeWalltime(res.Walltime))
-	}
+	args = append(args, b.resourceLimits(res, slots)...)
 	if q := firstNonEmpty(res.Queue, sd.DefaultQueue); q != "" {
 		args = append(args, "-q", q)
 	}
 	if sd.Project != "" {
 		args = append(args, "-P", sd.Project)
 	}
+	return args
+}
+
+// slotsFor maps a CPU request onto SGE slots. HPC sites differ on whether a
+// slot is a core or a thread, so the site declares the accounting mode.
+func (b *Backend) slotsFor(res tool.Resources) int {
+	slots := res.CPU
+	if slots < 1 {
+		slots = 1
+	}
+	if b.Config.Scheduler.PEAccounting == "threads" && b.Config.Scheduler.ThreadsPerCore > 0 {
+		slots *= b.Config.Scheduler.ThreadsPerCore
+	}
+	return slots
+}
+
+// resourceLimits renders the `-l` resource list.
+//
+// It is shared by qsub and qalter because `qalter -l` *replaces* a job's
+// resource list: altering only h_rt would drop h_vmem, and the scheduler refuses
+// that for a running job ("former resource request on consumable h_vmem ...
+// missing in new resource request", observed on a real cluster). One renderer is
+// what keeps the two in step.
+func (b *Backend) resourceLimits(res tool.Resources, slots int) []string {
+	var items []string
+	if res.Memory != "" {
+		if bytes, err := tool.ParseMemory(res.Memory); err == nil {
+			// h_vmem is a per-slot limit on SGE, so a tool asking for N cores
+			// and M total needs M/N per slot. Getting this wrong either
+			// under-requests (jobs OOM) or over-reserves (jobs never start).
+			perSlot := bytes / uint64(slots)
+			if perSlot == 0 {
+				perSlot = bytes
+			}
+			items = append(items, "h_vmem="+tool.FormatMemory(perSlot))
+		}
+	}
+	if res.Walltime != "" {
+		items = append(items, "h_rt="+normalizeWalltime(res.Walltime))
+	}
 	if res.GPU > 0 {
 		// GPU requests are site-specific (-l gpu=N is the common spelling, but
 		// some clusters use a consumable or a specific PE). The generic form is
 		// emitted so the site can override it with a patch later.
-		args = append(args, "-l", fmt.Sprintf("gpu=%d", res.GPU))
+		items = append(items, fmt.Sprintf("gpu=%d", res.GPU))
 	}
-	return args
+	if len(items) == 0 {
+		return nil
+	}
+	return []string{"-l", strings.Join(items, ",")}
 }
 
 // normalizeWalltime converts H:MM:SS into SGE's HH:MM:SS.
@@ -676,6 +706,124 @@ func (b *Backend) UnitAlive(ctx context.Context, inst *runtime.Instance) bool {
 		}
 	}
 	return false
+}
+
+// UnitRenew extends a running service's own scheduler ceiling (`h_rt`) with
+// `qalter`, so a long-running service is not killed by SGE while the platform
+// still wants it (ADR-015). It is a no-op unless the site turned renewal on and
+// the job is close enough to its lease to need it.
+//
+// inst.LeaseExpiresAt is the authority for "close enough": it moves forward on
+// every renewal, so a scan tick cannot renew twice for the same window. h_rt
+// counts from job start, not from now, so the new value is elapsed + RenewFor.
+func (b *Backend) UnitRenew(ctx context.Context, inst *runtime.Instance, t *tool.Tool) (bool, error) {
+	if inst == nil || inst.BackendRef == "" || inst.LeaseExpiresAt.IsZero() {
+		return false, nil
+	}
+	sd := b.Config.Scheduler
+	if sd.RenewBefore <= 0 {
+		return false, nil
+	}
+	now := time.Now()
+	if now.Before(inst.LeaseExpiresAt.Add(-sd.RenewBefore)) {
+		return false, nil
+	}
+	renewFor := sd.RenewFor
+	if renewFor <= 0 {
+		renewFor = declaredWalltime(t)
+	}
+	if renewFor <= 0 {
+		return false, errors.New("walltime renewal is on but neither renew_for nor the tool's walltime gives a duration")
+	}
+	elapsed := now.Sub(inst.StartedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	newHRT := formatWalltimeSeconds(int64((elapsed + renewFor).Seconds()))
+
+	// `qalter -l` REPLACES the resource list, so h_vmem (and any GPU request)
+	// must be repeated or the scheduler rejects the change for a running job.
+	// resourceLimits is the same renderer qsub used, which is what keeps the two
+	// in step.
+	if t == nil {
+		return false, errors.New("walltime renewal needs the tool's resource declaration")
+	}
+	res := t.Resources
+	res.Walltime = newHRT
+	args := append(b.resourceLimits(res, b.slotsFor(res)), inst.BackendRef)
+	out, err := b.Config.runner().Run(ctx, b.Config.bin("qalter"), args...)
+	if err != nil {
+		return false, fmt.Errorf("qalter %s %s: %w: %s", inst.BackendRef, strings.Join(args, " "), err, runtime.FirstLine(out))
+	}
+	inst.LeaseExpiresAt = now.Add(renewFor)
+	return true, nil
+}
+
+// ReattachUnit re-establishes an SGE service's data channel after a gateway
+// restart.
+//
+// The ssh -L child is in its own process group and is not killed when the
+// gateway exits, so it often outlives the restart: if the recorded loopback
+// port still accepts connections, the route works unchanged and there is
+// nothing to rebuild. If it does not, SRCOS no longer owns the process and
+// cannot re-adopt it, so the instance is settled: the job is stopped (it must
+// not keep a compute-node slot with no way to reach it) and the caller orphans
+// the record.
+func (b *Backend) ReattachUnit(ctx context.Context, inst *runtime.Instance) error {
+	if !b.Config.Tunnel {
+		return nil // nothing platform-owned to re-establish
+	}
+	if inst == nil {
+		return errors.New("nil instance")
+	}
+	compute, err := ReadEndpoint(b.Config.rendezvousFor(inst.ID))
+	if err != nil {
+		b.stopUnreachable(ctx, inst)
+		return fmt.Errorf("the job's rendezvous endpoint is gone: %w", err)
+	}
+	host, portStr, err := net.SplitHostPort(inst.Endpoint)
+	if err != nil {
+		b.stopUnreachable(ctx, inst)
+		return fmt.Errorf("recorded endpoint %q is not host:port: %w", inst.Endpoint, err)
+	}
+	localPort, err := strconv.Atoi(portStr)
+	if err != nil || localPort <= 0 || localPort > 65535 {
+		b.stopUnreachable(ctx, inst)
+		return fmt.Errorf("recorded endpoint %q has no usable loopback port", inst.Endpoint)
+	}
+	if conn, derr := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(localPort)), time.Second); derr == nil {
+		conn.Close()
+		return nil
+	}
+	b.stopUnreachable(ctx, inst)
+	return fmt.Errorf("the ssh -L tunnel to %s:%d did not survive the restart", compute.Host, compute.Port)
+}
+
+// stopUnreachable ends the underlying job so an unadoptable service does not
+// keep a compute-node slot with no route to it. Best-effort: the caller settles
+// the record either way.
+func (b *Backend) stopUnreachable(ctx context.Context, inst *runtime.Instance) {
+	_ = b.StopUnit(ctx, inst)
+}
+
+// declaredWalltime is the tool's walltime as a duration (0 when unset).
+func declaredWalltime(t *tool.Tool) time.Duration {
+	if t == nil {
+		return 0
+	}
+	secs, err := tool.ParseWalltimeOrZero(t.Resources.Walltime)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// formatWalltimeSeconds renders a duration the way SGE's h_rt wants it.
+func formatWalltimeSeconds(secs int64) string {
+	if secs < 0 {
+		secs = 0
+	}
+	return fmt.Sprintf("%d:%02d:%02d", secs/3600, (secs%3600)/60, secs%60)
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -556,6 +556,12 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	}
 	inst.Mounts = renderMounts(prep.spec)
 	inst.RequestedCPU, inst.RequestedMemory = requestedResources(t, j)
+	if secs := walltimeSeconds(t, j); secs > 0 {
+		// The scheduler's own ceiling, when the tool declares one: the seed the
+		// renewal pass compares against. It lives on the record so a restart
+		// keeps renewing a service that outlives the gateway.
+		inst.LeaseExpiresAt = inst.StartedAt.Add(time.Duration(secs) * time.Second)
+	}
 	inst.State = StateStarting
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		_ = h.Stop(context.Background())
@@ -864,6 +870,29 @@ type UnitStopper interface {
 	StopUnit(ctx context.Context, inst *Instance) error
 }
 
+// UnitRenewer is implemented by backends whose unit has a scheduler-imposed
+// ceiling that the platform can push out instead of accepting as the end of
+// the unit (SGE's `h_rt`, renewed with `qalter`).
+//
+// It receives the record because the renewal runs on the scan tick, in the
+// gateway process, which does not hold the live Handle. The backend updates
+// inst.LeaseExpiresAt in place when it renews; the caller persists the record.
+type UnitRenewer interface {
+	UnitRenew(ctx context.Context, inst *Instance, t *tool.Tool) (bool, error)
+}
+
+// UnitReattacher is implemented by backends that must re-establish runtime
+// state the platform owns before an instance can be routed again after a
+// restart (an SGE service's ssh -L tunnel is a child process, not something a
+// record can describe).
+//
+// Returning an error means the instance cannot be adopted: the caller settles
+// it and withdraws the route, and the backend is responsible for not leaving a
+// running unit behind with no way to reach it.
+type UnitReattacher interface {
+	ReattachUnit(ctx context.Context, inst *Instance) error
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // 回收
 // ─────────────────────────────────────────────────────────────────────────
@@ -991,7 +1020,9 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 		// come back. A backend that only implements UnitAlive (external) keeps
 		// its old behavior.
 		alive := false
+		var backend Backend
 		if b, ok := r.opts.Backends[inst.Backend]; ok {
+			backend = b
 			if goner, ok := b.(UnitGoner); ok {
 				alive = !goner.UnitGone(ctx, inst)
 			} else if prober, ok := b.(UnitProber); ok {
@@ -1001,6 +1032,28 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 
 		switch {
 		case alive && !inst.State.Terminal():
+			// A backend that owns runtime state the platform cannot rebuild must
+			// re-establish it before the instance is routed again: an SGE service's
+			// ssh -L tunnel is a child process that may or may not have outlived the
+			// gateway. On failure the instance is settled, not adopted, so traffic
+			// is never sent at a dead loopback port.
+			if reattacher, ok := backend.(UnitReattacher); ok {
+				if rerr := reattacher.ReattachUnit(ctx, inst); rerr != nil {
+					inst.State = StateStopped
+					inst.EndedAt = time.Now().UTC()
+					inst.Error = "found unreachable during startup reconcile: " + rerr.Error()
+					_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+					if r.ports != nil {
+						r.ports.Release(port)
+					}
+					if r.opts.Routes != nil {
+						r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
+					}
+					orphaned = append(orphaned, inst.ID)
+					r.auditInstance(inst, "instance.orphaned", map[string]any{"error": inst.Error})
+					continue
+				}
+			}
 			// Still running: re-pin its port so it is not handed to a second
 			// instance, and re-publish the route the in-memory table lost.
 			if r.ports != nil {
@@ -1117,6 +1170,63 @@ func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err 
 		err = errors.New(strings.Join(problems, "; "))
 	}
 	return orphaned, err
+}
+
+// RenewServices pushes out the scheduler's own ceiling on live services.
+//
+// On a cluster the walltime (`h_rt`) is what ends a long-running service, not a
+// SRCOS timer: idle reaping is off there because queue wait is expensive
+// (ADR-015). Without this, a notebook someone is actively using would be killed
+// by SGE at its declared walltime. A backend that can renew is asked to; the
+// moved lease is persisted so the next tick does not renew again for the same
+// window.
+//
+// It is a no-op for every backend that does not implement UnitRenewer.
+func (r *Runner) RenewServices(ctx context.Context) (renewed []string, err error) {
+	insts, err := ListInstances(r.opts.ConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	for _, inst := range insts {
+		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
+			continue
+		}
+		b, ok := r.opts.Backends[inst.Backend]
+		if !ok {
+			continue
+		}
+		renewer, ok := b.(UnitRenewer)
+		if !ok {
+			continue
+		}
+		t, terr := findTool(r.opts.ToolsDir, inst.Tool)
+		if terr != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, terr))
+			continue
+		}
+		did, rerr := renewer.UnitRenew(ctx, inst, t)
+		if rerr != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, rerr))
+			continue
+		}
+		if !did {
+			continue
+		}
+		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, serr))
+			continue
+		}
+		renewed = append(renewed, inst.ID)
+		r.auditInstance(inst, "instance.renewed", map[string]any{
+			"until": inst.LeaseExpiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Strings(renewed)
+	if len(problems) > 0 {
+		err = errors.New(strings.Join(problems, "; "))
+	}
+	return renewed, err
 }
 
 // ReconcileTasks settles task records that no live process backs any more.
@@ -1364,6 +1474,19 @@ func requestedResources(t *tool.Tool, j *job.Job) (int, string) {
 		res = job.EffectiveResources(j, t)
 	}
 	return res.CPU, res.Memory
+}
+
+// walltimeSeconds is the effective walltime (0 when unset or unparsable).
+func walltimeSeconds(t *tool.Tool, j *job.Job) int64 {
+	res := t.Resources
+	if j != nil {
+		res = job.EffectiveResources(j, t)
+	}
+	secs, err := tool.ParseWalltimeOrZero(res.Walltime)
+	if err != nil {
+		return 0
+	}
+	return secs
 }
 
 func renderMounts(spec *sandbox.Spec) []string {

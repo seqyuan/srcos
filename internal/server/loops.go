@@ -39,6 +39,9 @@ func (s *Server) ScanLoop(interval time.Duration, stop <-chan struct{}) {
 			// means "no traffic", which is why the reaper is given the proxy's
 			// observations rather than the record's start time.
 			s.reapServices()
+			// Push out the scheduler's own ceiling on long-running services
+			// (`qalter -l h_rt=...`) before it kills work the platform wants.
+			s.renewServices()
 			// Settle task records whose process died while the gateway was away:
 			// a task's verdict is written by the process that started it, and a
 			// "running" record that nothing backs is a lie that also holds the

@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/seqyuan/srcos/internal/portpool"
@@ -158,5 +161,120 @@ func TestReconcileServicesLeavesLiveServiceAlone(t *testing.T) {
 	if rec.State != StateRunning || !rec.EndedAt.IsZero() {
 		// EndedAt must stay zero for a service that never ended.
 		t.Fatalf("a live service must not be marked ended: %+v", rec)
+	}
+}
+
+// reattachBackend embeds the plain stub and adds the reattach hook, so only the
+// tests that opt in exercise it (a method on stubBackend itself would change
+// every other reconcile test).
+type reattachBackend struct {
+	*stubBackend
+	err        error
+	reattached bool
+}
+
+func (b *reattachBackend) ReattachUnit(context.Context, *Instance) error {
+	b.reattached = true
+	return b.err
+}
+
+func writeDemoServiceTool(t *testing.T, toolsDir string) {
+	t.Helper()
+	dir := filepath.Join(toolsDir, "demo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "schemaVersion: 1\nid: demo\nversion: 0.1.0\nname: Demo\nkind: service\n" +
+		"backend: local\nsandbox: none\nentry: work.sh\n" +
+		"resources: {cpu: 1, memory: \"512Mi\"}\ningress: {port: 8080}\n" +
+		"lifecycle: {restart: never, max_lifetime: \"1h\", idle_ttl: \"30m\"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "tool.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "work.sh"), []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A backend that cannot re-establish what the platform owns (an SGE service's
+// ssh tunnel) must not be adopted: routing to a dead loopback port is worse than
+// a record that says the service is gone.
+func TestReconcileSettlesAnInstanceThatCannotBeReattached(t *testing.T) {
+	configDir := t.TempDir()
+	toolsDir := filepath.Join(t.TempDir(), "tools")
+	writeDemoServiceTool(t, toolsDir)
+
+	inst := saveTestInstance(t, configDir, "alice-demo-svc", "service", StateRunning)
+	inst.Endpoint = "127.0.0.1:20123"
+	inst.RoutePath = "/proxy/alice/demo"
+	if err := SaveInstance(InstancePath(configDir, inst.ID), inst); err != nil {
+		t.Fatal(err)
+	}
+	routes := route.NewTable()
+	if err := routes.Put(route.Entry{
+		User: inst.User, Tool: inst.Tool, InstanceID: inst.ID,
+		Path: inst.RoutePath, Target: route.Target{Host: "127.0.0.1", Port: 20123},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ports := portpool.New(0, 0)
+	rb := &reattachBackend{stubBackend: &stubBackend{alive: true}, err: errors.New("tunnel gone")}
+	runner := NewRunner(Options{
+		ConfigDir: configDir,
+		ToolsDir:  toolsDir,
+		Routes:    routes,
+		Backends:  map[string]Backend{"local": rb},
+	})
+	runner.SetPorts(ports)
+
+	adopted, orphaned, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rb.reattached {
+		t.Fatal("Reconcile did not ask the backend to reattach")
+	}
+	if containsString(adopted, inst.ID) || !containsString(orphaned, inst.ID) {
+		t.Fatalf("adopted=%v orphaned=%v", adopted, orphaned)
+	}
+	if _, _, ok := routes.GetByPath(inst.RoutePath); ok {
+		t.Fatal("the route of an unreachable service must be withdrawn")
+	}
+	if rec := loadTestInstance(t, configDir, inst.ID); rec.State != StateStopped || rec.Error == "" {
+		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func TestReconcileAdoptsAfterASuccessfulReattach(t *testing.T) {
+	configDir := t.TempDir()
+	toolsDir := filepath.Join(t.TempDir(), "tools")
+	writeDemoServiceTool(t, toolsDir)
+
+	inst := saveTestInstance(t, configDir, "alice-demo-svc", "service", StateRunning)
+	inst.Endpoint = "127.0.0.1:20123"
+	inst.RoutePath = "/proxy/alice/demo"
+	if err := SaveInstance(InstancePath(configDir, inst.ID), inst); err != nil {
+		t.Fatal(err)
+	}
+	routes := route.NewTable()
+	ports := portpool.New(0, 0)
+	rb := &reattachBackend{stubBackend: &stubBackend{alive: true}}
+	runner := NewRunner(Options{
+		ConfigDir: configDir,
+		ToolsDir:  toolsDir,
+		Routes:    routes,
+		Backends:  map[string]Backend{"local": rb},
+	})
+	runner.SetPorts(ports)
+
+	adopted, orphaned, err := runner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(adopted, inst.ID) || len(orphaned) != 0 {
+		t.Fatalf("adopted=%v orphaned=%v", adopted, orphaned)
+	}
+	if _, _, ok := routes.GetByPath(inst.RoutePath); !ok {
+		t.Fatal("a reattached service must have its route published")
 	}
 }

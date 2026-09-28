@@ -204,6 +204,22 @@ func (s *Server) reapServices() []string {
 	return stopped
 }
 
+// renewServices pushes out scheduler-imposed walltimes on live services
+// (SGE's h_rt) so a long-running service is not killed by the scheduler while
+// the platform still wants it (ADR-015).
+func (s *Server) renewServices() {
+	if s.runner == nil {
+		return
+	}
+	renewed, err := s.runner.RenewServices(context.Background())
+	if err != nil {
+		log.Printf("[srcos] renew: %v", err)
+	}
+	for _, id := range renewed {
+		log.Printf("[srcos] renewed %s", id)
+	}
+}
+
 // syncRoutes rebuilds the dynamic routing table from the instance records.
 //
 // Two directions matter equally: a live service must become reachable, and a

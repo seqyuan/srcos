@@ -1,7 +1,9 @@
 package sge
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
@@ -16,6 +18,14 @@ func FromState(s config.SGEState) (Config, error) {
 	tunnel := true
 	if s.Tunnel != nil {
 		tunnel = *s.Tunnel
+	}
+	renewBefore, err := parseOptionalDuration(s.RenewBefore)
+	if err != nil {
+		return Config{}, fmt.Errorf("sge.renew_before: %w", err)
+	}
+	renewFor, err := parseOptionalDuration(s.RenewFor)
+	if err != nil {
+		return Config{}, fmt.Errorf("sge.renew_for: %w", err)
 	}
 	cfg := Config{
 		Qsub:          s.Qsub,
@@ -35,6 +45,8 @@ func FromState(s config.SGEState) (Config, error) {
 			PEAccounting:   s.PEAccounting,
 			ThreadsPerCore: s.ThreadsPerCore,
 			Project:        s.Project,
+			RenewBefore:    renewBefore,
+			RenewFor:       renewFor,
 		},
 		PollEvery: time.Duration(s.PollSeconds) * time.Second,
 	}
@@ -42,6 +54,22 @@ func FromState(s config.SGEState) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// parseOptionalDuration reads a Go duration ("10m", "1h30m"). Empty is zero.
+func parseOptionalDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (want Go duration like 10m or 1h30m)", s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("duration %q must not be negative", s)
+	}
+	return d, nil
 }
 
 // FromStateFile builds the backend when the site has enabled SGE in

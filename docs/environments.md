@@ -190,8 +190,8 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 | `bj-sci-login02` / `node010` | ❌ 连接超时 | 提交主机，网络不可达 |
 | `node060-gpu`（本机） | ✅ 自 ssh | `ssh -L` 隧道在本机→本机可用（service 测试靠它） |
 
-**可行做法**：把 `sge.qsub` / `sge.qdel` 指向转发到 `hsy-test01` 的包装脚本，`qstat` 用本机。
-实测包装目录：`/annogene/data2/bioinfo/PMO/yuanzan/srcos_sge_probe/bin/{qsub-remote,qdel-remote}`。
+**可行做法**：把 `sge.qsub` / `sge.qdel` / `sge.qalter` 指向转发到 `hsy-test01` 的包装脚本，`qstat` 用本机。
+实测包装目录：`/annogene/data2/bioinfo/PMO/yuanzan/srcos_sge_probe/bin/{qsub-remote,qdel-remote,qalter-remote}`。
 
 ### 共享文件系统与计算节点
 
@@ -206,9 +206,10 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 
 - task `exit 0`（产出文件在共享盘、作业跑在 `node060-gpu`）
 - task `exit 7`（退出码经 rendezvous 正确回传）
-- **service + `ssh -L` 隧道：登录侧经隧道 `GET` 到计算节点的 `python3 -m http.server` 返回 HTTP 200**，Stop 后 `qdel` 干净回收
+- **service + `ssh -L` 隧道：登录侧经隧道 `GET` 到计算节点的 `python3 -m http.server` 返回 HTTP 200**，Stop 后 `qdel` 干净回收；隧道存活时 `ReattachUnit` 采纳
+- **`qalter -l h_rt=...` 续期成功**（注意：`qalter -l` 会**替换**资源列表，必须重述 `h_vmem`，否则 SGE 拒绝改运行中作业）
 
-发现的真 bug（已修）：`qstat -xml -j` 查询格式错误；task 体 `exec` 导致 `exit_code` 永不落盘。
+发现的真 bug（已修）：`qstat -xml -j` 查询格式错误；task 体 `exec` 导致 `exit_code` 永不落盘；`qalter` 未重述 `h_vmem`。
 
 ---
 

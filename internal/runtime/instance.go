@@ -112,6 +112,11 @@ type Instance struct {
 	Duration  string    `yaml:"duration,omitempty"`
 	// LastActiveAt drives idle reaping; the proxy touches it on every request.
 	LastActiveAt time.Time `yaml:"last_active_at,omitempty"`
+	// LeaseExpiresAt is when the scheduler's own ceiling on this unit runs out
+	// (SGE's h_rt). A renewal pushes it out so a long-running service is not
+	// killed while the platform still wants it. Zero when no such ceiling
+	// applies (local units, SGE jobs without a declared walltime).
+	LeaseExpiresAt time.Time `yaml:"lease_expires_at,omitempty"`
 
 	Outputs []string          `yaml:"outputs,omitempty"`
 	Tags    map[string]string `yaml:"tags,omitempty"`

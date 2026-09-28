@@ -178,11 +178,11 @@ orphaned/adopted）全部入流。读取：`srcos audit tail|list` + 管理端 `
 保留：`srcos audit prune --keep 90d`（显式）。**外发**：`state.yaml` 的 `audit.forward_url` → HTTP 采集端（真正的信任锚；本地签名明确不做）。
 
 **在真实的 SGE 集群上跑过了（集群 `annuo`，2026-09-28）** —— `sge` backend 已完成注册与接线
-（`state.yaml` 的 `sge` 段；qsub/qstat/qdel 翻译、rendezvous 控制通道、`ssh -L` 数据通道含端口池与 Stop 回收），
-并在 `annuo` 上跑通 `internal/runtime/sge/realcluster_test.go`（task exit 0 / exit 7 / service+隧道 HTTP 200），
-同时修掉两个真集群才暴露的 bug（`qstat -xml -j` 格式错误、task 体 `exec` 导致 exit_code 不落盘）。
-仍缺：网关重启后的隧道重建（重启后 SGE 服务需 `srcos svc stop` 后重启）；本机 `node060-gpu` 非提交主机，
-qsub/qdel 需转发到 `hsy-test01`（见 environments.md）。详情见 [`environments.md`](environments.md)。
+（`state.yaml` 的 `sge` 段；qsub/qstat/qdel/qalter 翻译、rendezvous 控制通道、`ssh -L` 数据通道含端口池与 Stop 回收、
+`h_rt` 续期、重启后隧道采纳/结算），并在 `annuo` 上跑通 `internal/runtime/sge/realcluster_test.go`（task exit 0 / exit 7 /
+service+隧道 HTTP 200 / `qalter` 续期），同时修掉三个真集群才暴露的 bug（`qstat -xml -j` 查询格式、task 体 `exec`
+导致 exit_code 不落盘、`qalter -l` 必须重述 `h_vmem`）。仍缺：`h_rt` 到期预警；本机 `node060-gpu` 非提交主机，
+qsub/qdel/qalter 需转发到 `hsy-test01`（见 environments.md）。
 
 **统一服务实例化留下的**（ADR-026/027/028）：`external` 只支持**回环**后端（另一主机仍走卡片或 `ssh -L`）；
 digest 的 git 记录（HEAD + dirty）暂不做；`storages.yaml` 的管理端编辑**评估后不做**（以下同）。
