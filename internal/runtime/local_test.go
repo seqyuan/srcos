@@ -316,7 +316,7 @@ func TestUnusableSandboxProducesFailedInstance(t *testing.T) {
 	if inst.State != StateFailed {
 		t.Fatalf("state = %s", inst.State)
 	}
-	if !strings.Contains(inst.Error, "Phase 6") {
+	if !strings.Contains(inst.Error, "apptainer") && !strings.Contains(inst.Error, "singularity") {
 		t.Fatalf("unexpected error: %s", inst.Error)
 	}
 	// The failure must be recorded, not just printed.

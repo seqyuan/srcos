@@ -198,7 +198,9 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 - `/annogene/data2` = NFS（`10.4.1.170:/ifs/data`），`/home` = NFS（`bj-sci-master:/home`）——**计算节点可见**（作业写出的文件可在登录侧读到）。
 - 作业默认落在 `gpu.q@node060-gpu`（本机）；`python3` 用 miniforge 的（`/annogene/.../miniforge3/bin/python3`）。
   ⚠️ 本机 `/usr/bin/python3` 是 3.6，`import _random` 会 `failed to map segment from shared object`，别用它。
-- `apptainer` / SIF 仍未验证（待补）。
+- **容器运行时**：计算节点普遍有 **Singularity CE 4.0.1（`/usr/local/bin/singularity`）**，**无 apptainer**；
+  `node060-gpu` 两者都无。多数节点 NSS **不解析 uid 560**，`singularity exec` 直接 `FATAL: Couldn't determine user account information`，
+  因此在 `annuo` 上无法端到端验证 `sandbox: apptainer`；未找到现成 SIF。`internal/sandbox/apptainer.go` 已实现（argv 单测通过）。
 
 ### 实测结论（2026-09-28）
 

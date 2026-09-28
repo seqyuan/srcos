@@ -130,11 +130,10 @@
 - ~~托管 agent 的实例身份（A1）~~ —— ✅ 完成（2026-09-26，ADR-025：工具声明 `agent:` → 启动签发运行态令牌 → home 0600 文件 → 随实例撤销）
 - ~~agent 提交幂等键（A2）~~ —— ✅ 完成（2026-09-26，ADR-019 第二期契约）
 - `storages` 的 rw 配额
-- `apptainer` sandbox
 - SGE backend 已完成**注册与接线**（`state.yaml` 的 `sge` 段；qsub/qstat/qdel/qalter 翻译、rendezvous
-  控制通道、`ssh -L` 数据通道含端口池与 Stop 回收、`h_rt` 续期、重启后隧道采纳/结算），
+  控制通道、`ssh -L` 数据通道含端口池与 Stop 回收、`h_rt` 续期与预警、重启后隧道采纳/结算），
   并已在集群 `annuo` 上真机跑通 `task exit 0/7`、`service + ssh -L 隧道 HTTP 200`、`qalter` 续期；
-  仍缺：`h_rt` 到期预警、apptainer sandbox
+  仍缺：`apptainer` 真机验证（代码已实现，annuo 无 apptainer、Singularity 对 uid 560 报错）
 
 ### 2.3 下一步
 
@@ -1070,7 +1069,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
       `qalter` 续期；暴露并修掉 `qstat -xml -j` 查询格式与 task 体 `exec` 两个 bug
 - [x] `h_rt` 到期续期（`qalter`，`renew_before`/`renew_for`；续期时必须重述 `h_vmem`）与
       到期**预警**（`warn_before` → 审计 `instance.lease_expiring` + 日志，按 deadline 去重）
-- [ ] apptainer sandbox 物化（`-B` / `--containall` / SIF 镜像）
+- [x] apptainer sandbox 物化（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`；
+      `ApptainerProbe` 优先 apptainer、回退 singularity）—— **未在真集群验证**：`annuo` 计算节点只有
+      Singularity CE 4（无 apptainer），且多数节点 NSS 不解析 uid 560，无现成 SIF
 - [ ] 镜像预热（`apptainer pull` 到共享盘）
 
 ---
@@ -1101,7 +1102,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | # | 问题 | 倾向 |
 |---|---|---|
 | 1 | 工具注册仓库：新建 `srcos-tools` 独立仓库，还是先放 `srcos/tools/`？ | 起步放 `srcos/tools/`，成熟后独立 |
-| 2 | 容器化后端的具体选型：集群已装的是 apptainer 还是 enroot？ | 取决于集群现状；manifest 只差物化函数 |
+| 2 | 容器化后端的具体选型：集群已装的是 apptainer 还是 enroot？ | 取决于集群现状；manifest 只差物化函数（annuo 实测：有 Singularity CE 4，无 apptainer） |
 | 3 | 集群的 `ssh 登录节点 → 计算节点` 是否免密可用？共享盘挂载点是哪个？ | 决定隧道方案与 rendezvous/镜像路径 |
 | 4 | 登录节点是否允许长驻进程 / `systemd --user` 是否可用？ | 决定 `local` 驱动默认是否禁用、资源限制走 cgroup 还是 prlimit |
 | 5 | `Flow` 的 `expose` 是否需要"多比较组"模式（对齐 annopi 的 `${cmp.*}`）？ | 首版不做，只做样本维度 |

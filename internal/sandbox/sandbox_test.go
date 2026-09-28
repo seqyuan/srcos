@@ -269,3 +269,49 @@ func TestBwrapArgvToolEnvOverridesDefaults(t *testing.T) {
 		t.Fatalf("TMPDIR setenv = %v, want the platform default", got)
 	}
 }
+
+// Apptainer/Singularity runs the image's filesystem, so only the declared
+// mounts are bound (no systemRoDirs), and the shared exec interface is what
+// makes one argv work on either binary.
+func TestApptainerArgv(t *testing.T) {
+	spec := &Spec{}
+	spec.MustAdd(Mount{HostPath: "/host/ws", SandboxPath: "/workspace", Mode: ReadWrite, Origin: "builtin"})
+	spec.MustAdd(Mount{HostPath: "/host/tool", SandboxPath: "/tool", Mode: ReadOnly, Origin: "tool"})
+
+	args := ApptainerArgv(spec, ApptainerOptions{
+		Image: "/shared/img/x.sif",
+		Cwd:   "/workspace",
+		Env:   []string{"PATH=/usr/bin", "FOO=bar"},
+		Argv:  []string{"bash", "work.sh"},
+	})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"exec", "--contain", "--no-home", "--cleanenv",
+		"--pwd /workspace",
+		"--bind /host/ws:/workspace",
+		"--bind /host/tool:/tool:ro",
+		"--env FOO=bar",
+		"--env PATH=/usr/bin",
+		"/shared/img/x.sif bash work.sh",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("apptainer argv missing %q:\n%s", want, joined)
+		}
+	}
+
+	// One --env per key, so a tool's value cannot be shadowed by a duplicate.
+	n := 0
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--env" && strings.HasPrefix(args[i+1], "PATH=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("PATH appears in %d --env flags, want 1", n)
+	}
+
+	// The image and the command come last, in order.
+	if got := args[len(args)-3:]; got[0] != "/shared/img/x.sif" || got[1] != "bash" || got[2] != "work.sh" {
+		t.Fatalf("tail = %v", got)
+	}
+}

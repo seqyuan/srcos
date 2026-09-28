@@ -53,7 +53,23 @@ func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, arg
 		return append(append([]string{"env", "-i"}, env...), argv...), nil
 
 	case tool.SandboxApptainer:
-		return nil, errors.New("sandbox: apptainer is not implemented yet (Phase 6)")
+		if strings.TrimSpace(t.Image) == "" {
+			return nil, errors.New("sandbox: apptainer requires image (a .sif path)")
+		}
+		bin, ok, why := sandbox.ApptainerProbe()
+		if !ok {
+			if strings.TrimSpace(why) == "" {
+				why = "apptainer is not usable on this host (the probe returned no reason)"
+			}
+			return nil, errors.New(why)
+		}
+		args := sandbox.ApptainerArgv(spec, sandbox.ApptainerOptions{
+			Image: t.Image,
+			Cwd:   cwd,
+			Env:   env,
+			Argv:  argv,
+		})
+		return append([]string{bin}, args...), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported sandbox %q", t.Sandbox)
