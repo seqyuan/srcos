@@ -132,8 +132,9 @@
 - `storages` 的 rw 配额
 - `apptainer` sandbox
 - SGE backend 已完成**注册与接线**（`state.yaml` 的 `sge` 段；qsub/qstat/qdel 翻译、rendezvous
-  控制通道、`ssh -L` 数据通道含端口池与 Stop 回收），但只在 fake runner 上测过，
-  **从未在真登录节点运行**；网关重启后的隧道重建未做
+  控制通道、`ssh -L` 数据通道含端口池与 Stop 回收），并已在集群 `annuo` 上真机跑通`task exit 0/7`
+  与 `service + ssh -L 隧道 HTTP 200`（修掉 `qstat -xml -j` 格式与 task `exec` 两个真集群 bug）；
+  仍缺：网关重启后的隧道重建，以及 apptainer sandbox
 
 ### 2.3 下一步
 
@@ -1064,6 +1065,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `sge` backend 注册与站点配置（`state.yaml` 的 `sge` 段）—— 未接真集群
 - [x] rendezvous 文件协议 + `ssh -L` 隧道（含端口池分配与 Stop 回收）—— 未接真集群；网关重启后的隧道重建未做
 - [x] `qstat` 状态映射：区分 `S`（挂起/抢占）与真死
+- [x] 真集群验证（集群 `annuo`，2026-09-28）：task `exit 0`/`exit 7`、service + `ssh -L` 隧道 HTTP 200；
+      暴露并修掉 `qstat -xml -j` 查询格式与 task 体 `exec` 两个 bug
+- [ ] 网关重启后的隧道重建（当前重启后需 `srcos svc stop` 再启）
 - [ ] `h_rt` 到期预警 + `qalter` 续期（空闲回收默认关闭已做）
 - [ ] apptainer sandbox 物化（`-B` / `--containall` / SIF 镜像）
 - [ ] 镜像预热（`apptainer pull` 到共享盘）

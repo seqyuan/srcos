@@ -253,11 +253,16 @@ func TestScriptPublishesStateAndExitCode(t *testing.T) {
 		"_pub state starting",
 		"_pub node \"$(hostname)\"",
 		"_pub exit_code \"$_code\"",
-		"exec '/usr/bin/bwrap' '--ro-bind' '/usr' '/usr' '--' 'bash' '/tool/work.sh'",
+		"'/usr/bin/bwrap' '--ro-bind' '/usr' '/usr' '--' 'bash' '/tool/work.sh'",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
+	}
+	// The task body must not exec: that would replace the shell and skip the
+	// exit-code bookkeeping below it.
+	if strings.Contains(script, "exec '/usr/bin/bwrap'") {
+		t.Errorf("task body used exec, so the exit code would never be published:\n%s", script)
 	}
 	// Writes must be atomic: the login node polls concurrently.
 	if !strings.Contains(script, ".tmp\" && mv") {
@@ -773,5 +778,84 @@ func TestServiceWithoutAPortAllocatorFailsClearly(t *testing.T) {
 	}
 	if msg := h.(*jobHandle).endpointErr; msg == nil || !strings.Contains(msg.Error(), "port allocator") {
 		t.Fatalf("error does not explain the missing allocator: %v", msg)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// qstat query form (found wrong against a real cluster)
+// ─────────────────────────────────────────────────────────────────────────
+
+// realQstatDocument is the standard `qstat -xml` shape from SGE 8.1.9.
+const realQstatDocument = `<?xml version='1.0'?>
+<job_info xmlns:xsd="http://example/qstat.xsd">
+  <queue_info>
+    <job_list state="running">
+      <JB_job_number>5418684</JB_job_number>
+      <JAT_prio>0.50500</JAT_prio>
+      <JB_name>srcos_sleep</JB_name>
+      <JB_owner>yuanzan</JB_owner>
+      <state>r</state>
+      <JAT_start_time>2026-09-28T14:58:15</JAT_start_time>
+      <queue_name>gpu.q@node060-gpu</queue_name>
+      <slots>1</slots>
+    </job_list>
+  </queue_info>
+  <job_info>
+    <job_list state="pending">
+      <JB_job_number>5418700</JB_job_number>
+      <JB_name>srcos_queued</JB_name>
+      <JB_owner>yuanzan</JB_owner>
+      <state>qw</state>
+      <queue_name>all.q@node000</queue_name>
+      <slots>4</slots>
+    </job_list>
+  </job_info>
+</job_info>`
+
+func TestParseRealQstatDocument(t *testing.T) {
+	jobs, err := ParseQstatXML(realQstatDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("parsed %d jobs, want 2", len(jobs))
+	}
+	run, ok := FindJob(jobs, "5418684")
+	if !ok || !run.State.Running || run.Queue != "gpu.q@node060-gpu" || run.Slots != 1 {
+		t.Fatalf("running job = %+v (ok=%v)", run, ok)
+	}
+	pend, ok := FindJob(jobs, "5418700")
+	if !ok || !pend.State.Pending || pend.State.Running || pend.Slots != 4 {
+		t.Fatalf("pending job = %+v (ok=%v)", pend, ok)
+	}
+}
+
+// TestQueryStateUsesPlainQstat guards a bug only a real cluster exposed: the
+// `qstat -xml -j <id>` form returns a <detailed_job_info> document with no
+// <job_list>, so the parser always answered "unknown" and Wait declared every
+// job finished the moment it looked.
+func TestQueryStateUsesPlainQstat(t *testing.T) {
+	var qstatArgs []string
+	fake := &fakeRunner{reply: func(name string, args []string) (string, error) {
+		switch {
+		case strings.HasSuffix(name, "qsub"):
+			return `Your job 4242 ("x") has been submitted`, nil
+		case strings.HasSuffix(name, "qstat"):
+			qstatArgs = append([]string(nil), args...)
+			return realQstatDocument, nil
+		}
+		return "", os.ErrNotExist
+	}}
+	cfg := testConfig(t, fake)
+	b := &Backend{Config: cfg}
+	h, err := b.Start(context.Background(), testRequest(t, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.(*jobHandle).queryState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qstatArgs, " "); got != "-xml" {
+		t.Fatalf("qstat invoked as %q, want %q", got, "-xml")
 	}
 }

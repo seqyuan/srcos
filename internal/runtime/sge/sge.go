@@ -525,10 +525,14 @@ func (h *jobHandle) Alive() bool {
 }
 
 func (h *jobHandle) queryState(ctx context.Context) (JobState, error) {
-	out, err := h.cfg.runner().Run(ctx, h.cfg.bin("qstat"), "-xml", "-j", h.jobID)
+	// `qstat -xml` (not `-xml -j <id>`): the `-j` form emits a
+	// <detailed_job_info> document with no <job_list>/<state>, which this
+	// parser does not read — it would always answer "unknown". Plain qstat is
+	// scoped to the invoking user, which is exactly the set SRCOS owns.
+	out, err := h.cfg.runner().Run(ctx, h.cfg.bin("qstat"), "-xml")
 	if err != nil {
-		// qstat exits non-zero when the job is unknown, which is the normal
-		// way to learn that a job has finished and been forgotten.
+		// qstat exits non-zero when the scheduler is unreachable; the caller
+		// decides (with confirmation) whether that means the job is gone.
 		return JobState{Unknown: true}, nil
 	}
 	jobs, perr := ParseQstatXML(out)
@@ -656,7 +660,7 @@ func (b *Backend) UnitAlive(ctx context.Context, inst *runtime.Instance) bool {
 	if ref == "" {
 		return false
 	}
-	out, err := b.Config.runner().Run(ctx, b.Config.bin("qstat"), "-xml", "-j", ref)
+	out, err := b.Config.runner().Run(ctx, b.Config.bin("qstat"), "-xml")
 	if err != nil {
 		return false
 	}
@@ -807,7 +811,7 @@ export SRCOS_PORT="$PORT"
 	// (withPortPlaceholder) that shellJoinPort expands to the port the job
 	// actually got. It reaches both wrappers BuildInner can emit (`env -i` and
 	// bwrap `--setenv`).
-	fmt.Fprintf(&sb, "%s &\n", shellJoinPort(inner))
+	fmt.Fprintf(&sb, "exec %s &\n", shellJoinPort(inner))
 	sb.WriteString(`CHILD=$!
 _pub pid "$CHILD"
 
@@ -881,12 +885,17 @@ func shellJoinPort(inner []string) string {
 
 // shellJoin renders argv as a shell command with every argument quoted, so a
 // path containing a space or a quote cannot change the command it belongs to.
+//
+// It deliberately does NOT prefix `exec`: the task body has to keep running
+// after the command to publish the exit code, and `exec` would replace the
+// script's shell and silently skip that bookkeeping. The service body, which
+// wants the unit to replace a background subshell, adds `exec` itself.
 func shellJoin(argv []string) string {
 	parts := make([]string, len(argv))
 	for i, a := range argv {
 		parts[i] = shellQuote(a)
 	}
-	return "exec " + strings.Join(parts, " ")
+	return strings.Join(parts, " ")
 }
 
 // parseQsubOutput extracts the job id from qsub's stdout.

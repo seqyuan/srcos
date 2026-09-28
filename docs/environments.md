@@ -159,6 +159,59 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 
 ---
 
+## node060-gpu / SGE 集群 `annuo`（2026-09-28 探测）
+
+`host: node060-gpu` · `user: yuanzan (uid=560)` · **SGE 8.1.9**（`SGE_ROOT=/opt/gridengine`，`SGE_CELL=default`，`SGE_CLUSTER_NAME=annuo`）
+
+### 调度器
+
+| 项 | 结果 |
+|---|---|
+| SGE 客户端 | ✅ `qsub/qstat/qdel/qconf/qalter/qhost/qacct` 全在 `/opt/gridengine/bin/lx-amd64/` |
+| `qhost` | ✅ 数十台执行主机（`node000`…`node060-gpu`、`cloud00x`、`hsy-test01`…） |
+| PE | `make` / `mpi` / **`smp`** |
+| 队列 | `all.q` `gpu.q` `asm.q` `asm2.q` `auto.q` `bs.q` `denovo.q` `filter.q` `hbk.q` `TR.q` … |
+| `qstat`（本机） | ✅ 可用；`qstat -xml` 默认只列**当前用户**作业（`<queue_info>`+`<job_info>`，SRCOS 解析的就是这个格式） |
+| **`qsub`（本机）** | ❌ `denied: host "node060-gpu" is not a submit host` |
+| **`qdel`（本机）** | ❌ 同样被 submit-host 限制（删除也要在提交主机上） |
+| `qconf -sm`（管理员） | `admin` / `guanhuajin` / `root` —— **yuanzan 不是 manager**，无法 `qconf -as` 把自己加成提交主机 |
+| 提交主机（`qconf -ss`） | `bj-sci-login` `bj-sci-login02` `bj-sci-master` `hsy-test01` `node010` |
+
+> ⚠️ **关键事实：`qstat -xml -j <id>` 返回的是 `<detailed_job_info>`（没有 `<job_list>`），不是 SRCOS 解析的标准格式。**
+> SRCOS 的 `queryState`/`UnitAlive` 已改为用 `qstat -xml`（按当前用户过滤、按 id 匹配）。这是真集群才暴露的 bug。
+
+### 提交路径（本机不能直接 qsub 时）
+
+| 主机 | ssh 免密 | 说明 |
+|---|---|---|
+| `hsy-test01`（192.168.200.3） | ✅ `yuanzan` | **提交主机且可执行**，用它转发 `qsub`/`qdel` |
+| `bj-sci-master`（10.1.1.66） | ❌ `Permission denied (publickey)` | 提交主机，但无 key |
+| `bj-sci-login`（10.1.1.67） | ❌ Permission denied | 提交主机 |
+| `bj-sci-login02` / `node010` | ❌ 连接超时 | 提交主机，网络不可达 |
+| `node060-gpu`（本机） | ✅ 自 ssh | `ssh -L` 隧道在本机→本机可用（service 测试靠它） |
+
+**可行做法**：把 `sge.qsub` / `sge.qdel` 指向转发到 `hsy-test01` 的包装脚本，`qstat` 用本机。
+实测包装目录：`/annogene/data2/bioinfo/PMO/yuanzan/srcos_sge_probe/bin/{qsub-remote,qdel-remote}`。
+
+### 共享文件系统与计算节点
+
+- `/annogene/data2` = NFS（`10.4.1.170:/ifs/data`），`/home` = NFS（`bj-sci-master:/home`）——**计算节点可见**（作业写出的文件可在登录侧读到）。
+- 作业默认落在 `gpu.q@node060-gpu`（本机）；`python3` 用 miniforge 的（`/annogene/.../miniforge3/bin/python3`）。
+  ⚠️ 本机 `/usr/bin/python3` 是 3.6，`import _random` 会 `failed to map segment from shared object`，别用它。
+- `apptainer` / SIF 仍未验证（待补）。
+
+### 实测结论（2026-09-28）
+
+`internal/runtime/sge/realcluster_test.go`（`SRCOS_SGE_REAL=1` 才跑）在 `annuo` 上全绿：
+
+- task `exit 0`（产出文件在共享盘、作业跑在 `node060-gpu`）
+- task `exit 7`（退出码经 rendezvous 正确回传）
+- **service + `ssh -L` 隧道：登录侧经隧道 `GET` 到计算节点的 `python3 -m http.server` 返回 HTTP 200**，Stop 后 `qdel` 干净回收
+
+发现的真 bug（已修）：`qstat -xml -j` 查询格式错误；task 体 `exec` 导致 `exit_code` 永不落盘。
+
+---
+
 ## Phase 1 可直接用的真实用例
 
 node01 上**已经在跑** SRCOS 想接管的三个目标工具，因此 Phase 1 的端到端验证可以直接用现状，
@@ -174,7 +227,8 @@ node01 上**已经在跑** SRCOS 想接管的三个目标工具，因此 Phase 1
 
 ## 待补
 
-- [ ] **真正的 SGE 登录节点**探测（决定 `backend: sge` 的全部实现细节与隧道方案）
+- [x] **SGE 提交/执行环境探测**（2026-09-28）—— 集群 `annuo`，本机 `node060-gpu` 是 SGE 客户端但非提交主机；经 `hsy-test01` 转发可投递（见上节）
+- [ ] `backend: sge` 的**正式部署点**（真正长期运行 `srcos serve` 的登录/提交节点，天然可 qsub/qdel）
 - [ ] 计算节点探测（apptainer 是否装、共享盘挂载点、`h_vmem` 语义）
 - [ ] 验证 `runc` + `rootlesskit` 能否在 AppArmor profile 授权下做无 root 容器化
       （`runc 1.2.4` + `/etc/apparmor.d/runc` 已存在，可能零配置可用）
