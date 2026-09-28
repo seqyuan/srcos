@@ -1072,7 +1072,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] apptainer sandbox 物化（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`；
       `ApptainerProbe` 优先 apptainer、回退 singularity）—— **未在真集群验证**：`annuo` 计算节点只有
       Singularity CE 4（无 apptainer），且多数节点 NSS 不解析 uid 560，无现成 SIF
-- [ ] 镜像预热（`apptainer pull` 到共享盘）
+- [ ] 镜像预热（`apptainer pull` 到共享盘）—— 已实现 `srcos image pull|list`（单测通过），真机未验证
 
 ---
 

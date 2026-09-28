@@ -41,6 +41,8 @@ const usage = `Usage:
                                 list | validate
   srcos audit <cmd>            Read the structured audit stream (who did what,
                                 which tool version, what params): tail | list
+  srcos image <cmd>            Pre-warm container images for sandbox: apptainer
+                                tools: pull | list
   srcos sso [options]          Show or configure lightweight SSO (identity
                                 header forwarded to backends; see below)
 
@@ -187,6 +189,10 @@ func main() {
 	}
 	if cmd == "audit" {
 		runAuditCmd(args)
+		return
+	}
+	if cmd == "image" {
+		runImageCmd(args)
 		return
 	}
 

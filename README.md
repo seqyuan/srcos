@@ -126,6 +126,10 @@ TLS 设置会持久化到 `state.yaml`（`tls_cert` / `tls_key`），之后的 `
 ./srcos audit tail -n 20                     最近 20 条结构化审计记录
 ./srcos audit list --decision deny           只看被拒绝的请求
 
+# 容器镜像预热（sandbox: apptainer 的 SIF 需在共享盘上提前备好）
+./srcos image pull docker://ubuntu:22.04 --to /share/srcos/img/ubuntu-22.04.sif
+./srcos image list --dir /share/srcos/img   列出已预热的镜像
+
 Options:
   -d, --config-dir <dir>  配置目录（默认 <程序目录>/config）
   --host <host>           监听地址（默认 0.0.0.0）
