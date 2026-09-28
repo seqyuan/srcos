@@ -133,7 +133,7 @@
 - SGE backend 已完成**注册与接线**（`state.yaml` 的 `sge` 段；qsub/qstat/qdel/qalter 翻译、rendezvous
   控制通道、`ssh -L` 数据通道含端口池与 Stop 回收、`h_rt` 续期与预警、重启后隧道采纳/结算），
   并已在集群 `annuo` 上真机跑通 `task exit 0/7`、`service + ssh -L 隧道 HTTP 200`、`qalter` 续期；
-  仍缺：无（Phase 6 清单已收敛；`srcos image pull` 待有运行时的节点上验证）
+  仍缺：无（Phase 6 清单已清空；`srcos image pull` 机制真机验证，仅下载受限于集群无 registry 网络）
 
 ### 2.3 下一步
 
@@ -1073,7 +1073,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] apptainer sandbox 物化（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`；
       `ApptainerProbe` 优先 apptainer、回退 singularity）—— **已在真集群验证**（annuo：只有 Singularity CE 4；
       SGE 作业在计算节点解析运行时，`ContainerPlaceholder`）。注意队列默认 `h_vmem=1G` 不够，工具必须声明足量内存
-- [ ] 镜像预热（`apptainer pull` 到共享盘）—— 已实现 `srcos image pull|list`（单测通过），真机未验证
+- [ ] 镜像预热（`apptainer pull` 到共享盘）—— 已实现 `srcos image pull|list`；`list` 真机通过，
+      `pull` 在计算节点能探测运行时并调用 `singularity pull`，但该集群无法访问 Docker Hub（registry 不可达）
 
 ---
 

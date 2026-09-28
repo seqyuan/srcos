@@ -207,6 +207,9 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
   正常工作（已用 `rst_report_1.0.sif` 在 `all.q@node001` 端到端验证）。
 - 现成 SIF：`/annogene/data2/bioinfo/PMO/yuanzan/project/comm/commander_test/RD/rst_report/rst_report_1.0.sif`（46MB，可读）、
   `/annoroad/data1/software/install/images/SIF/*.sif`。
+- **镜像预热**：`srcos image list --dir ...` 真机通过；`srcos image pull` 能自动探测运行时（`/usr/local/bin/singularity`）
+  并调用 `singularity pull`，但计算节点**连不上 `registry-1.docker.io:443`**（i/o timeout），因此未完成下载；
+  内网 registry / oras / library 上应可用。
 
 ### 实测结论（2026-09-28）
 
