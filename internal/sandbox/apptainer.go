@@ -7,6 +7,15 @@ import (
 	"sync"
 )
 
+// ContainerPlaceholder is the argv element an off-host builder puts where the
+// container runtime binary belongs.
+//
+// The login node that builds a job's argv may not be the node that runs it, and
+// on a cluster only the compute nodes have apptainer/singularity installed. The
+// SGE job script therefore resolves this placeholder to `apptainer` (falling
+// back to `singularity`) at execution time.
+const ContainerPlaceholder = "__SRCOS_CONTAINER__"
+
 // ApptainerOptions is everything the apptainer materializer needs beyond the
 // mount table.
 type ApptainerOptions struct {

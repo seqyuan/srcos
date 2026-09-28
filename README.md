@@ -339,6 +339,9 @@ sge:
 - **`h_rt` 续期与预警**：服务声明的 walltime 会被 SGE 当作硬上限。配置 `renew_before`/`renew_for` 后，
   到期前 SRCOS 用 `qalter -l h_rt=...`（并重述 `h_vmem`，否则 SGE 拒绝改运行中作业）把上限推后；
   `warn_before` 则在到期前写一条预警到审计流与日志（续期开启但未生效时也靠它发现）。
+- **`sandbox: apptainer`**：容器运行时（apptainer 或 singularity）装在**计算节点**上，SRCOS 在作业脚本里解析它。
+  ⚠️ SGE 队列默认 `h_vmem` 常常偏小（实测某队列默认 1G），而容器运行时的 Go 进程需要更多虚拟内存，
+  `h_vmem` 不够会报成莫名其妙的用户/线程错误——工具的 `resources.memory` 要声明足量（如 `8Gi`）。
 - **提交主机限制**：不少集群只有提交主机能跑 `qsub`/`qdel`/`qalter`，其余机器能 `qstat` 但投递被拒。
   若网关不在提交主机上，把 `qsub`/`qdel`/`qalter` 指向转发脚本（如 `ssh <submit-host> qsub "$@"`）即可；
   `qstat` 一般本机可用。

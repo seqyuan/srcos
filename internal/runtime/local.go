@@ -22,13 +22,31 @@ import (
 // 两个 backend 共享的内层 argv
 // ─────────────────────────────────────────────────────────────────────────
 
-// BuildInner materializes the sandbox and returns the argv that must run
-// *inside* whatever transport the backend uses.
+// BuildOptions refines how BuildInner materializes a sandbox.
+type BuildOptions struct {
+	// ContainerBin is the apptainer/singularity binary. Empty means "probe the
+	// host" when Probe is true, or "resolve on the execution host" when not.
+	ContainerBin string
+	// Probe says whether the caller runs on the same host as the unit. The
+	// local backend does; the SGE backend does not — on a cluster the container
+	// runtime is installed on the compute nodes, not on the login node that
+	// builds the job script, so probing here would reject a perfectly good
+	// tool.
+	Probe bool
+}
+
+// BuildInner materializes the sandbox for a unit that runs on this host.
+func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, argv, env []string) ([]string, error) {
+	return BuildInnerWith(t, view, spec, cwd, argv, env, BuildOptions{Probe: true})
+}
+
+// BuildInnerWith materializes the sandbox, optionally deferring the container
+// runtime probe to the execution host.
 //
 // Local wraps it in a systemd scope/unit; SGE embeds it in a job script that
 // runs on a compute node. Keeping this shared is what makes "the same tool
 // definition runs on either backend" true rather than aspirational.
-func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, argv, env []string) ([]string, error) {
+func BuildInnerWith(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, argv, env []string, o BuildOptions) ([]string, error) {
 	switch t.Sandbox {
 	case tool.SandboxBwrap, "":
 		bwrapPath, ok, why := sandbox.BwrapProbe()
@@ -56,12 +74,21 @@ func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, arg
 		if strings.TrimSpace(t.Image) == "" {
 			return nil, errors.New("sandbox: apptainer requires image (a .sif path)")
 		}
-		bin, ok, why := sandbox.ApptainerProbe()
-		if !ok {
-			if strings.TrimSpace(why) == "" {
-				why = "apptainer is not usable on this host (the probe returned no reason)"
+		bin := o.ContainerBin
+		switch {
+		case bin != "":
+		case o.Probe:
+			p, ok, why := sandbox.ApptainerProbe()
+			if !ok {
+				if strings.TrimSpace(why) == "" {
+					why = "apptainer is not usable on this host (the probe returned no reason)"
+				}
+				return nil, errors.New(why)
 			}
-			return nil, errors.New(why)
+			bin = p
+		default:
+			// Resolved by the execution host's job script.
+			bin = sandbox.ContainerPlaceholder
 		}
 		args := sandbox.ApptainerArgv(spec, sandbox.ApptainerOptions{
 			Image: t.Image,

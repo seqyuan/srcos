@@ -37,6 +37,7 @@ import (
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -248,7 +249,7 @@ func (b *Backend) Start(ctx context.Context, req runtime.StartRequest) (runtime.
 	if req.WantEndpoint {
 		env = withPortPlaceholder(env)
 	}
-	t, err := runtime.BuildInner(req.Tool, req.View, req.Spec, req.Cwd, req.Argv, env)
+	t, err := runtime.BuildInnerWith(req.Tool, req.View, req.Spec, req.Cwd, req.Argv, env, runtime.BuildOptions{Probe: false})
 	if err != nil {
 		return nil, err
 	}
@@ -900,6 +901,19 @@ _pub node "$(hostname)"
 	sb.WriteString(`_pub pid "$$"
 
 `)
+	if req.Tool.Sandbox == tool.SandboxApptainer {
+		// The container runtime is installed on the compute nodes, not on the
+		// login node that built this script, so it is resolved here.
+		sb.WriteString(`SRCOS_CONTAINER_BIN="$(command -v apptainer || command -v singularity || true)"
+if [ -z "$SRCOS_CONTAINER_BIN" ]; then
+  _pub state failed
+  _pub exit_code 1
+  echo "no apptainer/singularity found on this compute node" >&2
+  exit 1
+fi
+
+`)
+	}
 	if isService {
 		sb.WriteString(b.serviceBody(req, inner))
 	} else {
@@ -910,7 +924,7 @@ _pub node "$(hostname)"
 
 func (b *Backend) taskBody(req runtime.StartRequest, inner []string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s\n", shellJoin(inner))
+	fmt.Fprintf(&sb, "%s\n", shellJoinInner(inner))
 	sb.WriteString(`
 _code=$?
 _pub state exited
@@ -999,7 +1013,7 @@ export SRCOS_PORT="$PORT"
 	// (withPortPlaceholder) that shellJoinPort expands to the port the job
 	// actually got. It reaches both wrappers BuildInner can emit (`env -i` and
 	// bwrap `--setenv`).
-	fmt.Fprintf(&sb, "exec %s &\n", shellJoinPort(inner))
+	fmt.Fprintf(&sb, "exec %s &\n", shellJoinInner(inner))
 	sb.WriteString(`CHILD=$!
 _pub pid "$CHILD"
 
@@ -1059,15 +1073,18 @@ func withPortPlaceholder(env []string) []string {
 	return append(out, "SRCOS_PORT="+portPlaceholder)
 }
 
-// shellJoinPort is shellJoin for a service command, with the port placeholder
-// replaced by an unquoted reference to the shell variable the job script sets.
-// Substitution happens after quoting on purpose: the placeholder is present
-// either as `SRCOS_PORT=<ph>` (env -i) or as a bare `<ph>` value following
-// bwrap's `--setenv SRCOS_PORT`.
-func shellJoinPort(inner []string) string {
+// shellJoinInner is shellJoin plus the execution-host placeholders.
+//
+// Two values are only known where the job runs, not where its argv was built:
+// the port a service actually got (`$PORT`, set by the service body) and the
+// container runtime binary (`$SRCOS_CONTAINER_BIN`, resolved by renderScript).
+// shellQuote would make both literal, so the expansion is substituted after
+// quoting, where the value can be an unquoted shell reference.
+func shellJoinInner(inner []string) string {
 	s := shellJoin(inner)
 	s = strings.ReplaceAll(s, "'SRCOS_PORT="+portPlaceholder+"'", `SRCOS_PORT="$PORT"`)
 	s = strings.ReplaceAll(s, "'"+portPlaceholder+"'", `"$PORT"`)
+	s = strings.ReplaceAll(s, "'"+sandbox.ContainerPlaceholder+"'", `"$SRCOS_CONTAINER_BIN"`)
 	return s
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -478,7 +479,7 @@ func TestWithPortPlaceholderReplacesThePoolPort(t *testing.T) {
 
 func TestShellJoinPortExpandsEnvI(t *testing.T) {
 	inner := []string{"env", "-i", "SRCOS_PORT=" + portPlaceholder, "bash", "/tool/work.sh"}
-	got := shellJoinPort(inner)
+	got := shellJoinInner(inner)
 	if !strings.Contains(got, `SRCOS_PORT="$PORT"`) {
 		t.Fatalf("env -i form not expanded: %s", got)
 	}
@@ -489,7 +490,7 @@ func TestShellJoinPortExpandsEnvI(t *testing.T) {
 
 func TestShellJoinPortExpandsBwrapSetenv(t *testing.T) {
 	inner := []string{"bwrap", "--setenv", "SRCOS_PORT", portPlaceholder, "--", "bash", "/tool/work.sh"}
-	got := shellJoinPort(inner)
+	got := shellJoinInner(inner)
 	if !strings.Contains(got, `'SRCOS_PORT' "$PORT"`) {
 		t.Fatalf("bwrap --setenv form not expanded: %s", got)
 	}
@@ -1054,5 +1055,40 @@ func TestValidateRejectsWarnBeforeSmallerThanRenewBefore(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("warn_before < renew_before would never fire; expected a validation error")
+	}
+}
+
+// The container runtime is resolved on the compute node, so the argv carries a
+// placeholder that the rendered script turns into $SRCOS_CONTAINER_BIN.
+func TestShellJoinInnerExpandsTheContainerRuntime(t *testing.T) {
+	got := shellJoinInner([]string{sandbox.ContainerPlaceholder, "exec", "--contain", "/img/x.sif", "true"})
+	if !strings.Contains(got, `"$SRCOS_CONTAINER_BIN" 'exec' '--contain'`) {
+		t.Fatalf("container placeholder not expanded: %s", got)
+	}
+	if strings.Contains(got, sandbox.ContainerPlaceholder) {
+		t.Fatalf("placeholder leaked: %s", got)
+	}
+}
+
+func TestApptainerScriptResolvesTheRuntimeOnTheComputeNode(t *testing.T) {
+	cfg := testConfig(t, nil)
+	b := &Backend{Config: cfg}
+	req := testRequest(t, cfg)
+	req.Tool.Sandbox = tool.SandboxApptainer
+	req.Tool.Image = "/shared/img/x.sif"
+	script := b.renderScript(req, []string{sandbox.ContainerPlaceholder, "exec", "/shared/img/x.sif", "true"})
+	for _, want := range []string{
+		`SRCOS_CONTAINER_BIN="$(command -v apptainer || command -v singularity || true)"`,
+		`"$SRCOS_CONTAINER_BIN" 'exec'`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+	// A bwrap/none tool must not carry the container resolver.
+	req.Tool.Sandbox = tool.SandboxNone
+	plain := b.renderScript(req, []string{"bash", "/tool/work.sh"})
+	if strings.Contains(plain, "SRCOS_CONTAINER_BIN") {
+		t.Errorf("container resolver emitted for a non-container tool:\n%s", plain)
 	}
 }

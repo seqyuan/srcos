@@ -465,3 +465,17 @@ func TestDeclarativeCommandRunsForATask(t *testing.T) {
 		t.Fatalf("the command did not run: %s", log)
 	}
 }
+
+// On a cluster the container runtime is on the compute node, so the argv built
+// on the login node must defer the probe instead of failing here.
+func TestBuildInnerWithDefersTheContainerProbe(t *testing.T) {
+	tl := &tool.Tool{Sandbox: tool.SandboxApptainer, Image: "/shared/img/x.sif"}
+	argv, err := BuildInnerWith(tl, PathView{}, &sandbox.Spec{}, "/workspace",
+		[]string{"true"}, nil, BuildOptions{Probe: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) == 0 || argv[0] != sandbox.ContainerPlaceholder {
+		t.Fatalf("argv[0] = %v, want the placeholder %q", argv, sandbox.ContainerPlaceholder)
+	}
+}

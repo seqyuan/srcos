@@ -946,7 +946,7 @@ srcos job logs   <instance-id|job-id>
 | 实例记录、日志分离、`--force`、松匹配 | ✅ |
 | 按任务分派的产物与 `.sign`（幂等粒度） | ✅ |
 | 数据 storage（`requires_storages`） | ⛔ Phase 2 —— 声明了会明确报错 |
-| `sandbox: apptainer` | ✅ 已实现（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`）；真机未验证 |
+| `sandbox: apptainer` | ✅ 已实现并真机验证（annuo / Singularity CE 4；SGE 上运行时在计算节点解析，工具须声明足量 memory） |
 | `kind: service` 的 ingress/healthcheck/生命周期 | ⛔ Phase 2 |
 | `doneWhen` 探针的轮询 | ⛔ Phase 2（字段已解析并校验） |
 | `internal.executor: qsubsge` 的交叉校验 | ✅（注册期拒绝非法组合） |

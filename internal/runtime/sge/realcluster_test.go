@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -283,4 +284,84 @@ func TestRealClusterWalltimeRenewal(t *testing.T) {
 		t.Fatalf("lease not pushed out: %v", inst.LeaseExpiresAt)
 	}
 	t.Logf("renewed %s until %s", h.Ref(), inst.LeaseExpiresAt.Format(time.RFC3339))
+}
+
+// TestRealClusterApptainerSandbox drives the whole apptainer path through the
+// backend: the SGE job resolves the container runtime on the compute node
+// (ContainerPlaceholder), runs the SIF with the declarative mount table, and the
+// container writes back through the bind.
+//
+// Two cluster facts make this test specific:
+//   - the runtime is Singularity CE, not Apptainer (same exec interface);
+//   - the queue's default h_vmem is 1 GiB, which is too little virtual memory
+//     for the runtime's Go process, so the tool must declare enough memory for
+//     the backend to translate into a larger -l h_vmem.
+//
+// Required: SRCOS_SGE_SIF=<path to a .sif readable on the compute nodes>.
+// Optional: SRCOS_SGE_APPT_QUEUE (default all.q).
+func TestRealClusterApptainerSandbox(t *testing.T) {
+	cfg := realClusterConfig(t)
+	sif := os.Getenv("SRCOS_SGE_SIF")
+	if sif == "" {
+		t.Skip("set SRCOS_SGE_SIF to a .sif on the shared filesystem to run this")
+	}
+	if _, err := os.Stat(sif); err != nil {
+		t.Skipf("SIF not readable: %v", err)
+	}
+	queue := os.Getenv("SRCOS_SGE_APPT_QUEUE")
+	if queue == "" {
+		queue = "all.q"
+	}
+
+	runID := time.Now().Format("150405.000000")
+	outDir := filepath.Join(os.Getenv("SRCOS_SGE_WORK_DIR"), "appt-"+runID)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The container sees the host output dir at /workspace, which is exactly how
+	// the platform materializes a tool's workspace.
+	spec := &sandbox.Spec{}
+	spec.MustAdd(sandbox.Mount{HostPath: outDir, SandboxPath: "/workspace", Mode: sandbox.ReadWrite, Origin: "builtin"})
+
+	tl := &tool.Tool{
+		ID:        "probe-appt",
+		Kind:      tool.KindTask,
+		Backend:   tool.BackendSGE,
+		Sandbox:   tool.SandboxApptainer,
+		Image:     sif,
+		Resources: tool.Resources{CPU: 1, Memory: "8Gi", Walltime: "0:05:00", Queue: queue},
+	}
+	script := "set -e\n" +
+		"echo INSIDE-OK\n" +
+		"head -1 /etc/os-release\n" +
+		"echo FOO=$FOO PWD=$PWD\n" +
+		"touch /workspace/from-container.txt\n"
+	req := runtime.StartRequest{
+		Tool:       tl,
+		Spec:       spec,
+		Argv:       []string{"/bin/sh", "-c", script},
+		Env:        []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "FOO=fromsrcos", "SRCOS_WORKSPACE=/workspace"},
+		Cwd:        "/workspace",
+		UnitName:   "srcos-appt-" + runID,
+		LogPath:    filepath.Join(outDir, "job.log"),
+		InstanceID: "appt-" + runID,
+	}
+	b := &Backend{Config: cfg}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	h, err := b.Start(ctx, req)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Logf("submitted apptainer job %s", h.Ref())
+
+	st := h.Wait(ctx)
+	if st.Code != 0 || st.Err != nil {
+		t.Fatalf("Wait = %+v (log: %s)", st, readIfExists(filepath.Join(outDir, "job.log")))
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "from-container.txt")); err != nil {
+		t.Fatalf("the container did not write through the bind mount: %v", err)
+	}
+	t.Logf("apptainer job %s ran the SIF and wrote through /workspace", h.Ref())
 }

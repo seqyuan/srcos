@@ -133,7 +133,7 @@
 - SGE backend 已完成**注册与接线**（`state.yaml` 的 `sge` 段；qsub/qstat/qdel/qalter 翻译、rendezvous
   控制通道、`ssh -L` 数据通道含端口池与 Stop 回收、`h_rt` 续期与预警、重启后隧道采纳/结算），
   并已在集群 `annuo` 上真机跑通 `task exit 0/7`、`service + ssh -L 隧道 HTTP 200`、`qalter` 续期；
-  仍缺：`apptainer` 真机验证（代码已实现，annuo 无 apptainer、Singularity 对 uid 560 报错）
+  仍缺：无（Phase 6 清单已收敛；`srcos image pull` 待有运行时的节点上验证）
 
 ### 2.3 下一步
 
@@ -1071,8 +1071,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - [x] `h_rt` 到期续期（`qalter`，`renew_before`/`renew_for`；续期时必须重述 `h_vmem`）与
       到期**预警**（`warn_before` → 审计 `instance.lease_expiring` + 日志，按 deadline 去重）
 - [x] apptainer sandbox 物化（`apptainer/singularity exec` + `--contain`/`--cleanenv`/`--no-home`/`--bind`/`--env`；
-      `ApptainerProbe` 优先 apptainer、回退 singularity）—— **未在真集群验证**：`annuo` 计算节点只有
-      Singularity CE 4（无 apptainer），且多数节点 NSS 不解析 uid 560，无现成 SIF
+      `ApptainerProbe` 优先 apptainer、回退 singularity）—— **已在真集群验证**（annuo：只有 Singularity CE 4；
+      SGE 作业在计算节点解析运行时，`ContainerPlaceholder`）。注意队列默认 `h_vmem=1G` 不够，工具必须声明足量内存
 - [ ] 镜像预热（`apptainer pull` 到共享盘）—— 已实现 `srcos image pull|list`（单测通过），真机未验证
 
 ---

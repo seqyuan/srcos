@@ -198,9 +198,15 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 - `/annogene/data2` = NFS（`10.4.1.170:/ifs/data`），`/home` = NFS（`bj-sci-master:/home`）——**计算节点可见**（作业写出的文件可在登录侧读到）。
 - 作业默认落在 `gpu.q@node060-gpu`（本机）；`python3` 用 miniforge 的（`/annogene/.../miniforge3/bin/python3`）。
   ⚠️ 本机 `/usr/bin/python3` 是 3.6，`import _random` 会 `failed to map segment from shared object`，别用它。
-- **容器运行时**：计算节点普遍有 **Singularity CE 4.0.1（`/usr/local/bin/singularity`）**，**无 apptainer**；
-  `node060-gpu` 两者都无。多数节点 NSS **不解析 uid 560**，`singularity exec` 直接 `FATAL: Couldn't determine user account information`，
-  因此在 `annuo` 上无法端到端验证 `sandbox: apptainer`；未找到现成 SIF。`internal/sandbox/apptainer.go` 已实现（argv 单测通过）。
+- **容器运行时**：计算节点普遍有 **Singularity CE 4.0.1（`/usr/local/bin/singularity`，setuid 安装）**，**无 apptainer**；
+  `node060-gpu`（gpu.q）两者都无，`node001`（all.q）**可以跑**。
+- ⚠️ **队列默认 `h_vmem` = 1 GiB 会把容器运行时压死**：SGE 的 `h_vmem` 以 `RLIMIT_AS` 强制，1 GiB 虚拟内存
+  不够 singularity 的 Go 进程，表现为 `pthread_create failed: Resource temporarily unavailable`，
+  或看起来毫不相干的 `FATAL: Couldn't determine user account information: user: lookup userid 560: invalid argument`。
+  作业显式 `-l h_vmem=8G` 后，`singularity exec --contain --no-home --cleanenv --pwd ... --bind ... --env ...`
+  正常工作（已用 `rst_report_1.0.sif` 在 `all.q@node001` 端到端验证）。
+- 现成 SIF：`/annogene/data2/bioinfo/PMO/yuanzan/project/comm/commander_test/RD/rst_report/rst_report_1.0.sif`（46MB，可读）、
+  `/annoroad/data1/software/install/images/SIF/*.sif`。
 
 ### 实测结论（2026-09-28）
 
@@ -210,6 +216,8 @@ bwrap 的 userns 把**所有未映射的 gid 折叠成 `65534`**，而沙箱进�
 - task `exit 7`（退出码经 rendezvous 正确回传）
 - **service + `ssh -L` 隧道：登录侧经隧道 `GET` 到计算节点的 `python3 -m http.server` 返回 HTTP 200**，Stop 后 `qdel` 干净回收；隧道存活时 `ReattachUnit` 采纳
 - **`qalter -l h_rt=...` 续期成功**（注意：`qalter -l` 会**替换**资源列表，必须重述 `h_vmem`，否则 SGE 拒绝改运行中作业）
+- **`sandbox: apptainer`（实为 Singularity CE）跑通**：SGE 作业在计算节点上解析 `apptainer||singularity`，
+  按声明挂载绑定并执行 SIF，容器内写回 `/workspace`；失败过的“用户信息查询”其实是默认 `h_vmem=1G` 的假象
 
 发现的真 bug（已修）：`qstat -xml -j` 查询格式错误；task 体 `exec` 导致 `exit_code` 永不落盘；`qalter` 未重述 `h_vmem`。
 
