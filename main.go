@@ -620,9 +620,13 @@ func runServer(opts options) {
 	// internal/audit.Forwarder).
 	var auditFwd *audit.Forwarder
 	if state.Audit.ForwardURL != "" {
+		token, err := state.Audit.ResolveToken()
+		if err != nil {
+			log.Fatalf("[srcos] audit forward: %v", err)
+		}
 		auditFwd = audit.NewForwarder(
 			filepath.Join(config.DataDir(configDir), "audit-forward"),
-			&audit.HTTPSink{URL: state.Audit.ForwardURL, Token: state.Audit.ForwardToken},
+			&audit.HTTPSink{URL: state.Audit.ForwardURL, Token: token},
 			state.Audit.ForwardMax)
 		auditRec.ForwardTo(auditFwd)
 		log.Printf("[srcos] audit forward: %s (spool %s)", state.Audit.ForwardURL, auditFwd.Dir())

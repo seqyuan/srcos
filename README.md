@@ -1077,7 +1077,10 @@ srcos serve -d /opt/srcos/config --no-task-drainer
 # config/state.yaml
 audit:
   forward_url: https://collector.example/srcos-audit
-  forward_token: <可选，作为 Authorization: Bearer 发送>
+  # 凭据优先从 0600 文件读，不落进 state.yaml（与 agent token 同理：不用环境变量——
+  # 所有实例同一 OS 用户，/proc/<pid>/environ 在该 uid 视图内可读）。
+  forward_token_file: /etc/srcos/audit-token
+  # forward_token: <可选，内联 token；显式声明优先于文件>
   forward_max: 100000        # 本地 spool 上限（事件数）；超出丢最旧并计数
 ```
 

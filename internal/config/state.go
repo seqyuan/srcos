@@ -84,11 +84,39 @@ type SGEState struct {
 type AuditState struct {
 	// ForwardURL is an HTTP collector; each event is POSTed as JSON.
 	ForwardURL string `yaml:"forward_url,omitempty"`
-	// ForwardToken, when set, is sent as `Authorization: Bearer`.
+	// ForwardToken, when set, is sent as `Authorization: Bearer`. It is stored
+	// in state.yaml (0600); prefer ForwardTokenFile so the credential does not
+	// land there.
 	ForwardToken string `yaml:"forward_token,omitempty"`
+	// ForwardTokenFile is a 0600 file holding the bearer token, read at
+	// startup. An explicit ForwardToken wins (explicit beats indirection).
+	// A file is used rather than an environment variable on purpose: every
+	// instance runs as the same OS user, so /proc/<pid>/environ is readable
+	// across that uid's view — the same reason agent tokens use a 0600 file.
+	ForwardTokenFile string `yaml:"forward_token_file,omitempty"`
 	// ForwardMax bounds the on-disk spool in events. Past it the oldest are
 	// dropped and counted (never silently). Zero uses a 100k default.
 	ForwardMax int `yaml:"forward_max,omitempty"`
+}
+
+// ResolveToken returns the bearer token for the audit forwarder.
+//
+// An inline ForwardToken wins (explicit beats indirection); otherwise the token
+// is read from ForwardTokenFile and trimmed. A configured-but-unreadable file is
+// an error, not an empty token: silently forwarding without the credential would
+// look like a collector outage.
+func (a AuditState) ResolveToken() (string, error) {
+	if a.ForwardToken != "" {
+		return a.ForwardToken, nil
+	}
+	if a.ForwardTokenFile == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(a.ForwardTokenFile)
+	if err != nil {
+		return "", fmt.Errorf("audit.forward_token_file: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 // SSOState configures the lightweight single sign-on layer: the gateway
