@@ -11,7 +11,7 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-29（**apptainer probe 加固**：`sandbox: apptainer` 的探测此前只看 `--version` 的退出码，
+> 最后更新：2026-09-29（**评审遗留项 step 0–3/5–6**：基准（1k/10k 记录的 `ListInstances`、50MiB 工具包的 `Discover`）→ `ScanLoop` 每 tick 一次快照、六个消费者共享、写入前 `reloadForWrite` 重读（10k 记录时每 tick ~6s→~1s）→ digest stat 签名缓存（50MiB 工具包 74ms→0.235ms）→ `audit.forward_token_file`（0600 文件）→ `warnedInstances` 注释。`#2-b`（flowrun 每轮快照）经核对无效、搁置；`#4`（StartService 串行化的覆盖范围）待拍板。上一轮 2026-09-29（**apptainer probe 加固**：`sandbox: apptainer` 的探测此前只看 `--version` 的退出码，
 > Ubuntu 自带的 pygame 游戏 `/usr/games/singularity` 也会退出 0，于是 probe 误判「可用」、工具在运行期才失败且报错归因给工具。
 > 改为校验版本输出内容（真运行时打印 `apptainer|singularity version x.y`），probe 改为可注入并加回归测试。详见 §4.1 末行。
 > 上一轮 2026-09-29（**修 systemd 兼容性 bug**：任务用 `systemd-run --working-directory`，这个便捷选项在 systemd < 246 上不存在，导致「探测到 user systemd → 走 systemd 分支 → 每次运行都启动失败」，且报错被丢弃（空日志 + 裸 `exit code 1`）。改用 `-p WorkingDirectory=` 并捕获 launcher 自身报错；新增两个单测。详见 §4.2 末行。上一轮 2026-09-27（**服务实例化补齐三条**：①**自助启动**——被授权用户可在 `/tools/<id>` 点「启动服务」，`POST /api/tools/<id>/start` 走 `execute.StartService`（Grant × submit scope × 配额，与 MCP 的 `srcos_start_service` 同一实现）；②**运行期存活对账**——网关每 tick（10s）把「记录说 running、进程已不在」的 service 结算为 `stopped` 并撤路由（新增 `UnitGone`，不误判 systemd 重启中的 `activating`；`external` 跳过）；③**任务详情页可直接停止**。另：**`tool.yaml` 改严格解码**（未知字段/拼错键名在注册期拒绝，`grants:` 带提示），tool-spec 修正了三处与实现不符的表述（`grants:` 块、camelCase 键、workspace 共享/投递通道）。`make e2e` 扩到 16 步（新增自助启动/停止 + 杀死进程后由周期对账结算）。上一轮 2026-09-26：移除 dsh 路 B、审计流两期、CI、管理端可启动服务、B3 申请审批、统一服务实例化（ADR-026/027/028）；Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）

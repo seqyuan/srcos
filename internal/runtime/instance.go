@@ -243,6 +243,11 @@ func ListInstances(configDir string) ([]*Instance, error) {
 
 // warnedInstances dedupes the "unreadable record" log line per path, so a
 // corrupt file is reported once rather than on every scan tick.
+//
+// The map grows without bound in principle, but only a path whose record is
+// corrupt ever enters it, and entries are tiny — bounded by the number of bad
+// files an operator has, which is the point of the warning. A TTL would be
+// complexity for a problem that does not exist.
 var warnedInstances sync.Map // path -> struct{}
 
 func warnUnreadableInstance(path string, err error) {
