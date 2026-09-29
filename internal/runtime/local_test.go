@@ -479,3 +479,52 @@ func TestBuildInnerWithDefersTheContainerProbe(t *testing.T) {
 		t.Fatalf("argv[0] = %v, want the placeholder %q", argv, sandbox.ContainerPlaceholder)
 	}
 }
+
+// The systemd argv must use options older systemd (v239, common on RHEL
+// 8-family login nodes) understands. `--working-directory` is a newer
+// convenience flag; the `-p WorkingDirectory=` property form works on both, and
+// a host where the option is rejected fails every run before the unit starts.
+func TestTaskCommandUsesPortableWorkingDirectory(t *testing.T) {
+	loc := &Local{SystemdUser: boolPtr(true)}
+	req := StartRequest{
+		// Degraded mode is the case that needs an explicit working directory:
+		// under bwrap, --chdir already sets it.
+		View: PathView{Degraded: true, Paths: Paths{
+			User:      "alice",
+			Workspace: "/host/ws/alice/demo",
+			JobDir:    "/host/ws/alice/demo/jobs/j1",
+			JobID:     "j1",
+		}},
+		Cwd:      "/host/ws/alice/demo/jobs/j1",
+		UnitName: "srcos-alice-demo-j1",
+		LogPath:  "/host/logs/j1.log",
+		Limiter:  Limiter{SystemdProps: []string{"CPUQuota=100%"}},
+	}
+	path, args, limiter := loc.taskCommand(context.Background(), req, []string{"bash", "work.sh"})
+	if path != "systemd-run" || limiter != "systemd-run" {
+		t.Fatalf("path=%q limiter=%q, want systemd-run", path, limiter)
+	}
+	joined := strings.Join(args, "\x00")
+	if strings.Contains(joined, "--working-directory") {
+		t.Fatalf("argv uses --working-directory, which older systemd rejects: %v", args)
+	}
+	if !strings.Contains(joined, "-p\x00WorkingDirectory=/host/ws/alice/demo/jobs/j1") {
+		t.Fatalf("argv must set WorkingDirectory as a property: %v", args)
+	}
+	if !strings.HasSuffix(joined, "--\x00bash\x00work.sh") {
+		t.Fatalf("the inner argv must follow the -- separator: %v", args)
+	}
+}
+
+// A launcher failure (systemd-run rejecting a flag, a name collision) has no
+// unit and therefore no log; the captured client message must land in the
+// instance log so the failure is not an empty file.
+func TestAppendLauncherFailureRecordsReason(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "run.log")
+	appendLauncherFailure(logPath, "systemd-run: unrecognized option '--nope'")
+	got := readFile(t, logPath)
+	if !strings.Contains(got, "launcher failed before the unit started") ||
+		!strings.Contains(got, "unrecognized option") {
+		t.Fatalf("launcher error not recorded: %q", got)
+	}
+}

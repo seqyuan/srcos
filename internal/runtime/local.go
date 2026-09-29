@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -222,6 +223,11 @@ func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string,
 	}
 
 	cmd := exec.Command(path, args...)
+	// systemd-run's *client* diagnostics (a rejected option, a unit-name
+	// collision, a DBus failure) happen before the unit exists, so they never
+	// reach StandardOutput=append:. Capture them separately so a launch that
+	// failed before the unit started can still explain itself.
+	var clientErr bytes.Buffer
 	if limiterName != "systemd-run" {
 		// A plain child (degraded mode) inherits our file descriptors, so the
 		// log is ours to wire. A systemd unit does not: systemd writes the log
@@ -232,6 +238,9 @@ func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string,
 		if req.View.Degraded {
 			cmd.Dir = req.Cwd
 		}
+	} else {
+		cmd.Stdout = &clientErr
+		cmd.Stderr = &clientErr
 	}
 	cmd.Stdin = nil
 
@@ -252,7 +261,20 @@ func (l *Local) startTask(ctx context.Context, req StartRequest, inner []string,
 		logFile.Close()
 		go func() {
 			err := cmd.Wait()
-			h.done <- ExitStatus{Code: exitCode(err), Err: err}
+			st := ExitStatus{Code: exitCode(err), Err: err}
+			if err != nil {
+				// A unit that actually ran leaves a verdict; its absence means
+				// systemd never got that far, and the only explanation is what
+				// systemd-run printed on its way out. Put it where the user looks
+				// (the instance log) instead of discarding it.
+				if _, verr := os.Stat(verdictPath(req.LogPath)); verr != nil {
+					if msg := strings.TrimSpace(clientErr.String()); msg != "" {
+						appendLauncherFailure(req.LogPath, msg)
+						st.Err = errors.New(FirstLine(msg))
+					}
+				}
+			}
+			h.done <- st
 		}()
 		return h, nil
 	}
@@ -283,7 +305,13 @@ func (l *Local) taskCommand(ctx context.Context, req StartRequest, inner []strin
 		if req.View.Degraded {
 			// In a sandbox the working directory is set by bwrap (--chdir); a unit
 			// would otherwise start in / and the tool could not find its job dir.
-			args = append(args, "--working-directory", req.Cwd)
+			//
+			// Use the property form (`-p WorkingDirectory=`) rather than the
+			// `--working-directory` convenience option: the latter only exists in
+			// newer systemd, and on an older one (v239, common on RHEL 8-family
+			// login nodes) every single run fails with an "unrecognized option"
+			// error before the unit ever starts. The property form works on both.
+			args = append(args, "-p", "WorkingDirectory="+req.Cwd)
 		}
 		args = append(args, "--")
 		return "systemd-run", append(args, inner...), "systemd-run"
@@ -388,6 +416,24 @@ func verdictPath(logPath string) string { return logPath + ".verdict" }
 // that safe.
 func verdictCommand(logPath string) string {
 	return fmt.Sprintf(`ExecStopPost=-/bin/sh -c "echo $EXIT_STATUS $SERVICE_RESULT > '%s'"`, verdictPath(logPath))
+}
+
+// appendLauncherFailure writes a launcher's own error into the instance log.
+//
+// The log normally belongs to the tool, but when the launcher fails before the
+// unit starts there is no tool output at all: without this the record would say
+// only "tool exited with code 1" over an empty log, which is the least useful
+// failure a user can be handed.
+func appendLauncherFailure(logPath, msg string) {
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	_, _ = f.WriteString("[srcos] launcher failed before the unit started:\n" + msg)
 }
 
 // parseVerdict reads the "<EXIT_STATUS> <SERVICE_RESULT>" systemd wrote.
