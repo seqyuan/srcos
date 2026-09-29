@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -1044,12 +1045,59 @@ var digestSkip = map[string]bool{
 // record, not that the content is trustworthy. That is the audit's external
 // anchor (ADR-024), and mixing the two would overstate this one.
 //
-// The package should not carry large blobs (images belong in `ro_mounts`): the
-// digest is recomputed whenever a tool is loaded.
+// The result is cached per directory, keyed by a stat signature (relpath +
+// mode + size + mtime of every file that enters the digest). Reading every byte
+// on every call made a list/detail request cost O(bytes) — 74ms for a package
+// carrying a 50MiB blob, measured by BenchmarkDiscover. The cache makes the
+// steady state O(files) with no content read.
+//
+// The trust level matches grants.yaml hot-reload: a change that leaves both size
+// and mtime untouched (a restored file, or a coarse-timestamp filesystem) is not
+// detected. That is acceptable for a managed, declarative asset.
 func Digest(dir string) (string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return "", nil
 	}
+	files, err := walkDigestFiles(dir)
+	if err != nil {
+		digestCache.Delete(dir)
+		return "", err
+	}
+	sig, err := statSignature(dir, files)
+	if err != nil {
+		digestCache.Delete(dir)
+		return "", err
+	}
+	if e, ok := digestCache.Load(dir); ok {
+		if entry, ok := e.(digestCacheEntry); ok && entry.sig == sig {
+			return entry.digest, nil
+		}
+	}
+	d, err := computeDigest(dir, files)
+	if err != nil {
+		return "", err
+	}
+	digestCache.Store(dir, digestCacheEntry{sig: sig, digest: d})
+	return d, nil
+}
+
+// digestCacheEntry is one directory's cached digest and the stat signature it
+// was computed from.
+type digestCacheEntry struct {
+	sig    string
+	digest string
+}
+
+// digestCache is keyed by tool directory. The key set is bounded by the number
+// of tools, so there is no eviction.
+var digestCache sync.Map // dir -> digestCacheEntry
+
+// walkDigestFiles returns, in sorted order, the files that enter a digest.
+//
+// The same walk feeds both the stat signature and the content digest, so the
+// two always cover exactly the same set — otherwise a change could fail to
+// invalidate one of them.
+func walkDigestFiles(dir string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -1069,10 +1117,35 @@ func Digest(dir string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	sort.Strings(files)
+	return files, nil
+}
 
+// statSignature fingerprints a package without reading a single byte: relpath,
+// mode, size and mtime for every file that enters the digest. A content change
+// moves mtime (and usually size); chmod moves mode; adding or removing a file
+// changes the list.
+func statSignature(dir string, files []string) (string, error) {
+	h := sha256.New()
+	for _, path := range files {
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s\x00%o\x00%d\x00%d\x00", rel, info.Mode().Perm(), info.Size(), info.ModTime().UnixNano())
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// computeDigest is the content hash: path + mode + bytes, in the order
+// walkDigestFiles returns.
+func computeDigest(dir string, files []string) (string, error) {
 	h := sha256.New()
 	for _, path := range files {
 		rel, err := filepath.Rel(dir, path)
