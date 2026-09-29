@@ -369,18 +369,15 @@ func (c *Controller) Cancel(ctx context.Context, ident agenttoken.Identity, need
 	if inst.State.Terminal() {
 		return &CancelResult{InstanceID: inst.ID, State: string(inst.State)}, nil
 	}
-	// The tool package is looked up *without* a grant check: cancelling your own
-	// running instance must keep working after the tool is un-granted (the same
-	// rule the read side applies to logs and artifacts).
-	t, err := tool.Find(c.opts.ToolsDir, inst.Tool)
-	if err != nil {
-		return nil, fmt.Errorf("%w: tool package for %s is gone, cannot stop it", ErrUnavailable, inst.Tool)
-	}
+	// No tool lookup and no grant check: cancelling your own running instance
+	// must keep working after the tool is un-granted or its package removed (the
+	// same rule the read side applies to logs and artifacts). Stopping needs only
+	// the instance record.
 	runner, err := c.supervisor(ident.User)
 	if err != nil {
 		return nil, err
 	}
-	if err := runner.StopService(ctx, t, inst); err != nil {
+	if err := runner.StopService(ctx, inst); err != nil {
 		return nil, err
 	}
 	auditLine(ident, "cancel", fmt.Sprintf("instance=%s tool=%s", inst.ID, inst.Tool))
@@ -487,7 +484,7 @@ func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity
 	c.mu.Lock()
 	prevPath := runtime.InstancePath(c.opts.ConfigDir, runtime.InstanceID(ident.User, t.ID, ""))
 	if prev, lerr := runtime.LoadInstance(prevPath); lerr == nil && !prev.State.Terminal() {
-		_ = runner.StopService(ctx, t, prev)
+		_ = runner.StopService(ctx, prev)
 	}
 	if qerr := c.checkQuota(ident.User, t, j); qerr != nil {
 		c.mu.Unlock()

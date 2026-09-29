@@ -111,7 +111,7 @@ func TestStartServicePublishesRouteAndStops(t *testing.T) {
 		t.Fatalf("StartService: %v", err)
 	}
 	// Every exit path from here must not leak the process.
-	defer func() { _ = h.runner.StopService(ctx, tl, inst) }()
+	defer func() { _ = h.runner.StopService(ctx, inst) }()
 
 	if inst.State != StateRunning {
 		t.Fatalf("state = %s (%s)\nlog:\n%s", inst.State, inst.Error, readFile(t, inst.LogPath))
@@ -151,7 +151,7 @@ func TestStartServicePublishesRouteAndStops(t *testing.T) {
 
 	// Stopping withdraws the route before killing the process, so a request
 	// arriving mid-stop gets a "starting" page rather than a 502.
-	if err := h.runner.StopService(ctx, tl, inst); err != nil {
+	if err := h.runner.StopService(ctx, inst); err != nil {
 		t.Fatalf("StopService: %v", err)
 	}
 	if _, _, ok := h.routes.GetByPath("/proxy/alice/web/"); ok {
@@ -243,7 +243,7 @@ exec python3 -m http.server "${SRCOS_PORT}" --bind 127.0.0.1 --directory "${SRCO
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 
 	_, port, err := splitEndpoint(inst.Endpoint)
 	if err != nil {
@@ -265,7 +265,7 @@ func TestReconcileAdoptsALiveDegradedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 	if inst.PID <= 0 || inst.PIDStart == 0 {
 		t.Fatalf("a degraded service must record its pid: pid=%d start=%d", inst.PID, inst.PIDStart)
 	}
@@ -370,7 +370,7 @@ func TestReaperSkipsServiceWithOpenWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 
 	inst.LastActiveAt = time.Now().Add(-time.Hour)
 	if err := SaveInstance(InstancePath(h.configDir, inst.ID), inst); err != nil {
@@ -446,7 +446,7 @@ func TestReaperHonoursObservedActivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 
 	// The record says the service started an hour ago; the proxy saw traffic a
 	// minute ago.
@@ -492,7 +492,7 @@ func TestRouteBackendPathComesFromIngress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 
 	e, ok := h.routes.Get("alice", "web")
 	if !ok {
@@ -517,7 +517,7 @@ func TestDeclarativeCommandRunsForAService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 
 	if inst.State != StateRunning {
 		t.Fatalf("state = %s (%s) — ${SRCOS_PORT} probably did not reach the process", inst.State, inst.Error)
@@ -539,7 +539,7 @@ func TestRouteCarriesWebSocketAndBandwidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 	if e, ok := h.routes.Get("alice", "web"); !ok {
 		t.Fatal("no route was published")
 	} else if !e.WebSocket {
@@ -556,7 +556,7 @@ func TestRouteCarriesWebSocketAndBandwidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h2.runner.StopService(context.Background(), tl2, inst2) }()
+	defer func() { _ = h2.runner.StopService(context.Background(), inst2) }()
 	e, ok := h2.routes.Get("alice", "web")
 	if !ok {
 		t.Fatal("no route was published")
@@ -615,7 +615,7 @@ func TestExternalBackendForwardsToARunningServer(t *testing.T) {
 
 	// Stopping the instance withdraws the route and records it stopped — and
 	// leaves the upstream alone, because SRCOS did not start it.
-	if err := h.runner.StopService(context.Background(), tl, inst); err != nil {
+	if err := h.runner.StopService(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := h.routes.Get("alice", "web"); ok {
@@ -649,7 +649,7 @@ func TestPublishedEndpointReplacesThePoolPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = h.runner.StopService(context.Background(), tl, inst) }()
+	defer func() { _ = h.runner.StopService(context.Background(), inst) }()
 	if inst.Endpoint != target.String() {
 		t.Fatalf("endpoint = %s, want the published %s", inst.Endpoint, target.String())
 	}

@@ -211,6 +211,7 @@ make vet       # go vet ./...
 make fmt       # gofmt -w .
 make webui     # 构建独立前端包到 internal/web/dist/（Phase 5 起）
 make e2e       # 端到端回归网（临时配置+临时端口：提交→队列→执行→判定→日志→资源查看）
+make e2e-shiny # Shiny for Python 服务回归（可选；需 SRCOS_SHINY_PYTHON 指向装了 shiny 的 python，没有则 SKIP）
 ```
 
 CI（`.github/workflows/ci.yml`）跑同样的三件事：`vet` + `test -race`、`make e2e`

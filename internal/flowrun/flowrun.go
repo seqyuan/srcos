@@ -793,11 +793,8 @@ func (r *Runner) StopRun(ctx context.Context, f *flow.Flow, runID string) (int, 
 		if at := strings.IndexByte(toolID, '@'); at >= 0 {
 			toolID = toolID[:at]
 		}
-		t, err := tool.Find(r.Opts.ToolsDir, toolID)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("node %s: %v", node.ID, err))
-			continue
-		}
+		// Stopping needs only the instance record: a tool that has since been
+		// removed must not block cancelling its runs.
 		for _, jobID := range record.Nodes[i].JobIDs {
 			inst, err := runtime.LoadInstance(runtime.InstancePath(
 				r.Opts.ConfigDir, runtime.InstanceID(r.Opts.User, toolID, jobID)))
@@ -807,7 +804,7 @@ func (r *Runner) StopRun(ctx context.Context, f *flow.Flow, runID string) (int, 
 			if inst.State.Terminal() {
 				continue
 			}
-			if err := r.Opts.Runner.StopService(ctx, t, inst); err != nil {
+			if err := r.Opts.Runner.StopService(ctx, inst); err != nil {
 				problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, err))
 				continue
 			}

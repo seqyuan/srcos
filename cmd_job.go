@@ -582,7 +582,7 @@ func runSvcStart(args []string) {
 	if prev, err := runtime.LoadInstance(runtime.InstancePath(*jf.configDir, runtime.InstanceID(user, t.ID, ""))); err == nil {
 		if !prev.State.Terminal() {
 			fmt.Printf("stopping the previous instance (%s)\n", prev.State)
-			_ = runner.StopService(context.Background(), t, prev)
+			_ = runner.StopService(context.Background(), prev)
 		}
 	}
 
@@ -609,35 +609,41 @@ func runSvcStart(args []string) {
 func runSvcStop(args []string) {
 	fs := newFlagSet("svc stop")
 	configDir := configDirFlag(fs)
-	toolsDir := fs.String("tools-dir", "", "tool package root")
+	toolsDir := fs.String("tools-dir", "", "tool package root (not needed: stop works from the record)")
 	userFlag := fs.String("user", "", "SRCOS registered user")
 	toolID := fs.String("tool", "", "tool id (required)")
 	var positional []string
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: srcos svc stop --tool ID") }
 	parseFlagsLoose(fs, args, &positional)
 
-	t, root := mustLoadTool(*toolsDir, *configDir, *toolID)
+	if strings.TrimSpace(*toolID) == "" {
+		fatalf("--tool is required")
+	}
 	user := resolveUser(*userFlag)
-	runner, _, err := buildRunner(*configDir, root, user, nil)
+	// Stopping needs only the instance record, so the tool package is not
+	// loaded: an instance must be stoppable even if its tool was removed,
+	// renamed, or un-granted. (Starting still loads it: the tool defines what
+	// runs.)
+	runner, _, err := buildRunner(*configDir, resolveToolsDir(*toolsDir, *configDir), user, nil)
 	if err != nil {
 		fatalf("%v", err)
 	}
-	inst, err := runtime.LoadInstance(runtime.InstancePath(*configDir, runtime.InstanceID(user, t.ID, "")))
+	inst, err := runtime.LoadInstance(runtime.InstancePath(*configDir, runtime.InstanceID(user, *toolID, "")))
 	if err != nil {
-		fatalf("no service instance for %s/%s: %v", user, t.ID, err)
+		fatalf("no service instance for %s/%s: %v", user, *toolID, err)
 	}
 	if inst.State.Terminal() {
 		fmt.Printf("already %s\n", inst.State)
 		return
 	}
-	if err := runner.StopService(context.Background(), t, inst); err != nil {
+	if err := runner.StopService(context.Background(), inst); err != nil {
 		fatalf("%v", err)
 	}
 	cliAudit(*configDir, operatorActor(), "instance.stopped", "instance", inst.ID, map[string]any{
 		"tool":  inst.Tool,
 		"owner": inst.User,
 	})
-	_ = runtime.WriteServiceManifest(*configDir, user, t.ID, nil)
+	_ = runtime.WriteServiceManifest(*configDir, user, *toolID, nil)
 	fmt.Printf("stopped %s\n", inst.ID)
 }
 

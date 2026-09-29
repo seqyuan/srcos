@@ -4,7 +4,7 @@
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 
-.PHONY: build test vet fmt webui e2e
+.PHONY: build test vet fmt webui e2e e2e-shiny
 
 build:
 	@if [ ! -f internal/web/dist/index.html ]; then \
@@ -42,3 +42,10 @@ webui:
 # 需要本机有 bwrap（或用 SRCOS_E2E_SANDBOX=none）与 curl。
 e2e: build
 	bash scripts/e2e.sh
+
+# Shiny for Python 服务回归（可选项，不在 make e2e 里）。
+# 需要一个装了 shiny 的 python：
+#   SRCOS_SHINY_PYTHON=/path/to/python make e2e-shiny
+# 没有就 SKIP（退出 0），所以在没有 shiny 的机器/CI 上也不会失败。
+e2e-shiny: build
+	bash scripts/e2e-shiny.sh

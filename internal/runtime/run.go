@@ -803,7 +803,7 @@ func probeHTTP(ctx context.Context, target route.Target, path string, timeout ti
 }
 
 // StopService stops a service instance and withdraws its route.
-func (r *Runner) StopService(ctx context.Context, t *tool.Tool, inst *Instance) error {
+func (r *Runner) StopService(ctx context.Context, inst *Instance) error {
 	if !inst.State.Terminal() {
 		inst.State = StateStopping
 		_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
@@ -983,7 +983,7 @@ func (rp *Reaper) Sweep(ctx context.Context, now time.Time) ([]string, error) {
 		if reason == "" {
 			continue
 		}
-		if err := rp.Runner.StopService(ctx, t, inst); err != nil {
+		if err := rp.Runner.StopService(ctx, inst); err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", inst.ID, err))
 			continue
 		}

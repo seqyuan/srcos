@@ -243,7 +243,7 @@ func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, use
 	// `srcos svc start` does: stop the previous one first, don't leak it.
 	if prev, lerr := runtime.LoadInstance(runtime.InstancePath(h.opts.ConfigDir, runtime.InstanceID(user, t.ID, ""))); lerr == nil {
 		if !prev.State.Terminal() {
-			_ = runner.StopService(r.Context(), t, prev)
+			_ = runner.StopService(r.Context(), prev)
 		}
 	}
 	inst, err := runner.StartService(r.Context(), t, nil)
@@ -272,12 +272,7 @@ func (h *Handler) adminStopInstance(w http.ResponseWriter, r *http.Request, user
 		writeJSON(w, ErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
-	t, err := h.manifestForAdmin(inst.Tool)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := h.opts.Runner.StopService(r.Context(), t, inst); err != nil {
+	if err := h.opts.Runner.StopService(r.Context(), inst); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
