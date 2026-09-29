@@ -477,10 +477,21 @@ func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity
 		return nil, err
 	}
 
+	// Serialize the whole replacement of this (user, tool) service — stop old,
+	// quota check and the start itself — so a second concurrent start (a double
+	// click, an agent retry) waits for the first instead of stopping its
+	// in-flight instance. The lock lives on the runner (shared via ForUser), so
+	// the admin console takes the same one; a CLI start in another process is
+	// not serialized (the record + periodic reconcile are the cross-process
+	// backstop).
+	unlock := runner.LockStart(ident.User, t.ID)
+	defer unlock()
+
 	// Serialize the stop-then-quota decision with other write-path operations:
 	// the predecessor holds the quota slot the replacement needs, and two
 	// concurrent starts must not both pass the check. The start itself is *not*
-	// under the lock — it blocks on the healthcheck for up to a minute.
+	// under c.mu — it blocks on the healthcheck for up to a minute — but it is
+	// under the per-(user,tool) start lock taken above.
 	c.mu.Lock()
 	prevPath := runtime.InstancePath(c.opts.ConfigDir, runtime.InstanceID(ident.User, t.ID, ""))
 	if prev, lerr := runtime.LoadInstance(prevPath); lerr == nil && !prev.State.Terminal() {

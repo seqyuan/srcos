@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/audit"
@@ -54,6 +55,45 @@ func (r *Runner) ForUser(user string) *Runner {
 // SetPorts installs the port pool after construction (the pool is shared with
 // the reconciler, which is built later).
 func (r *Runner) SetPorts(p Ports) { r.ports = p }
+
+// startLocks is the per-(user, tool) lock table behind LockStart. It is a
+// pointer on Runner because ForUser clones the struct by value: a value would be
+// copied, which is both wrong and a vet error.
+type startLocks struct {
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
+}
+
+func newStartLocks() *startLocks { return &startLocks{m: map[string]*sync.Mutex{}} }
+
+// LockStart serializes "replace the live service for (user, tool)" and returns
+// the unlock.
+//
+// A service is one live instance per (user, tool), so two concurrent starts must
+// not interleave their stop-then-start: the second would stop the first's
+// in-flight instance and the first would then fail its healthcheck. The caller
+// holds the lock across the whole sequence (stop old → quota → start), which is
+// why this is not done inside StartService itself.
+//
+// ForUser clones share the table, so the gateway's execute and admin paths take
+// the same lock. A CLI `svc start` in another process builds its own runner and
+// is not serialized with the gateway — the instance record plus the periodic
+// reconcile remain the cross-process backstop.
+func (r *Runner) LockStart(user, toolID string) func() {
+	if r == nil || r.starts == nil {
+		return func() {}
+	}
+	key := user + "/" + toolID
+	r.starts.mu.Lock()
+	mu, ok := r.starts.m[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.starts.m[key] = mu
+	}
+	r.starts.mu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
 
 // ports is nil until SetPorts; starting a service without it is a wiring bug,
 // so it is reported clearly rather than panicking.

@@ -229,6 +229,10 @@ type AgentTokenIssuer interface {
 type Runner struct {
 	opts  Options
 	ports Ports
+	// starts serializes service replacement per (user, tool) across runners
+	// that share it. ForUser clones the struct by value, so this must be a
+	// pointer for the clone to share the same tables (see LockStart).
+	starts *startLocks
 }
 
 // NewRunner builds a Runner.
@@ -236,7 +240,7 @@ func NewRunner(opts Options) *Runner {
 	if opts.Backends == nil {
 		opts.Backends = map[string]Backend{}
 	}
-	return &Runner{opts: opts}
+	return &Runner{opts: opts, starts: newStartLocks()}
 }
 
 // Options exposes the configuration to callers that need to read it back

@@ -239,6 +239,12 @@ func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, use
 	}
 
 	runner := h.opts.Runner.ForUser(user)
+	// Hold the (user, tool) start lock across the whole replacement, so a
+	// concurrent start — from this console or the user's own page — waits instead
+	// of stopping an in-flight instance. ForUser shares the lock table with the
+	// execute.Controller path.
+	unlock := runner.LockStart(user, t.ID)
+	defer unlock()
 	// Starting twice should converge on one live service, the same way
 	// `srcos svc start` does: stop the previous one first, don't leak it.
 	if prev, lerr := runtime.LoadInstance(runtime.InstancePath(h.opts.ConfigDir, runtime.InstanceID(user, t.ID, ""))); lerr == nil {
