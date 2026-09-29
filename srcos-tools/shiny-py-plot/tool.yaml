@@ -1,0 +1,48 @@
+schemaVersion: 1
+id: shiny-py-plot
+version: 0.1.0
+name: "Shiny for Python: Plot"
+description: "Python Shiny 数据可视化：滑块/下拉 → matplotlib 直方图，演示服务型工具"
+
+kind: service
+backend: local
+sandbox: none
+
+command:
+  - "python3"
+  - "-m"
+  - "shiny"
+  - "run"
+  - "--host"
+  - "127.0.0.1"
+  - "--port"
+  - "${SRCOS_PORT}"
+  - "${SRCOS_WORKSPACE}/app.py"
+
+environment: py-shiny
+
+interface:
+  inputs:
+    - name: title
+      type: string
+      label: "标题"
+      default: "SRCOS · Shiny for Python 绘图"
+
+resources:
+  cpu: 1
+  memory: "2Gi"
+
+ingress:
+  healthcheck:
+    path: "/"
+    timeout: "60s"
+    startup_grace: "120s"
+  websocket: true
+
+lifecycle:
+  restart: on-failure
+  max_lifetime: "8h"
+  idle_ttl: "30m"
+
+workspace:
+  init_from: workspace-template/

@@ -1,0 +1,52 @@
+schemaVersion: 1
+id: shiny-py-hello
+version: 0.1.0
+name: "Shiny for Python: Hello"
+description: "最小的 Python Shiny 应用：文本输入 + 滑块 → 文本输出，演示 kind: service 的完整生命周期"
+
+kind: service
+backend: local
+sandbox: none
+
+# 声明式启动命令：${...} 由 SRCOS 从本单元自己的环境展开；端口用端口池分配的
+# ${SRCOS_PORT}，代理按它转发。用绝对路径指向 workspace 里的 app.py，启动不依赖 cwd。
+command:
+  - "python3"
+  - "-m"
+  - "shiny"
+  - "run"
+  - "--host"
+  - "127.0.0.1"
+  - "--port"
+  - "${SRCOS_PORT}"
+  - "${SRCOS_WORKSPACE}/app.py"
+
+# 解释器来自具名环境（PyPI shiny + plotly/matplotlib/pandas）：宿主路径写在
+# config/environments.yaml，不写进工具包。
+environment: py-shiny
+
+interface:
+  inputs:
+    - name: title
+      type: string
+      label: "标题"
+      default: "SRCOS · Shiny for Python"
+
+resources:
+  cpu: 1
+  memory: "1Gi"
+
+ingress:
+  healthcheck:
+    path: "/"
+    timeout: "60s"
+    startup_grace: "120s"
+  websocket: true
+
+lifecycle:
+  restart: on-failure
+  max_lifetime: "8h"
+  idle_ttl: "30m"
+
+workspace:
+  init_from: workspace-template/
