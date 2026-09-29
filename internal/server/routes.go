@@ -85,6 +85,19 @@ func (s *Server) sweepInstanceCredentials() {
 	}
 }
 
+// listInstances is the record snapshot the lifecycle consumers work from.
+//
+// A read failure is logged and yields nil: the tick is best-effort, and one
+// failed listing must not stop the other consumers (the next tick retries).
+func (s *Server) listInstances() []*runtime.Instance {
+	insts, err := runtime.ListInstances(config.DirOf(s.registry))
+	if err != nil {
+		log.Printf("[srcos] list instances: %v", err)
+		return nil
+	}
+	return insts
+}
+
 // reconcileTasks settles task records whose process is gone.
 //
 // It runs on every scan tick, not only at startup: a restart normally happens
@@ -95,7 +108,7 @@ func (s *Server) reconcileTasks() {
 	if s.runner == nil {
 		return
 	}
-	adopted, settled, err := s.runner.ReconcileTasks(context.Background())
+	adopted, settled, err := s.runner.ReconcileTasks(context.Background(), s.listInstances())
 	if err != nil {
 		log.Printf("[srcos] tasks reconcile: %v", err)
 	}
@@ -130,7 +143,7 @@ func (s *Server) reconcileServices() {
 	if s.runner == nil {
 		return
 	}
-	orphaned, err := s.runner.ReconcileServices(context.Background())
+	orphaned, err := s.runner.ReconcileServices(context.Background(), s.listInstances())
 	if err != nil {
 		log.Printf("[srcos] services reconcile: %v", err)
 	}
@@ -191,7 +204,7 @@ func (s *Server) reapServices() []string {
 	if s.reaper == nil {
 		return nil
 	}
-	stopped, err := s.reaper.Sweep(context.Background(), time.Now())
+	stopped, err := s.reaper.Sweep(context.Background(), time.Now(), s.listInstances())
 	if err != nil {
 		log.Printf("[srcos] reap: %v", err)
 	}
@@ -211,7 +224,7 @@ func (s *Server) renewServices() {
 	if s.runner == nil {
 		return
 	}
-	renewed, err := s.runner.RenewServices(context.Background())
+	renewed, err := s.runner.RenewServices(context.Background(), s.listInstances())
 	if err != nil {
 		log.Printf("[srcos] renew: %v", err)
 	}
@@ -227,7 +240,7 @@ func (s *Server) warnExpiringLeases() {
 	if s.runner == nil {
 		return
 	}
-	warnings, err := s.runner.WarnExpiringLeases(context.Background())
+	warnings, err := s.runner.WarnExpiringLeases(context.Background(), s.listInstances())
 	if err != nil {
 		log.Printf("[srcos] lease warning: %v", err)
 	}

@@ -715,7 +715,11 @@ func runSvcReap(args []string) {
 		Runner:     runner,
 		LastActive: activityJournal.Last,
 	}
-	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	insts, err := runtime.ListInstances(*configDir)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	stopped, err := reaper.Sweep(context.Background(), time.Now(), insts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 	}

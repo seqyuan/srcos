@@ -72,7 +72,7 @@ func TestReconcileTasksSettlesOrphans(t *testing.T) {
 	// This backend cannot say how the run ended (no verdict file), so the record
 	// must admit that rather than invent a state.
 	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": &stubBackend{alive: false}}})
-	adopted, settled, err := runner.ReconcileTasks(context.Background())
+	adopted, settled, err := runner.ReconcileTasks(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestReconcileTasksUsesTheBackendsVerdict(t *testing.T) {
 			backend := &stubBackend{alive: false, verdict: c.verdict, hasVerdict: true}
 			runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": backend}})
 
-			adopted, settled, err := runner.ReconcileTasks(context.Background())
+			adopted, settled, err := runner.ReconcileTasks(context.Background(), snapshotFor(t, runner))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,7 @@ func TestReconcileTasksAdoptsSurvivors(t *testing.T) {
 	saveTestInstance(t, configDir, "alice-demo-alive", "task", StateRunning)
 
 	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": &stubBackend{alive: true}}})
-	adopted, settled, err := runner.ReconcileTasks(context.Background())
+	adopted, settled, err := runner.ReconcileTasks(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestReconcileTasksIgnoresQueuedAndDecided(t *testing.T) {
 	saveTestInstance(t, configDir, "alice-web-svc", "service", StateRunning)
 
 	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": &stubBackend{alive: false}}})
-	adopted, settled, err := runner.ReconcileTasks(context.Background())
+	adopted, settled, err := runner.ReconcileTasks(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}

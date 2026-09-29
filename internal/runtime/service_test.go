@@ -349,7 +349,7 @@ func TestReaperStopsIdleService(t *testing.T) {
 	}
 
 	reaper := &Reaper{Runner: h.runner}
-	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	stopped, err := reaper.Sweep(context.Background(), time.Now(), snapshotFor(t, reaper.Runner))
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestReaperSkipsServiceWithOpenWebSocket(t *testing.T) {
 		Runner:   h.runner,
 		ActiveWS: func(id string) bool { return id == inst.ID },
 	}
-	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	stopped, err := reaper.Sweep(context.Background(), time.Now(), snapshotFor(t, reaper.Runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestReaperDoesNotIdleReapSGETools(t *testing.T) {
 	}
 
 	reaper := &Reaper{Runner: h.runner}
-	stopped, _ := reaper.Sweep(context.Background(), time.Now())
+	stopped, _ := reaper.Sweep(context.Background(), time.Now(), snapshotFor(t, reaper.Runner))
 	if len(stopped) != 0 {
 		t.Fatalf("an SGE service was idle-reaped: %v", stopped)
 	}
@@ -459,7 +459,7 @@ func TestReaperHonoursObservedActivity(t *testing.T) {
 		Runner:     h.runner,
 		LastActive: func(id string) time.Time { return time.Now().Add(-time.Minute) },
 	}
-	stopped, err := reaper.Sweep(context.Background(), time.Now())
+	stopped, err := reaper.Sweep(context.Background(), time.Now(), snapshotFor(t, reaper.Runner))
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestReaperHonoursObservedActivity(t *testing.T) {
 	// With no observation at all the record stands on its own, and the old
 	// behaviour (reap it) is what remains.
 	plain := &Reaper{Runner: h.runner}
-	stopped, err = plain.Sweep(context.Background(), time.Now())
+	stopped, err = plain.Sweep(context.Background(), time.Now(), snapshotFor(t, plain.Runner))
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}

@@ -933,13 +933,11 @@ type Reaper struct {
 }
 
 // Sweep performs one pass and returns the instances it stopped.
-func (rp *Reaper) Sweep(ctx context.Context, now time.Time) ([]string, error) {
+//
+// insts is the caller's record snapshot; the caller decides how fresh it is.
+func (rp *Reaper) Sweep(ctx context.Context, now time.Time, insts []*Instance) ([]string, error) {
 	if rp.Runner.ports == nil {
 		return nil, errors.New("reaper needs the port pool to release ports")
-	}
-	insts, err := ListInstances(rp.Runner.opts.ConfigDir)
-	if err != nil {
-		return nil, err
 	}
 	var stopped []string
 	var problems []string
@@ -1135,11 +1133,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 // backend that owns runtime state the record cannot describe — UnitReattacher,
 // where re-establishing the state (an SGE ssh tunnel) is the same question. A
 // backend that can do neither is skipped rather than guessed at.
-func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err error) {
-	insts, err := ListInstances(r.opts.ConfigDir)
-	if err != nil {
-		return nil, err
-	}
+func (r *Runner) ReconcileServices(ctx context.Context, insts []*Instance) (orphaned []string, err error) {
 	var problems []string
 	for _, inst := range insts {
 		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
@@ -1218,11 +1212,7 @@ func (r *Runner) ReconcileServices(ctx context.Context) (orphaned []string, err 
 // window.
 //
 // It is a no-op for every backend that does not implement UnitRenewer.
-func (r *Runner) RenewServices(ctx context.Context) (renewed []string, err error) {
-	insts, err := ListInstances(r.opts.ConfigDir)
-	if err != nil {
-		return nil, err
-	}
+func (r *Runner) RenewServices(ctx context.Context, insts []*Instance) (renewed []string, err error) {
 	var problems []string
 	for _, inst := range insts {
 		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
@@ -1273,11 +1263,7 @@ func (r *Runner) RenewServices(ctx context.Context) (renewed []string, err error
 // has stalled — the operator needs advance notice rather than a service that
 // vanishes. One warning per deadline: a renewal changes the deadline and
 // re-arms it.
-func (r *Runner) WarnExpiringLeases(ctx context.Context) (warnings []LeaseWarning, err error) {
-	insts, err := ListInstances(r.opts.ConfigDir)
-	if err != nil {
-		return nil, err
-	}
+func (r *Runner) WarnExpiringLeases(ctx context.Context, insts []*Instance) (warnings []LeaseWarning, err error) {
 	var problems []string
 	for _, inst := range insts {
 		if inst.Kind != string(tool.KindService) || inst.State.Terminal() || inst.LeaseExpiresAt.IsZero() {
@@ -1328,11 +1314,7 @@ func (r *Runner) WarnExpiringLeases(ctx context.Context) (warnings []LeaseWarnin
 // records its own exit status in a file on stop, so a run interrupted by a
 // restart is settled with its real outcome. Only a backend that cannot answer
 // leaves the record as `stopped` with an explanation — never as a guess.
-func (r *Runner) ReconcileTasks(ctx context.Context) (adopted, settled []string, err error) {
-	insts, err := ListInstances(r.opts.ConfigDir)
-	if err != nil {
-		return nil, nil, err
-	}
+func (r *Runner) ReconcileTasks(ctx context.Context, insts []*Instance) (adopted, settled []string, err error) {
 	for _, inst := range insts {
 		if inst.Kind != string(tool.KindTask) {
 			continue

@@ -47,7 +47,7 @@ func TestReconcileServicesSettlesDeadService(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestReconcileServicesLeavesARestartingServiceAlone(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestReconcileServicesSkipsExternal(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestReconcileServicesIgnoresDecidedAndTasks(t *testing.T) {
 		Backends:  map[string]Backend{"local": &stubBackend{gone: true}},
 	})
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestReconcileServicesLeavesLiveServiceAlone(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestWarnExpiringLeasesDedupesPerDeadline(t *testing.T) {
 	lb := &leaseWarnBackend{stubBackend: &stubBackend{alive: true}, reason: "soon", due: true}
 	runner := NewRunner(Options{ConfigDir: configDir, Backends: map[string]Backend{"local": lb}})
 
-	warnings, err := runner.WarnExpiringLeases(context.Background())
+	warnings, err := runner.WarnExpiringLeases(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestWarnExpiringLeasesDedupesPerDeadline(t *testing.T) {
 		t.Fatalf("warnings = %+v", warnings)
 	}
 	// The same deadline must not warn again on the next tick.
-	if again, _ := runner.WarnExpiringLeases(context.Background()); len(again) != 0 {
+	if again, _ := runner.WarnExpiringLeases(context.Background(), snapshotFor(t, runner)); len(again) != 0 {
 		t.Fatalf("repeated warning for the same deadline: %+v", again)
 	}
 	// A renewal moves the deadline, which re-arms the warning.
@@ -317,7 +317,7 @@ func TestWarnExpiringLeasesDedupesPerDeadline(t *testing.T) {
 	if err := SaveInstance(InstancePath(configDir, inst.ID), rec); err != nil {
 		t.Fatal(err)
 	}
-	if moved, _ := runner.WarnExpiringLeases(context.Background()); len(moved) != 1 {
+	if moved, _ := runner.WarnExpiringLeases(context.Background(), snapshotFor(t, runner)); len(moved) != 1 {
 		t.Fatalf("a moved deadline must re-arm the warning: %+v", moved)
 	}
 }
@@ -345,7 +345,7 @@ func TestReconcileServicesSettlesAServiceWhoseTunnelDied(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestReconcileServicesLeavesAServiceWithALiveTunnelAlone(t *testing.T) {
 	})
 	runner.SetPorts(ports)
 
-	orphaned, err := runner.ReconcileServices(context.Background())
+	orphaned, err := runner.ReconcileServices(context.Background(), snapshotFor(t, runner))
 	if err != nil {
 		t.Fatal(err)
 	}
