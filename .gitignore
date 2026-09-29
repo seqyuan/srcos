@@ -42,6 +42,9 @@ internal/web/dist/*
 # WeChat draft articles (公众号软文)
 docs/公众号软文*
 
+# 规划/评审工作文档：整个 docs/plans/ 都是本地工作记录，不提交。
+docs/plans/
+
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
