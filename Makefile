@@ -4,7 +4,7 @@
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 
-.PHONY: build test vet fmt webui e2e e2e-shiny
+.PHONY: build test vet fmt webui e2e e2e-shiny verify-commits
 
 build:
 	@if [ ! -f internal/web/dist/index.html ]; then \
@@ -42,6 +42,13 @@ webui:
 # 需要本机有 bwrap（或用 SRCOS_E2E_SANDBOX=none）与 curl。
 e2e: build
 	bash scripts/e2e.sh
+
+# 逐提交校验（AGENTS.md「每个提交要能独立 build + test 通过」）。用 git worktree，
+# 不碰当前工作区与 HEAD（可与其他会话并存）。默认看 upstream..HEAD，也可传范围：
+#   make verify-commits
+#   bash scripts/verify-commits.sh origin/main..HEAD
+verify-commits:
+	bash scripts/verify-commits.sh
 
 # Shiny for Python 服务回归（可选项，不在 make e2e 里）。
 # 需要一个装了 shiny 的 python：

@@ -339,6 +339,7 @@ make fmt        # gofmt -w .
 make webui      # Phase 5 起；webui/ 未建时只提示，不阻断
 make e2e        # 端到端回归网：临时配置 + 临时端口，退出时清理（scripts/e2e.sh）
 make e2e-shiny  # Shiny for Python 服务回归（可选；无 shiny 的机器 SKIP）：scripts/e2e-shiny.sh
+make verify-commits  # 逐提交 build+vet+test（git worktree，不碰当前工作区/HEAD）
 
 # 提交前必须
 make vet && make test        # 涉及前端时另加 make webui（改到执行链路时另加 make e2e）
