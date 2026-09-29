@@ -776,6 +776,7 @@ SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授�
   --param samples=S001,S002,S003 --output /workspace/out
 ./srcos job list -d /opt/srcos/config
 ./srcos job logs -d /opt/srcos/config <instance-id>
+./srcos job prune -d /opt/srcos/config --keep 30d      # 清理过期实例记录与日志（显式，不动产物）
 
 # 没有网关的机器（或要立刻跑、要重试）时，手动消费队列：
 ./srcos job run  -d /opt/srcos/config --tools-dir srcos-tools --tool hello-fanout

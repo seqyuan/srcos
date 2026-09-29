@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -208,6 +211,11 @@ func DeleteInstance(path string) error {
 }
 
 // ListInstances returns every record under data/instances, newest first.
+//
+// A record that cannot be parsed is skipped rather than failing the whole
+// listing — one corrupt file must not blind the user to every other instance —
+// but it is logged once per process (the scan tick calls this several times a
+// minute, and a permanently corrupt record must not fill the log).
 func ListInstances(configDir string) ([]*Instance, error) {
 	entries, err := os.ReadDir(config.InstancesDir(configDir))
 	if err != nil {
@@ -221,8 +229,10 @@ func ListInstances(configDir string) ([]*Instance, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
 		}
-		inst, err := LoadInstance(filepath.Join(config.InstancesDir(configDir), e.Name()))
+		path := filepath.Join(config.InstancesDir(configDir), e.Name())
+		inst, err := LoadInstance(path)
 		if err != nil {
+			warnUnreadableInstance(path, err)
 			continue
 		}
 		out = append(out, inst)
@@ -231,16 +241,28 @@ func ListInstances(configDir string) ([]*Instance, error) {
 	return out, nil
 }
 
-func sortNewestFirst(list []*Instance) {
-	for i := 1; i < len(list); i++ {
-		for j := i; j > 0; j-- {
-			a, b := list[j-1], list[j]
-			if a.StartedAt.After(b.StartedAt) || (a.StartedAt.Equal(b.StartedAt) && a.ID <= b.ID) {
-				break
-			}
-			list[j-1], list[j] = list[j], list[j-1]
-		}
+// warnedInstances dedupes the "unreadable record" log line per path, so a
+// corrupt file is reported once rather than on every scan tick.
+var warnedInstances sync.Map // path -> struct{}
+
+func warnUnreadableInstance(path string, err error) {
+	if _, seen := warnedInstances.LoadOrStore(path, struct{}{}); seen {
+		return
 	}
+	log.Printf("[srcos] instance record %s is unreadable and was skipped: %v", filepath.Base(path), err)
+}
+
+// sortNewestFirst orders records newest-first, with the id as a stable
+// tiebreaker. sort.Slice, not an insertion sort: the record set only grows, and
+// this runs on every scan tick and on every listing.
+func sortNewestFirst(list []*Instance) {
+	sort.Slice(list, func(i, j int) bool {
+		a, b := list[i], list[j]
+		if a.StartedAt.Equal(b.StartedAt) {
+			return a.ID < b.ID
+		}
+		return a.StartedAt.After(b.StartedAt)
+	})
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -180,9 +180,11 @@ func runJobCmd(args []string) {
 		runJobStatus(args)
 	case "logs":
 		runJobLogs(args)
+	case "prune":
+		runJobPrune(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown job subcommand: %s\n", sub)
-		fmt.Fprintln(os.Stderr, "usage: srcos job <submit|run|list|status|logs> [options]")
+		fmt.Fprintln(os.Stderr, "usage: srcos job <submit|run|list|status|logs|prune> [options]")
 		os.Exit(1)
 	}
 }
@@ -819,6 +821,75 @@ func runJobLogs(args []string) {
 	if data[len(data)-1] != '\n' {
 		fmt.Println()
 	}
+}
+
+// runJobPrune is the retention half of the instance-record lifecycle.
+//
+// Nothing deletes records on its own, so data/instances grows forever; this is
+// the explicit operator action (mirroring `srcos audit prune`). Only terminal
+// records older than the window go, and only the platform's own bookkeeping
+// (record + log + verdict) — outputs and workspaces are the user's data.
+func runJobPrune(args []string) {
+	fs := newFlagSet("job prune")
+	configDir := configDirFlag(fs)
+	keep := fs.String("keep", "30d", "retention window (e.g. 30d, 720h); 0 removes nothing")
+	dryRun := fs.Bool("dry-run", false, "show what would be removed")
+	var positional []string
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: srcos job prune [--keep 30d] [--dry-run]") }
+	parseFlagsLoose(fs, args, &positional)
+
+	keepDur, err := audit.ParseKeep(*keep)
+	if err != nil {
+		fatalf("--keep: %v", err)
+	}
+	if keepDur <= 0 {
+		fmt.Println("nothing to prune (keep=" + *keep + ")")
+		return
+	}
+	now := time.Now().UTC()
+
+	if *dryRun {
+		stale, err := runtime.StaleInstances(*configDir, keepDur, now)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(stale) == 0 {
+			fmt.Println("nothing older than " + *keep)
+			return
+		}
+		for _, inst := range stale {
+			fmt.Printf("%s  %-9s %s/%s  %s\n", inst.ID, inst.State, inst.User, inst.Tool,
+				endedAt(inst).Format(time.RFC3339))
+		}
+		fmt.Printf("\n%d record(s) would be removed (with their logs)\n", len(stale))
+		return
+	}
+
+	removed, err := runtime.PruneInstances(*configDir, keepDur, now)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(removed) == 0 {
+		fmt.Println("nothing to prune (keep=" + *keep + ")")
+		return
+	}
+	for _, inst := range removed {
+		fmt.Println("removed", inst.ID)
+	}
+	// Removing run history is itself an audited act, so the stream says who
+	// pruned it and how much went.
+	cliAudit(*configDir, operatorActor(), "instance.prune", "instance", "",
+		map[string]any{"keep": *keep, "records": len(removed)})
+	fmt.Printf("pruned %d record(s); their logs went too, outputs untouched; recorded as instance.prune\n", len(removed))
+}
+
+// endedAt is when a record left the live set (EndedAt, falling back to
+// StartedAt for an older record that never got one).
+func endedAt(inst *runtime.Instance) time.Time {
+	if !inst.EndedAt.IsZero() {
+		return inst.EndedAt
+	}
+	return inst.StartedAt
 }
 
 func printInstance(i *runtime.Instance) {
