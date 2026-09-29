@@ -11,7 +11,10 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 最后更新：2026-09-29（**修 systemd 兼容性 bug**：任务用 `systemd-run --working-directory`，这个便捷选项在 systemd < 246 上不存在，导致「探测到 user systemd → 走 systemd 分支 → 每次运行都启动失败」，且报错被丢弃（空日志 + 裸 `exit code 1`）。改用 `-p WorkingDirectory=` 并捕获 launcher 自身报错；新增两个单测。详见 §4.2 末行。上一轮 2026-09-27（**服务实例化补齐三条**：①**自助启动**——被授权用户可在 `/tools/<id>` 点「启动服务」，`POST /api/tools/<id>/start` 走 `execute.StartService`（Grant × submit scope × 配额，与 MCP 的 `srcos_start_service` 同一实现）；②**运行期存活对账**——网关每 tick（10s）把「记录说 running、进程已不在」的 service 结算为 `stopped` 并撤路由（新增 `UnitGone`，不误判 systemd 重启中的 `activating`；`external` 跳过）；③**任务详情页可直接停止**。另：**`tool.yaml` 改严格解码**（未知字段/拼错键名在注册期拒绝，`grants:` 带提示），tool-spec 修正了三处与实现不符的表述（`grants:` 块、camelCase 键、workspace 共享/投递通道）。`make e2e` 扩到 16 步（新增自助启动/停止 + 杀死进程后由周期对账结算）。上一轮 2026-09-26：移除 dsh 路 B、审计流两期、CI、管理端可启动服务、B3 申请审批、统一服务实例化（ADR-026/027/028）；Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
+> 最后更新：2026-09-29（**apptainer probe 加固**：`sandbox: apptainer` 的探测此前只看 `--version` 的退出码，
+> Ubuntu 自带的 pygame 游戏 `/usr/games/singularity` 也会退出 0，于是 probe 误判「可用」、工具在运行期才失败且报错归因给工具。
+> 改为校验版本输出内容（真运行时打印 `apptainer|singularity version x.y`），probe 改为可注入并加回归测试。详见 §4.1 末行。
+> 上一轮 2026-09-29（**修 systemd 兼容性 bug**：任务用 `systemd-run --working-directory`，这个便捷选项在 systemd < 246 上不存在，导致「探测到 user systemd → 走 systemd 分支 → 每次运行都启动失败」，且报错被丢弃（空日志 + 裸 `exit code 1`）。改用 `-p WorkingDirectory=` 并捕获 launcher 自身报错；新增两个单测。详见 §4.2 末行。上一轮 2026-09-27（**服务实例化补齐三条**：①**自助启动**——被授权用户可在 `/tools/<id>` 点「启动服务」，`POST /api/tools/<id>/start` 走 `execute.StartService`（Grant × submit scope × 配额，与 MCP 的 `srcos_start_service` 同一实现）；②**运行期存活对账**——网关每 tick（10s）把「记录说 running、进程已不在」的 service 结算为 `stopped` 并撤路由（新增 `UnitGone`，不误判 systemd 重启中的 `activating`；`external` 跳过）；③**任务详情页可直接停止**。另：**`tool.yaml` 改严格解码**（未知字段/拼错键名在注册期拒绝，`grants:` 带提示），tool-spec 修正了三处与实现不符的表述（`grants:` 块、camelCase 键、workspace 共享/投递通道）。`make e2e` 扩到 16 步（新增自助启动/停止 + 杀死进程后由周期对账结算）。上一轮 2026-09-26：移除 dsh 路 B、审计流两期、CI、管理端可启动服务、B3 申请审批、统一服务实例化（ADR-026/027/028）；Phase 5 全部完成、MCP 第二期、ADR-022 收尾，`go vet` + `go test ./... -race` 全绿）
 
 ---
 
@@ -200,13 +203,12 @@ digest 的 git 记录（HEAD + dirty）暂不做；`storages.yaml` 的管理端�
 
 ### 3.1 建议的下一步（按顺序，理由在右）
 
-本轮的 1–11 全部完成（token 面 / MCP 只读 / 动态路由 / 进度页+回收 / 管理端 / Flow 调度器 /
-Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列消费者）。剩下的按这个顺序：
+本轮的 1–12 全部完成（token 面 / MCP 只读 / 动态路由 / 进度页+回收 / 管理端 / Flow 调度器 /
+Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列消费者 / 审计流第二期）。剩下的按这个顺序：
 
 | # | 做什么 | 为什么现在做 | 需要什么 |
 |---|---|---|---|
-| **12** | **审计流第二期**：防篡改（hash chain / 签名）+ `/admin/audit` 查询页 + 生命周期审计 + 保留策略 | 第一期（scope A）已完成：结构化落盘 + 写入面/拒绝/配置变更埋点 + CLI 读取 | — |
-| **13** | **Phase 6 SGE**：在真登录节点上跑 `probe-env.sh`，再接真集群 | 唯一一个「架构在、从未真跑」的部分 | **真 SGE 登录节点主机名**（§3.2） |
+| **13** | ~~Phase 6 SGE：在真登录节点上跑 `probe-env.sh`，再接真集群~~ ✅ **已在 `annuo` 真集群跑通**（2026-09-28，见 §2.3） | 此前是唯一一个「架构在、从未真跑」的部分，现已验证 | — |
 | 14 | 托管 agent 的首个真实用例（A1 已就绪，见 ADR-025）；SGE（缺集群） | 把「agent 用实例身份调 MCP」跑一次真实场景 | — |
 
 ### 3.2 需要用户提供信息才能做的
@@ -240,6 +242,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | **`--clearenv` 后必须显式给 `PATH`** | 否则工具连 `bash` 都找不到 |
 | **`unshare --user` 失败不代表 bwrap 不能工作** | AppArmor 授权是按二进制给的 |
 | **`ResolveExisting` 会把「文件不存在」报成「symlink escape」**（2026-09-23，写 viewer 时发现） | 它靠「最深的存在祖先」做 symlink 校验：目标本身不存在时，那个祖先必然在 mount 之外 → 报成逃逸（例：用户的虚拟 home 还没创建时，`srcos://file/home` 得到误导性的 `symlink escapes mount /home/alice`）。修法：**先 `os.Lstat` 判存在**（不存在即 `ErrNotFound`），再交给 `ResolveExisting`。教训：错误消息会变成错误的诊断方向 |
+| **同名二进制骗过 apptainer probe**（2026-09-29，代码评审发现） | `probeApptainer` 只 `LookPath` + 检查 `--version` 的**退出码**。Ubuntu `universe` 源里的 pygame 游戏就叫 `singularity`（`/usr/games/singularity`，而 `PATH` 含 `/usr/games` 是 Ubuntu 默认），它对 `--version` 退出 0 并打印 `Singularity 1.00 (commit: …)` → probe 判「可用」，工具随后在运行期失败，错误被归因给**工具**（`tool exited with code 2`）而非运行时；结果又被 `sync.Once` 缓存整个进程。**为什么 CI 没拦住**：GitHub runner 既没装该游戏也没装 apptainer → probe 如期失败 → 测试通过（与 §4.2 的 systemd `--working-directory` 同类：CI 环境与真实宿主不同）。修法：校验输出须匹配 `(?i)\b(apptainer|singularity)\s+version\s+\S`；probe 改为可注入（`sandbox.SetApptainerProbeForTest`）并加回归测试 |
 
 ### 4.2 进程与资源
 
