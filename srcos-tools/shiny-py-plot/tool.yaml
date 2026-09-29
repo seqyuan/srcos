@@ -6,7 +6,9 @@ description: "Python Shiny 数据可视化：滑块/下拉 → matplotlib 直方
 
 kind: service
 backend: local
-sandbox: none
+# 隔离默认：bwrap（ADR-014）。没有 bwrap 的机器用 `--sandbox none` 覆盖
+# （`make e2e-shiny` 会自动降级并提示）。
+sandbox: bwrap
 
 command:
   - "python3"

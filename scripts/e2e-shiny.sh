@@ -29,6 +29,7 @@ KEEP="${SRCOS_E2E_KEEP:-}"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
 step()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 die()   { red "  ✗ $*"; exit 1; }
 
@@ -73,13 +74,23 @@ printf 'default_allow: true\n' > "$CONFIG/grants.yaml"
 printf '%s\n%s\n' "$PASSWORD" "$PASSWORD" | "$BIN" user "$USER_NAME" -d "$CONFIG" >/dev/null 2>&1 \
   || die "could not create the test user"
 
+# The tools default to sandbox: bwrap (ADR-014). Fall back to none when this
+# host has no bwrap, so the same regression runs on a plain login node.
+SANDBOX_ARGS=()
+if command -v bwrap >/dev/null 2>&1; then
+  green "sandbox: bwrap"
+else
+  SANDBOX_ARGS=(--sandbox none)
+  yellow "bwrap not found — running with --sandbox none"
+fi
+
 check_one() {
   local tool="$1"
   local inst="$USER_NAME-$tool-svc"
 
   step "start $tool"
   if ! "$BIN" svc start --tool "$tool" --user "$USER_NAME" -d "$CONFIG" --tools-dir "$TOOLS" \
-        --param 'title=SRCOS e2e' > "$TMP/$tool.start" 2>&1; then
+        "${SANDBOX_ARGS[@]}" --param 'title=SRCOS e2e' > "$TMP/$tool.start" 2>&1; then
     cat "$TMP/$tool.start"; die "start $tool failed"
   fi
   local port

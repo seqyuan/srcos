@@ -337,6 +337,7 @@ make vet        # go vet ./...
 make fmt        # gofmt -w .
 make webui      # Phase 5 起；webui/ 未建时只提示，不阻断
 make e2e        # 端到端回归网：临时配置 + 临时端口，退出时清理（scripts/e2e.sh）
+make e2e-shiny  # Shiny for Python 服务回归（可选；无 shiny 的机器 SKIP）：scripts/e2e-shiny.sh
 
 # 提交前必须
 make vet && make test        # 涉及前端时另加 make webui（改到执行链路时另加 make e2e）
@@ -441,6 +442,55 @@ env -i PATH=/tmp/fakebin HOME=/tmp SRCOS_USER=alice SRCOS_TOOLS_DIR=<tools> \
   ./srcos svc start -d /tmp/e2e/config --tools-dir <tools> --tool <service-tool>
 # 记录里应出现 pid + pid_start；再另起一个同样 PATH 的进程 svc stop → 进程应真的消失
 ```
+
+### 验证 Shiny for Python 服务（两个示例工具）
+
+一条命令：`SRCOS_SHINY_PYTHON=<装了 shiny 的 python> make e2e-shiny`。它用
+`srcos-tools/shiny-py-*` 跑：注册 → 启动 → healthcheck → HTTP 200 → WebSocket 握手 →
+只凭实例记录停止。没有 shiny 的环境 SKIP（退出 0），所以不并入 `make e2e`。
+
+手工复现：
+
+```bash
+PY=/path/to/python          # `$PY -c 'import shiny'` 必须成功
+PREFIX=$($PY -c 'import sys;print(sys.prefix)')
+SITE=$($PY -c 'import shiny,os;print(os.path.dirname(os.path.dirname(shiny.__file__)))')
+
+rm -rf /tmp/shiny && mkdir -p /tmp/shiny/config
+cat > /tmp/shiny/config/environments.yaml <<EOF
+environments:
+  - id: py-shiny
+    root: $PREFIX
+    env:
+      - "PATH=/opt/srcos/bin:$PREFIX/bin:/usr/local/bin:/usr/bin:/bin"
+      - "PYTHONPATH=$SITE"
+      - "LANG=C.UTF-8"
+    provides: [python3]
+EOF
+printf 'default_allow: true\n' > /tmp/shiny/config/grants.yaml
+printf 'pw\npw\n' | ./srcos user alice -d /tmp/shiny/config        # 非交互建用户
+
+D="-d /tmp/shiny/config --tools-dir $PWD/srcos-tools"
+BWRAP=(); command -v bwrap >/dev/null || BWRAP=(--sandbox none)   # 无 bwrap 时降级
+./srcos svc start $D --tool shiny-py-hello --user alice "${BWRAP[@]}" --param 'title=你好'
+PORT=$(sed -n 's/^endpoint: .*://p' /tmp/shiny/data/instances/alice-shiny-py-hello-svc.yaml)
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' "http://127.0.0.1:$PORT/"
+$PY - "$PORT" <<'PY'   # Shiny 的实时协议走 WebSocket（ingress.websocket: true）
+import asyncio, sys, websockets
+async def main():
+    async with websockets.connect(f"ws://127.0.0.1:{sys.argv[1]}/websocket/"):
+        print("ws open")
+asyncio.run(main())
+PY
+./srcos svc stop --tool shiny-py-hello --user alice -d /tmp/shiny/config   # 无需 --tools-dir
+```
+
+要点：
+- 工具默认 `sandbox: bwrap`（ADR-014 的隔离默认）；无 bwrap 的机器用 `--sandbox none` 覆盖
+  （`make e2e-shiny` 自动降级并提示）。
+- `shiny` 用 **`python3 -m shiny`** 调用：很多环境只有模块、没有 console script。
+- SRCOS 的 `HOME` 是虚拟 home，所以 `pip install --user` 装的 shiny 必须用 **`PYTHONPATH`**
+  指回真实 site-packages（`environments.yaml` 里写）。
 
 ### 清理测试残留（容易漏）
 

@@ -6,7 +6,9 @@ description: "最小的 Python Shiny 应用：文本输入 + 滑块 → 文本�
 
 kind: service
 backend: local
-sandbox: none
+# 隔离默认：bwrap（ADR-014）。没有 bwrap 的机器用 `--sandbox none` 覆盖
+# （`make e2e-shiny` 会自动降级并提示）。
+sandbox: bwrap
 
 # 声明式启动命令：${...} 由 SRCOS 从本单元自己的环境展开；端口用端口池分配的
 # ${SRCOS_PORT}，代理按它转发。用绝对路径指向 workspace 里的 app.py，启动不依赖 cwd。
