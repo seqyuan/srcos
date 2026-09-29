@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -95,25 +96,65 @@ func ApptainerArgv(spec *Spec, o ApptainerOptions) []string {
 	return args
 }
 
-// apptainerProbe is the cached result of looking for a usable container runtime.
-var apptainerProbe struct {
+// probeResult caches one container-runtime probe for the process lifetime.
+type probeResult struct {
 	once sync.Once
 	path string
 	ok   bool
 	why  string
 }
 
+var apptainerProbe probeResult
+
+// apptainerProbeFn is the probe ApptainerProbe runs. It is a variable so a test
+// can substitute one: the real answer is a property of the host, and a machine
+// that happens to have a same-named binary installed must not decide whether a
+// unit test passes.
+var apptainerProbeFn = probeApptainer
+
 // ApptainerProbe returns the container runtime to use, preferring Apptainer and
 // falling back to Singularity CE (same exec interface). A present binary is not
-// enough — the probe runs `<bin> --version`, because a binary that cannot even
-// report its version (a broken install, a user that NSS cannot resolve) must be
-// reported with a reason rather than failing later inside a job.
+// enough — the probe runs `<bin> --version` and checks that the output *looks
+// like* a container runtime, not merely that the command exited 0.
+//
+// Checking the output is what a same-named binary makes necessary: Ubuntu ships
+// the pygame game "Singularity" as /usr/games/singularity, and it exits 0 on
+// `--version` while printing "Singularity 1.00 (commit: ...)". Trusting the exit
+// code alone accepted it, so every `sandbox: apptainer` tool then failed later,
+// inside the job, with the failure blamed on the tool rather than the runtime.
 func ApptainerProbe() (path string, ok bool, why string) {
 	apptainerProbe.once.Do(func() {
-		apptainerProbe.path, apptainerProbe.ok, apptainerProbe.why = probeApptainer()
+		apptainerProbe.path, apptainerProbe.ok, apptainerProbe.why = apptainerProbeFn()
 	})
 	return apptainerProbe.path, apptainerProbe.ok, apptainerProbe.why
 }
+
+// SetApptainerProbeForTest replaces the probe and clears the cached result,
+// returning a function that restores both. It is exported because the callers
+// that need a deterministic probe (the sandbox tests in internal/runtime) live
+// in another package.
+func SetApptainerProbeForTest(fn func() (string, bool, string)) func() {
+	prev := apptainerProbeFn
+	apptainerProbeFn = fn
+	resetApptainerProbe()
+	return func() {
+		apptainerProbeFn = prev
+		resetApptainerProbe()
+	}
+}
+
+func resetApptainerProbe() { apptainerProbe = probeResult{} }
+
+// versionBanner matches what a real container runtime prints on `--version`:
+//
+//	apptainer version 1.3.3
+//	singularity version 4.1.0
+//
+// The word "version" after the name is what distinguishes it from Ubuntu's
+// pygame game, which prints "Singularity 1.00". Matching anywhere in the output
+// (rather than anchoring to the first line) tolerates a wrapper that prints a
+// banner before the real version line.
+var versionBanner = regexp.MustCompile(`(?i)\b(apptainer|singularity)\s+version\s+\S`)
 
 func probeApptainer() (path string, ok bool, why string) {
 	p, err := exec.LookPath("apptainer")
@@ -131,6 +172,13 @@ func probeApptainer() (path string, ok bool, why string) {
 			msg = err.Error()
 		}
 		return p, false, p + " cannot even report its version: " + msg
+	}
+	if !versionBanner.Match(out) {
+		msg := firstLine(string(out))
+		if msg == "" {
+			msg = "no output"
+		}
+		return p, false, p + " is on PATH but does not look like apptainer/singularity (--version said: " + msg + ")"
 	}
 	return p, true, ""
 }

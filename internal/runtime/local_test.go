@@ -305,6 +305,16 @@ func TestRunRejectsUnimplementedFeaturesClearly(t *testing.T) {
 }
 
 func TestUnusableSandboxProducesFailedInstance(t *testing.T) {
+	// Pin the container probe: its real answer is a property of the host, and a
+	// host with Ubuntu's pygame "Singularity" on PATH would otherwise decide
+	// whether this test passes (it used to make it fail). This models exactly
+	// that machine — a binary that is on PATH but is not a runtime.
+	restore := sandbox.SetApptainerProbeForTest(func() (path string, ok bool, why string) {
+		return "/usr/games/singularity", false,
+			"/usr/games/singularity is on PATH but does not look like apptainer/singularity (--version said: Singularity 1.00)"
+	})
+	defer restore()
+
 	h := newHarness(t, "apptainer", okScript, `image: /nonexistent/x.sif
 `)
 	loaded := h.submit(t, "j5", `{"schemaVersion":1,"name":"demo"}`)
