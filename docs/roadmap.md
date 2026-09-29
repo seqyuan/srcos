@@ -111,11 +111,12 @@
 **工程基线**
 
 - 重命名为 srcos（`go.mod` = `github.com/seqyuan/srcos`）；删 `site/` 文档站；建立 git 仓库
-- 建立 `AGENTS.md`（不变式与定位）+ **28 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
+- 建立 `AGENTS.md`（不变式与定位）+ **29 条 ADR** + `docs/tool-spec.md`（工具契约冻结）+
   `docs/flow-spec.md`（流程契约冻结）
 - `scripts/probe-env.sh`（无 root 环境探测）+ `docs/environments.md`（node01 实测记录）
-- **25 个包 / 143 个 Go 文件 / 约 4.6 万行 / 65 个测试文件 / 514 个测试函数**，
-  `go vet` + `go test ./... -race` 全绿；`webui/`（889 行 TS/TSX）独立构建与测试
+- **29 个包 / 175 个 Go 文件（97 非测试）/ 约 5.7 万行 / 78 个测试文件 / 640+ 个测试函数**，
+  `go vet` + `go test ./... -race` 全绿；`webui/`（约 950 行 TS/TSX）独立构建与测试
+  （计数随开发变动，以 `go list ./...` 与仓库实测为准）
 
 ### 2.2 尚未实现（**不要误以为有**）
 

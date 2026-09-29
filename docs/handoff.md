@@ -19,8 +19,8 @@
 
 **SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**
 
-现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，**28 个包 / 164 个 Go 文件 / 约 5.3 万行 /
-73 个测试文件 / 580+ 个测试函数**），在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了
+现状：一个 Go 单二进制（`github.com/seqyuan/srcos`，**29 个包 / 175 个 Go 文件（97 非测试）/ 约 5.7 万行 /
+78 个测试文件 / 640+ 个测试函数**），在**网关**（继承自 goprox 的多用户认证反向代理）之上长出了
 **工具平台**四层：工具契约、实例化运行时、存储 provider、授权模型。认证面两扇门：浏览器的 session
 cookie，与程序（agent / MCP 客户端）的 **agent token**（`Authorization: Bearer`，可在 `/tokens`
 自助生成、随时撤销）。全部在 node01 上端到端实测过。
@@ -298,7 +298,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 
 ## 5. 关键设计决策速查（一句话版）
 
-完整版见 [`roadmap.md`](roadmap.md) §5（23 条 ADR）。
+完整版见 [`roadmap.md`](roadmap.md) §5（29 条 ADR；下表是常用的几条，不是全部）。
 
 | ADR | 一句话 |
 |---|---|
