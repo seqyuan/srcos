@@ -528,3 +528,38 @@ func TestAppendLauncherFailureRecordsReason(t *testing.T) {
 		t.Fatalf("launcher error not recorded: %q", got)
 	}
 }
+
+// A degraded service runs as a systemd unit with no sandbox, so nothing else
+// sets its working directory; it must be set explicitly (and as a property, for
+// old systemd). A sandboxed service gets its cwd from bwrap's --chdir, so a
+// host path must NOT be passed — it does not exist inside the namespace.
+func TestServiceCommandSetsWorkingDirectoryOnlyWhenDegraded(t *testing.T) {
+	loc := &Local{}
+	req := StartRequest{
+		Tool:     &tool.Tool{ID: "demo"},
+		View:     PathView{Degraded: true, Paths: Paths{User: "alice", Workspace: "/host/ws/alice/demo"}},
+		Cwd:      "/host/ws/alice/demo",
+		UnitName: "srcos-alice-demo-svc",
+		LogPath:  "/host/logs/svc.log",
+		Limiter:  Limiter{SystemdProps: []string{"CPUQuota=100%"}},
+	}
+	argv := loc.serviceCommand(req, []string{"python3", "-m", "http.server"})
+	joined := strings.Join(argv, "\x00")
+	if !strings.Contains(joined, "-p\x00WorkingDirectory=/host/ws/alice/demo") {
+		t.Fatalf("degraded service argv must set WorkingDirectory: %v", argv)
+	}
+	if strings.Contains(joined, "--working-directory") {
+		t.Fatalf("must not use --working-directory (old systemd rejects it): %v", argv)
+	}
+	if !strings.HasSuffix(joined, "--\x00python3\x00-m\x00http.server") {
+		t.Fatalf("the inner argv must follow the -- separator: %v", argv)
+	}
+
+	// Sandboxed: bwrap owns the cwd, so no WorkingDirectory property.
+	req.View.Degraded = false
+	req.Cwd = sandbox.PathWorkspace
+	argv = loc.serviceCommand(req, []string{"python3", "-m", "http.server"})
+	if strings.Contains(strings.Join(argv, "\x00"), "WorkingDirectory=") {
+		t.Fatalf("sandboxed service must not set a host WorkingDirectory: %v", argv)
+	}
+}

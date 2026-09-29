@@ -342,6 +342,25 @@ func (l *Local) startService(ctx context.Context, req StartRequest, inner []stri
 	// behind, which would make this start fail on a name collision.
 	_ = exec.Command("systemctl", "--user", "reset-failed", req.UnitName).Run()
 
+	argv := l.serviceCommand(req, inner)
+	h.command = append([]string{"systemd-run"}, argv...)
+	cmd := exec.Command("systemd-run", argv...)
+
+	if err := cmd.Run(); err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("systemd-run --unit %s: %w", req.UnitName, err)
+	}
+	// The unit writes the log itself (StandardOutput=append:); our descriptor is
+	// not the unit's, so close it rather than leak one per service start.
+	logFile.Close()
+	return h, nil
+}
+
+// serviceCommand renders the systemd-run argv for a service unit.
+//
+// It is a pure function so the argv can be asserted in a test without starting
+// a real unit.
+func (l *Local) serviceCommand(req StartRequest, inner []string) []string {
 	args := []string{"--user", "--unit", req.UnitName, "--quiet"}
 	for _, p := range req.Limiter.SystemdProps {
 		args = append(args, "-p", p)
@@ -357,18 +376,19 @@ func (l *Local) startService(ctx context.Context, req StartRequest, inner []stri
 	if req.Tool.Lifecycle != nil && req.Tool.Lifecycle.Restart != "" && req.Tool.Lifecycle.Restart != "never" {
 		args = append(args, "-p", "Restart="+req.Tool.Lifecycle.Restart)
 	}
-	args = append(args, "--")
-	cmd := exec.Command("systemd-run", append(args, inner...)...)
-	h.command = append([]string{"systemd-run"}, append(args, inner...)...)
-
-	if err := cmd.Run(); err != nil {
-		logFile.Close()
-		return nil, fmt.Errorf("systemd-run --unit %s: %w", req.UnitName, err)
+	if req.View.Degraded {
+		// Under a sandbox the working directory is set by the sandbox runtime
+		// (bwrap's --chdir); a systemd unit has none, so it must be set
+		// explicitly — and only in degraded mode, because req.Cwd is a *host*
+		// path that does not exist inside a mount namespace. Without this a
+		// degraded service starts in the OS user's real home: $HOME is the
+		// virtual home, but the process's cwd is not, so relative paths escape
+		// the workspace (and it differs from the plain-child fallback, which
+		// sets cmd.Dir). The property form works on old and new systemd alike.
+		args = append(args, "-p", "WorkingDirectory="+req.Cwd)
 	}
-	// The unit writes the log itself (StandardOutput=append:); our descriptor is
-	// not the unit's, so close it rather than leak one per service start.
-	logFile.Close()
-	return h, nil
+	args = append(args, "--")
+	return append(args, inner...)
 }
 
 // startServiceFallback runs a service as a plain child process. No cgroup
