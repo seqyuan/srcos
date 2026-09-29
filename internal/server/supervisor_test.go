@@ -22,6 +22,17 @@ import (
 
 func boolPtr(b bool) *bool { return &b }
 
+// snapshotForTest supplies the tick methods the record list they now take as a
+// parameter (the production list comes from Server.listInstances).
+func snapshotForTest(t *testing.T, configDir string) []*runtime.Instance {
+	t.Helper()
+	insts, err := runtime.ListInstances(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return insts
+}
+
 // supervisorFor builds the runner the gateway uses: local backend, port pool,
 // no user.
 func supervisorFor(configDir, toolsDir string, routes *route.Table) *runtime.Runner {
@@ -219,7 +230,7 @@ func TestGatewayReapsAnIdleServiceByItself(t *testing.T) {
 		t.Fatal("setup: the instance should be published")
 	}
 
-	stopped := srv.reapServices()
+	stopped := srv.reapServices(snapshotForTest(t, configDir))
 	if len(stopped) != 1 || !strings.Contains(stopped[0], "idle") {
 		t.Fatalf("stopped = %v, want one idle reap", stopped)
 	}
@@ -255,7 +266,7 @@ func TestGatewayDoesNotReapAnInUseService(t *testing.T) {
 
 	// A tunneled connection is open on this instance.
 	srv.activeConns.Add(inst.ID)
-	if stopped := srv.reapServices(); len(stopped) != 0 {
+	if stopped := srv.reapServices(snapshotForTest(t, configDir)); len(stopped) != 0 {
 		t.Fatalf("a service with an open connection must not be reaped: %v", stopped)
 	}
 	srv.activeConns.Release(inst.ID)
@@ -264,7 +275,7 @@ func TestGatewayDoesNotReapAnInUseService(t *testing.T) {
 	if err := srv.serviceActivity.Touch(inst.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if stopped := srv.reapServices(); len(stopped) != 0 {
+	if stopped := srv.reapServices(snapshotForTest(t, configDir)); len(stopped) != 0 {
 		t.Fatalf("a service with recent traffic must not be reaped: %v", stopped)
 	}
 }

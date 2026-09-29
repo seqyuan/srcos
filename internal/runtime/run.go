@@ -932,17 +932,73 @@ type Reaper struct {
 	LastActive func(instanceID string) time.Time
 }
 
+// reloadForWrite re-reads a record the scan tick may act on.
+//
+// The tick's snapshot is shared and read-only (see ScanLoop): a consumer that
+// mutates a record must not touch the snapshot element, or a later consumer
+// would persist this one's half-finished state the next time it calls
+// SaveInstance. Re-reading is also how a consumer sees a record another process
+// settled since the snapshot was taken. A record that is gone is skipped — the
+// same tolerance PruneInstances has.
+func (r *Runner) reloadForWrite(id string) (*Instance, bool) {
+	inst, err := LoadInstance(InstancePath(r.opts.ConfigDir, id))
+	if err != nil {
+		return nil, false
+	}
+	return inst, true
+}
+
+// isReconcilableService reports whether a record is a live service the periodic
+// reconcile may settle. `external` is skipped: SRCOS does not own that process,
+// so a momentarily unreachable upstream must not be recorded as dead.
+func isReconcilableService(inst *Instance) bool {
+	return inst.Kind == string(tool.KindService) &&
+		!inst.State.Terminal() &&
+		inst.Backend != string(tool.BackendExternal)
+}
+
+// isRenewableService reports whether a record is a live service whose scheduler
+// lease renewal may apply.
+func isRenewableService(inst *Instance) bool {
+	return inst.Kind == string(tool.KindService) && !inst.State.Terminal()
+}
+
+// isLeaseWarnCandidate reports whether a record is a live service that declares
+// a scheduler deadline worth warning about.
+func isLeaseWarnCandidate(inst *Instance) bool {
+	return isRenewableService(inst) && !inst.LeaseExpiresAt.IsZero()
+}
+
+// needsTaskReconcile reports whether a record is a task that had a process:
+// `pending` is a queue position (the task queue owns it), and terminal states
+// are already decided.
+func needsTaskReconcile(inst *Instance) bool {
+	if inst.Kind != string(tool.KindTask) {
+		return false
+	}
+	switch inst.State {
+	case StatePending, StateSucceeded, StateFailed, StateStopped:
+		return false
+	}
+	return true
+}
+
 // Sweep performs one pass and returns the instances it stopped.
 //
-// insts is the caller's record snapshot; the caller decides how fresh it is.
+// insts is a shared read-only snapshot (see ScanLoop); every candidate is
+// re-read before it is acted on.
 func (rp *Reaper) Sweep(ctx context.Context, now time.Time, insts []*Instance) ([]string, error) {
 	if rp.Runner.ports == nil {
 		return nil, errors.New("reaper needs the port pool to release ports")
 	}
 	var stopped []string
 	var problems []string
-	for _, inst := range insts {
-		if !isReapable(inst) {
+	for _, snap := range insts {
+		if !isReapable(snap) {
+			continue
+		}
+		inst, ok := rp.Runner.reloadForWrite(snap.ID)
+		if !ok || !isReapable(inst) {
 			continue
 		}
 		t, err := findTool(rp.Runner.opts.ToolsDir, inst.Tool)
@@ -1135,11 +1191,12 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 // backend that can do neither is skipped rather than guessed at.
 func (r *Runner) ReconcileServices(ctx context.Context, insts []*Instance) (orphaned []string, err error) {
 	var problems []string
-	for _, inst := range insts {
-		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
+	for _, snap := range insts {
+		if !isReconcilableService(snap) {
 			continue
 		}
-		if inst.Backend == string(tool.BackendExternal) {
+		inst, ok := r.reloadForWrite(snap.ID)
+		if !ok || !isReconcilableService(inst) {
 			continue
 		}
 		b, ok := r.opts.Backends[inst.Backend]
@@ -1214,8 +1271,12 @@ func (r *Runner) ReconcileServices(ctx context.Context, insts []*Instance) (orph
 // It is a no-op for every backend that does not implement UnitRenewer.
 func (r *Runner) RenewServices(ctx context.Context, insts []*Instance) (renewed []string, err error) {
 	var problems []string
-	for _, inst := range insts {
-		if inst.Kind != string(tool.KindService) || inst.State.Terminal() {
+	for _, snap := range insts {
+		if !isRenewableService(snap) {
+			continue
+		}
+		inst, ok := r.reloadForWrite(snap.ID)
+		if !ok || !isRenewableService(inst) {
 			continue
 		}
 		b, ok := r.opts.Backends[inst.Backend]
@@ -1265,8 +1326,12 @@ func (r *Runner) RenewServices(ctx context.Context, insts []*Instance) (renewed 
 // re-arms it.
 func (r *Runner) WarnExpiringLeases(ctx context.Context, insts []*Instance) (warnings []LeaseWarning, err error) {
 	var problems []string
-	for _, inst := range insts {
-		if inst.Kind != string(tool.KindService) || inst.State.Terminal() || inst.LeaseExpiresAt.IsZero() {
+	for _, snap := range insts {
+		if !isLeaseWarnCandidate(snap) {
+			continue
+		}
+		inst, ok := r.reloadForWrite(snap.ID)
+		if !ok || !isLeaseWarnCandidate(inst) {
 			continue
 		}
 		b, ok := r.opts.Backends[inst.Backend]
@@ -1315,14 +1380,12 @@ func (r *Runner) WarnExpiringLeases(ctx context.Context, insts []*Instance) (war
 // restart is settled with its real outcome. Only a backend that cannot answer
 // leaves the record as `stopped` with an explanation — never as a guess.
 func (r *Runner) ReconcileTasks(ctx context.Context, insts []*Instance) (adopted, settled []string, err error) {
-	for _, inst := range insts {
-		if inst.Kind != string(tool.KindTask) {
+	for _, snap := range insts {
+		if !needsTaskReconcile(snap) {
 			continue
 		}
-		switch inst.State {
-		case StatePending, StateSucceeded, StateFailed, StateStopped:
-			// `pending` is a *queue position*, not a process: the task queue owns
-			// it and will start it. The rest are already decided.
+		inst, ok := r.reloadForWrite(snap.ID)
+		if !ok || !needsTaskReconcile(inst) {
 			continue
 		}
 

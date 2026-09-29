@@ -375,7 +375,9 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// the CLI, in another process), mark the dead ones stopped, and publish the
 	// survivors so a gateway restart does not take every service offline.
 	srv.reconcile()
-	srv.reconcileTasks()
+	if insts, ok := srv.listInstances(); ok {
+		srv.reconcileTasks(insts)
+	}
 	return srv
 }
 

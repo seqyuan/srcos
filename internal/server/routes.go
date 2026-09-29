@@ -85,17 +85,19 @@ func (s *Server) sweepInstanceCredentials() {
 	}
 }
 
-// listInstances is the record snapshot the lifecycle consumers work from.
+// listInstances is the record snapshot the scan tick shares with every
+// lifecycle consumer.
 //
-// A read failure is logged and yields nil: the tick is best-effort, and one
-// failed listing must not stop the other consumers (the next tick retries).
-func (s *Server) listInstances() []*runtime.Instance {
+// A read failure is logged and yields ok=false: the tick is best-effort, and
+// one failed listing must not read as "nothing is live" (which would drop every
+// route). The next tick retries.
+func (s *Server) listInstances() ([]*runtime.Instance, bool) {
 	insts, err := runtime.ListInstances(config.DirOf(s.registry))
 	if err != nil {
 		log.Printf("[srcos] list instances: %v", err)
-		return nil
+		return nil, false
 	}
-	return insts
+	return insts, true
 }
 
 // reconcileTasks settles task records whose process is gone.
@@ -104,11 +106,11 @@ func (s *Server) listInstances() []*runtime.Instance {
 // while the task is still running (systemd owns the process, not the gateway),
 // so the moment the truth becomes knowable is when that process dies — possibly
 // minutes after the gateway came back.
-func (s *Server) reconcileTasks() {
+func (s *Server) reconcileTasks(insts []*runtime.Instance) {
 	if s.runner == nil {
 		return
 	}
-	adopted, settled, err := s.runner.ReconcileTasks(context.Background(), s.listInstances())
+	adopted, settled, err := s.runner.ReconcileTasks(context.Background(), insts)
 	if err != nil {
 		log.Printf("[srcos] tasks reconcile: %v", err)
 	}
@@ -139,11 +141,11 @@ func (s *Server) reconcileTasks() {
 // saying "running" and keep a route to a port nothing listens on, while every
 // request got a 502. Running the strict liveness check on the scan tick is
 // what makes the record honest for the life of the gateway, not just at boot.
-func (s *Server) reconcileServices() {
+func (s *Server) reconcileServices(insts []*runtime.Instance) {
 	if s.runner == nil {
 		return
 	}
-	orphaned, err := s.runner.ReconcileServices(context.Background(), s.listInstances())
+	orphaned, err := s.runner.ReconcileServices(context.Background(), insts)
 	if err != nil {
 		log.Printf("[srcos] services reconcile: %v", err)
 	}
@@ -200,11 +202,11 @@ func (s *Server) reloadPolicyIfChanged() {
 // WebSocket) the live connection count, so a service someone is working in is
 // never reclaimed, however quiet it looks. A maxLifetime ceiling is not
 // negotiable: it is the tool author's statement of how long a run may take.
-func (s *Server) reapServices() []string {
+func (s *Server) reapServices(insts []*runtime.Instance) []string {
 	if s.reaper == nil {
 		return nil
 	}
-	stopped, err := s.reaper.Sweep(context.Background(), time.Now(), s.listInstances())
+	stopped, err := s.reaper.Sweep(context.Background(), time.Now(), insts)
 	if err != nil {
 		log.Printf("[srcos] reap: %v", err)
 	}
@@ -220,11 +222,11 @@ func (s *Server) reapServices() []string {
 // renewServices pushes out scheduler-imposed walltimes on live services
 // (SGE's h_rt) so a long-running service is not killed by the scheduler while
 // the platform still wants it (ADR-015).
-func (s *Server) renewServices() {
+func (s *Server) renewServices(insts []*runtime.Instance) {
 	if s.runner == nil {
 		return
 	}
-	renewed, err := s.runner.RenewServices(context.Background(), s.listInstances())
+	renewed, err := s.runner.RenewServices(context.Background(), insts)
 	if err != nil {
 		log.Printf("[srcos] renew: %v", err)
 	}
@@ -236,11 +238,11 @@ func (s *Server) renewServices() {
 // warnExpiringLeases records a warning for services close to their scheduler
 // ceiling (SGE's h_rt) that renewal has not moved, so the operator gets advance
 // notice instead of a service that vanishes.
-func (s *Server) warnExpiringLeases() {
+func (s *Server) warnExpiringLeases(insts []*runtime.Instance) {
 	if s.runner == nil {
 		return
 	}
-	warnings, err := s.runner.WarnExpiringLeases(context.Background(), s.listInstances())
+	warnings, err := s.runner.WarnExpiringLeases(context.Background(), insts)
 	if err != nil {
 		log.Printf("[srcos] lease warning: %v", err)
 	}
@@ -251,10 +253,10 @@ func (s *Server) warnExpiringLeases() {
 
 // syncRoutes rebuilds the dynamic routing table from the instance records.
 //
-// Two directions matter equally: a live service must become reachable, and a
-// service that stopped (or died) must stop being reachable. A stale entry is
-// worse than a missing one: it keeps sending traffic to a loopback port the OS
-// may have handed to something else entirely.
+// It lists for itself: the callers that use this form (the startup reconcile,
+// and the sync just after a settlement) have written a record and need the
+// freshest state, not the tick's snapshot. The scan tick calls syncRoutesFrom
+// with the snapshot it already holds.
 func (s *Server) syncRoutes() {
 	if s.routes == nil {
 		return
@@ -264,7 +266,19 @@ func (s *Server) syncRoutes() {
 		log.Printf("[srcos] routes: %v", err)
 		return
 	}
+	s.syncRoutesFrom(insts)
+}
 
+// syncRoutesFrom rebuilds the routing table from a record snapshot.
+//
+// Two directions matter equally: a live service must become reachable, and a
+// service that stopped (or died) must stop being reachable. A stale entry is
+// worse than a missing one: it keeps sending traffic to a loopback port the OS
+// may have handed to something else entirely.
+func (s *Server) syncRoutesFrom(insts []*runtime.Instance) {
+	if s.routes == nil {
+		return
+	}
 	live := map[string]bool{}
 	for _, inst := range insts {
 		e, ok := routeEntryFrom(inst)
