@@ -296,6 +296,7 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | 坑 | 结论 |
 |---|---|
 | **`Address.Child` 的语义陷阱：目录导航路径翻倍**（2026-09-23，浏览器 e2e 发现） | 资源条目的 `Rel` 是**相对 scope 根**的，而 `Address.Child(rel)` 是「拼接到当前路径」的。在 `/view?src=…/home/sub` 里用 `Child(entry.Rel)` 得到 `home/sub/sub/x.txt` —— 单测只断言「页面里出现了文件名」所以全绿，Playwright 点一下才发现 404。修法：条目的地址直接 `child.Path = entry.Rel`，**删掉 `Child`**（一个只在一个地方用、语义又容易搞错的便捷方法比没有更危险），并把「子链接必须是 scope 相对的」写成断言。教训：**UI 是检验契约的探针**（与流程画布那次同源）|
+| **Sprintf 模板里的裸 `%` 会吞参数，整页静默损坏**（2026-09-30，渲染截图发现） | `admin.html` 的内嵌 CSS 经 `fmt.Sprintf` 渲染，样式表里的裸 `%`（`width: 100%;`、`translateX(-50%)`、`color-mix(… 35%, …)`）是坏动词：**吞掉下一个实参**，后面的 `%s` 全部错位成 `%!s(MISSING)` —— 管理控制台四张表线上不可见，而 e2e 只断言 200 一直没发现。dashboard.html 用 `%%` 转义所以幸免。修法：转义 + `TestAdminPageNoFmtArtifacts`（输出不得含 `%!`、CSS 必须原样存活、实参必须落位）。教训：**凡「CSS/正文内嵌进 Sprintf 模板」都要过这个断言；HTTP 200 不是渲染正确的证据，要截图或断言内容** |
 
 ---
 
