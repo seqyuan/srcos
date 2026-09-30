@@ -4,10 +4,66 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/seqyuan/srcos/internal/accessrequest"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/grant"
+	"github.com/seqyuan/srcos/internal/inspect"
 )
+
+// The admin template carries its own CSS through fmt.Sprintf, so a bare % in
+// the stylesheet is a bad verb: it swallows the next argument and every later
+// %s renders as %!s(MISSING) — the whole console silently stops showing tables
+// (this actually shipped; e2e only asserted HTTP 200). Every page that embeds
+// CSS in a Sprintf'd template needs this guard.
+func TestAdminPageNoFmtArtifacts(t *testing.T) {
+	data := AdminData{
+		Instances: []inspect.AdminInstance{
+			{Owner: "ops", Tool: "xenium-qc", Inst: inspect.InstanceView{ID: "ops-xenium-qc-a1", Tool: "xenium-qc", Kind: "task", State: "running"}},
+		},
+		Tools: []inspect.AdminTool{
+			{ToolView: inspect.ToolView{ID: "xenium-qc", Version: "0.3.1", Name: "Xenium 质控", Kind: "task", Backend: "local"},
+				Reachable: true, Grant: &grant.Grant{Tool: "xenium-qc", Users: []string{"ops"}}},
+			{ToolView: inspect.ToolView{ID: "spatial-de", Version: "1.2.0", Name: "空间差异表达", Kind: "task"},
+				Reachable: false, Note: "未授权：非管理员不可见"},
+		},
+		Admins: []string{"demo"},
+		Groups: map[string][]string{"bio": {"ops"}},
+		Requests: []accessrequest.Request{
+			{ID: "r1", User: "wang", Tool: "spatial-de", Reason: "项目分析", State: accessrequest.Pending,
+				CreatedAt: time.Now().Add(-time.Hour)},
+		},
+		Users: []string{"demo", "ops", "wang"},
+	}
+	page := AdminPage("SRCOS", "demo", data)
+
+	// The fmt error marker must never leak: it means a verb found no argument,
+	// i.e. some later table slot received the wrong (or no) content.
+	if strings.Contains(page, "%!") {
+		t.Fatalf("admin page contains fmt artifacts (%%!…):\n%s", page)
+	}
+	// The stylesheet must survive Sprintf verbatim: source "100%%" renders as
+	// "100%", and the token names are the ones base.css actually defines.
+	for _, want := range []string{
+		"width: 100%;",
+		"translateX(-50%);",
+		"var(--bg-panel)",
+		"var(--r-card)",
+		"var(--r-thumb)",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("admin CSS corrupted, missing %q\n%s", want, page)
+		}
+	}
+	// Arguments must land on the right slots: username, and one string per table.
+	for _, want := range []string{"以 <strong>demo</strong> 身份", "xenium-qc", "ops-xenium-qc-a1", "wang"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("admin page missing expected content %q\n%s", want, page)
+		}
+	}
+}
 
 // marshalScriptJSON must produce valid JSON that never closes the surrounding
 // <script> element, even for hostile service names/descriptions/categories.
