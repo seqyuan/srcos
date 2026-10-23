@@ -93,6 +93,9 @@ SRCOS 注册用户的运行时视图由 SRCOS 构造：
 ### 安全
 
 - **工具实例只监听回环。** 网关是唯一入口，这是全部安全模型的基石，也是「后端零改动挂到子路径」的前提。
+  注意**网络隔离是声明式的**：`network: none`（`bwrap` 的 task 默认）给任务独立 netns，
+  但 service 必须 `host`（网关经 loopback 代理），因此同一 OS 用户的不同 service 之间仍可
+  经 `127.0.0.1` 互访。这是已知限制，不要把它当成 service 间的隔离；`Jail` 只保护 API 面。
 - **`Jail` 是唯一的路径解析入口。** 任何「用户可控参数 → 文件系统路径」都必须过 `Jail`：
   禁止 `..`、绝对宿主路径、symlink 逃逸。
 - **`MountSpec` 的粒度就是隔离的粒度。** bwrap 的 userns 会把未映射的 gid 折叠成 `65534`，
@@ -222,6 +225,5 @@ CI 是防回退，不是代替品。
 
 ## 当前阶段
 
-见 [`docs/roadmap.md`](docs/roadmap.md) §6。**Phase 1（规范与最小闭环）在进行中。**
-
-Phase 0 已完成：重命名为 srcos、删除 `site/` 静态文档站、`git init`、建立 roadmap。
+见 [`docs/roadmap.md`](docs/roadmap.md) §6 与 [`docs/handoff.md`](docs/handoff.md)。
+本文件只记录不变式；进度、已踩的坑与下一步以 roadmap / handoff 为准。

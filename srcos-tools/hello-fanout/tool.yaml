@@ -7,6 +7,7 @@ description: "最小示例：把 N 个样本各写一个文件，演示样本级
 kind: task
 backend: local                # 内部用 local 并行（ata / xargs），所以本机执行即可
 sandbox: bwrap                # 无 root 的 mount/pid/ipc/uts 命名空间隔离
+network: none                 # 任务不需要出网；bwrap 的默认值（需要网络的工具写 host）
 entry: work.sh
 
 # 环境挂载（不是数据）：沙箱里没有 PATH 上的 ata，在这里显式声明。

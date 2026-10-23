@@ -79,6 +79,7 @@ kind: task                          # 必需，task | service
 # ── 执行环境 ──────────────────────────────────────────────
 backend: sge                        # 必需，local | sge（见 §6）
 sandbox: apptainer                  # 可选，none | bwrap | apptainer（默认 none）
+network: none                       # 可选，host | none。bwrap task 默认 none；service 必须 host
 image: /share/srcos/img/x-7.2.0.sif # sandbox=apptainer 时必需
 env:                                # 可选，执行前的环境准备（sandbox 为 none/bwrap 时生效）
   - "module load cellranger/7.2.0"
@@ -154,7 +155,7 @@ lifecycle:                          # kind=service 必需
 
 # ── 托管 agent 的凭据（仅 kind=service，可选）──────────────
 # 声明后，SRCOS 在实例启动时签发一枚 agent token（scope 与白名单来自这里，
-# 所以它是 owner 权限的子集），放到虚拟 home 的 $HOME/.srcos/agent-token
+# 所以它是 owner 权限的子集），放到虚拟 home 的 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`
 # （0600），实例停止时撤销。agent 拿它调 /mcp。见 ADR-025。
 agent:
   mcp: [read]                       # read | submit（至少一个）
@@ -212,6 +213,10 @@ home:
 > **为什么需要 `path` 而不是复用 `directory`**：`path` 强制绑定 storage，从而保证
 > 「UI 里能选到的路径」=「沙箱里挂载了的路径」=「工具声明的需求」。三者不一致就会出现"选了却跑不了"。
 > 详见 [`roadmap.md`](roadmap.md) ADR-020。
+>
+> **`type: path` 是输入选择器**：它指向一个**已存在**的文件/目录（`select` 默认 `directory`），
+> 并在提交/启动时由 `runtime.ValidatePathParams` 复核。需要“让工具新建一个输出目录”的场景，
+> 用普通 `string` 参数或 `type: directory` 的原始沙箱路径，不要用 `path`——否则会因目录尚不存在被拒绝。
 
 ### 2.3 `interface.outputs[]`
 
@@ -401,7 +406,7 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
    > 会**追加在最后**，所以同名键以工具的值为准。
 
 2. **托管 agent 的凭据**（ADR-025）：工具声明 `agent: { mcp: [read] }` 后，SRCOS 在实例启动时
-   签发一枚**只读**实例凭据到 **`$HOME/.srcos/agent-token`**（0600），实例停止时撤销。
+   签发一枚**只读**实例凭据到 **`$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`**（0600），实例停止时撤销。
    用它调 `$SRCOS_API` 的只读端点——这类调用在审计里记为「这个实例做的」。
 2. **工具自带的二进制放在 `/opt/srcos/bin`。** 它是沙箱 `PATH` 的第一项。
    不要挂到 `/usr/local/bin`、`/usr/bin` 之类的位置——那些目录（`/usr` `/bin` `/sbin` `/lib*`）
@@ -605,7 +610,14 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 `from` 列表内切换根，否则 403。所以「UI 能选到的」永远不可能超过「沙箱挂载的」。
 
 `select` 缺省取自 input 的 `select`/`type`，因此 `select: directory` 的参数在 UI 里
-根本看不到文件 —— 非法值不会被提供，而不是提交后被拒。
+根本看不到文件。`/api/paths?select=` 只影响**列举视图**（例如让预览看到文件），
+不改变提交契约；**UI 不是安全边界**：`POST /api/jobs`、`srcos_start_service`、MCP
+和 CLI 都会在写入路径调用 `runtime.ValidatePathParams`，再次检查：
+- 带 `from` 的值必须落在其中一个声明的 storage 内（`storage.Resolve`，含 symlink 校验）；
+- `file`/`directory`（及声明了 `select` 的 `path`）必须与文件系统实际类型一致；
+- `files` 中的文件必须存在于选中的目录里。
+因此“UI 能选到的”与“提交能通过的”一致；不能靠改 `select` 或直接调 API 绕开。
+`files` 只能是目录内的纯文件名（注册期拒绝 `/`、`\`、`..`）。
 
 ## 5.5 工具 UI 怎么接
 
@@ -718,6 +730,12 @@ completion:
 SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，绝不挂父目录"；
 但工具**不要试图猜测或访问其他实例的路径** —— 即使某些情况下能够到，那也是 bug 不是特性。
 
+**网络**：`network: none`（`bwrap` 的 task 默认）给单元一个独立的 network namespace，
+任务不能访问宿主 loopback、不能自己监听对外端口、也不能出网；需要下载/访问数据库的任务
+显式写 `network: host`。`kind: service` 目前必须 `network: host`（gateway 要通过 loopback
+探活与代理），因此同一 OS 用户的不同 service 之间仍可经 `127.0.0.1` 互访——这是已知限制，
+不是 `network: none` 能解决的问题（需要 Unix-socket ingress 或每服务独立 netns）。
+
 ---
 
 ## 9. 校验规则（注册时会拒绝的配置）
@@ -738,10 +756,15 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `external` 只能配 `backend: external` | 拒绝注册 |
 | `sandbox: apptainer` 必须有 `image` | 拒绝注册 |
 | `sandbox: none` 不能有 `requires_storages` —— 声明的 storage 要 bind 进 mount namespace，而 `none` 不建 namespace | 拒绝注册 |
+| `storages.host_root` / `ro_mounts.host` / `sandbox_path` 为 `/` | 拒绝注册/加载（bind 父目录 = 交出整个宿主；必须声明最小必要路径） |
+| `network` 只能是 `host` / `none`；`network: none` 必须配 `bwrap`/`apptainer`（`sandbox: none` 无法强制） | 拒绝注册 |
+| `kind: service` 不能 `network: none`（ingress 走 loopback；Unix-socket ingress 尚未实现） | 拒绝注册 |
 | `agent` 只对 `kind: service` 合法（托管 agent 是长驻单元） | 拒绝注册 |
 | `agent.mcp` 必须含 `read`/`submit` 至少一个；`agent.tools` 需同时含 `submit` | 拒绝注册 |
 | `internal.executor: qsubsge` + `backend: sge` | 拒绝注册（§6） |
 | `type: path` 必须有 `from` | 拒绝注册 |
+| `interface.inputs[].files` 含路径分隔符 / `..` / 绝对路径 | 拒绝注册 |
+| 提交的 `type: file/directory/path` 值落在 `from` 声明的 storage 之外，或实际类型不符 | 拒绝提交（`runtime.ValidatePathParams`） |
 | `from` 必须是 `requires_storages` 的子集 | 拒绝注册 |
 | `type: enum` 必须有 `values` | 拒绝注册 |
 | `interface` 的 `name` 在同一工具内唯一 | 拒绝注册 |
@@ -780,6 +803,7 @@ description: "最小示例：把 N 个样本各写一个文件，演示样本级
 kind: task
 backend: sge                  # 内部用 local 并行（ata / xargs），所以投到计算节点
 sandbox: bwrap
+network: none                 # 任务不需要出网；bwrap 的默认值（需要网络写 host）
 entry: work.sh
 
 interface:

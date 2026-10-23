@@ -10,7 +10,8 @@ if (identical(title, "")) title <- "SRCOS Shiny Demo"
 
 # ── 托管 agent 的实例身份（ADR-025）───────────────────────────────────────
 # tool.yaml 声明了 `agent: { mcp: [read, submit], tools: [hello-fanout] }`，
-# 于是 SRCOS 在实例启动时签发一枚实例凭据到 $HOME/.srcos/agent-token：
+# 于是 SRCOS 在实例启动时签发一枚实例凭据到
+# $HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token（每个实例一个，互不覆盖）：
 # scope 与白名单**来自工具声明**，所以它是所有者权限的子集。
 #
 # 下面的两个调用就是「托管 agent」的最小形态：
@@ -19,7 +20,8 @@ if (identical(title, "")) title <- "SRCOS Shiny Demo"
 # 两者在 SRCOS 的审计/日志里都记为「这个实例做的」，而不是「某个人做的」。
 
 instance_token <- function() {
-  tok_file <- file.path(Sys.getenv("HOME"), ".srcos", "agent-token")
+  tok_file <- file.path(Sys.getenv("HOME"), ".srcos", "instances",
+                         Sys.getenv("SRCOS_INSTANCE_ID"), "agent-token")
   if (!file.exists(tok_file)) return(NULL)
   trimws(readLines(tok_file, n = 1L, warn = FALSE))
 }

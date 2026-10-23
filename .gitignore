@@ -1,5 +1,7 @@
 # Binaries
 srcos
+srcos.bak-*
+*.log
 *.exe
 *.dll
 *.so

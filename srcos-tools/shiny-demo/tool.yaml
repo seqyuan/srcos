@@ -54,7 +54,7 @@ workspace:
 
 # 托管 agent 的实例身份（ADR-025）。应用本不是一个 agent，但声明后 SRCOS
 # 会在实例启动时签发一枚实例凭据（scope 与白名单来自这里）放到
-# $HOME/.srcos/agent-token，app.R 用它调 SRCOS 自己的 API（SRCOS_API）。
+# $HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token，app.R 用它调 SRCOS 自己的 API（SRCOS_API）。
 # 这类调用在审计里记为「这个实例做的」（actor 带 instance）。
 #
 # read：页面上显示它能看到什么（工具目录）。

@@ -49,6 +49,9 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 撤销：`sudo apparmor_parser -R /etc/apparmor.d/bwrap && sudo rm /etc/apparmor.d/bwrap`
 
 验证结果：T1 最小调用 ✓ · T2 SRCOS 同款挂载集 ✓ · T3 隔离性 ✓（沙箱内 `/` 仅剩 `bin dev lib lib64 proc tmp usr workspace`，`/home/seqyuan` 不可见）。
+网络：bwrap **默认不 unshare net**（沙箱内能看到宿主 `lo`/`eth0`，也能连宿主 loopback）。
+`network: none` 会加 `--unshare-net`，2026-10-23 在本机实测可用；`bwrap` 的 task 默认 none，
+service 必须 host（网关经 loopback 代理）。见 `tool-spec` §8「网络」与 AGENTS 安全不变式。
 
 #### ⚠️ 重要发现：userns 把 group 权限位变成"人人可读"
 

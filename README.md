@@ -479,6 +479,11 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 > 会话 cookie，且 Origin 天然同源）。请勿在网关后面代理不可信、可执行任意脚本的
 > 应用；如需严格隔离，请把管理界面部署在独立的主机/端口（独立 origin）。
 > 同理，登录成功后请勿在不可信服务页面中保持登录状态。
+>
+> 网络隔离是**按工具声明**的：`bwrap` 的 task 默认 `network: none`（独立 netns），
+> 需要出网的任务显式写 `network: host`；`kind: service` 必须 `host`（网关要经 loopback
+> 探活/代理），所以同一 OS 用户的不同 service 之间仍可经 `127.0.0.1` 互访。
+> 不要把 service 当成彼此隔离的租户。
 
 ### 保留路径（命名空间冲突）
 
@@ -500,7 +505,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/view` | **内置资源查看器**（文本、Markdown、表格、图片、PDF、HTML、目录） |
 | `/mcp` | **MCP 端点**（Streamable HTTP，只读面，给 agent / MCP 客户端；用 agent token 认证） |
 | `/admin` | **管理控制台**（仅管理员：实例总览 / 强制停止 / 授权管理） |
-| `/api/admin`、`/api/admin/*` | 管理 API（仅管理员；控制台调用它，也可脚本化：含 `/api/admin/audit`、`/api/admin/requests/<id>/approve|deny`、`POST /api/admin/instances` 启动服务） |
+| `/api/admin`、`/api/admin/*` | 管理 API（仅管理员、**仅浏览器 session**；agent token 无 admin scope，不能调用。含 `/api/admin/audit`、`/api/admin/requests/<id>/approve|deny`、`POST /api/admin/instances` 启动服务） |
 | `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
 | `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单（含「可申请的工具」区） |
 | `/requests` | **我的申请**（B3：自己提交的访问申请与结果） |
@@ -989,7 +994,7 @@ agent: { mcp: [read], tools: [scrna_qc] }   # scope 与白名单来自这里
 ```
 
 实例**启动时** SRCOS 签发一枚实例 token（scope/白名单来自工具声明，所以是 owner 权限的
-**子集**），写到虚拟 home 的 **`$HOME/.srcos/agent-token`**（0600）；实例停止时撤销，
+**子集**），写到虚拟 home 的 **`$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`**（0600）；实例停止时撤销，
 网关启动时会清掉「实例已不在」的残留。审计里这类动作的 actor 带 `instance`，
 所以「实例做的」与「人做的」分得清（ADR-025）。
 
@@ -1004,10 +1009,15 @@ agent: { mcp: [read], tools: [scrna_qc] }   # scope 与白名单来自这里
   读不到别人的实例、日志、产物与路径。
 - **`read_file` 的范围**：`/home/<user>/...`、指定工具的工作区 `/workspace/...`、
   已声明 storage 的沙箱路径。路径穿越、symlink 逃逸、宿主路径、`/tool/...` 一律拒绝。
+  `tool` 参数必须仍是该用户可见的工具（撤权后不再借它的 storage/workspace）；
+  历史查看走实例的 `srcos_task_logs` / `srcos_list_artifacts`，不受当前 Grant 影响。
 - **每次调用写一行审计日志**（用户 / token / 方法 / 工具名），撤销 token 后立即失效；
   写入操作另有一行 `audit submit|cancel|run_flow`（含工具与版本、job/instance/run）。
 - **写入需要 `submit` scope**，且再经 `--tool` 白名单与 Grant 两道收窄；三者都在 `internal/execute`
   里一次判定，REST/MCP 不可能不一致。
+- **配置面不由 agent token 管理**：`/api/tokens`、`/api/admin/*` 与 `/api/services` 的增删改
+  都要求浏览器 session；`submit` 只覆盖执行（submit / cancel / start / run_flow），
+  不覆盖授权、凭据或服务卡片。
 
 ### 任务队列（`job.json` 的消费者）
 
@@ -1117,7 +1127,7 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 | **环境挂载** | R 在 miniforge 前缀里（非系统路径），靠 `ro_mounts` 挂进沙箱 + `env:` 把它的 `bin` 放进 `PATH`。注意用**真实路径**：`/pmo` 是指向 `/Volumes/data/pmo` 的符号链接，而 R 的启动脚本引用真实路径 |
 | **工作区即应用** | `workspace.init_from` 把模板 `app.R` 拷进用户工作区；改完重启实例就生效（`shiny::runApp("/workspace")`） |
 | **实例身份对工具可见** | `SRCOS_USER` / `SRCOS_TOOL` / `SRCOS_INSTANCE_ID` 注入沙箱，应用里直接显示（页脚那行） |
-| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read, submit], tools: [hello-fanout]}` → 实例启动时 SRCOS 签发凭据到 `$HOME/.srcos/agent-token`。app.R 用它（a）读 `$SRCOS_API/tools`，（b）**点按钮提交一个真实任务**并刷新它的状态 |
+| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read, submit], tools: [hello-fanout]}` → 实例启动时 SRCOS 签发凭据到 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`。app.R 用它（a）读 `$SRCOS_API/tools`，（b）**点按钮提交一个真实任务**并刷新它的状态 |
 | **凭据是子集，且白名单会收窄** | 同一个凭据去提交白名单外的工具 → `403 may not submit to tool shiny-demo (its submit allowlist: hello-fanout)`，且这条拒绝也进审计 |
 
 > 启动服务需要**工具自己声明环境**：SRCOS 不知道 R 装在哪，也不应该知道 —— `tool.yaml` 的
@@ -1141,7 +1151,9 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 授权改动**立即生效**（在运行中的网关上原地改写策略，不重启）；手工 `vim config/grants.yaml`
 也会在下一个扫描周期（10 秒）内生效 —— 坏文件只会被记进日志，内存里的策略不变（不会突然全放行或全拒绝）。
 
-对应的管理 API（同样只认管理员，会校验 `Origin`）：
+对应的管理 API（同样只认管理员，会校验 `Origin`）。**管理面只接受浏览器 session：
+agent token 的 scope 只有 read/submit，没有 admin；即使 token 属于管理员也不能改授权/停实例。**
+下面的 `-b cj` 就是登录后的 session cookie：
 
 ```bash
 curl -b cj http://gw:30152/api/admin/instances                 # 全部实例 + 资源快照
@@ -1150,6 +1162,7 @@ curl -b cj -X PUT -H 'Content-Type: application/json' \
   -d '{"groups":["bio-team"],"maxCpu":16,"maxMemory":"64Gi"}' \
   http://gw:30152/api/admin/grants/cellranger                   # 等价于 srcos grant set
 curl -b cj -X POST http://gw:30152/api/admin/instances/<id>/stop # 等价于 srcos svc stop（可跨用户）
+# 代启动要求目标用户已有该工具的 Grant，且仍占用目标用户的配额
 curl -b cj http://gw:30152/api/admin/instances/<id>/logs?tail=200
 ```
 
