@@ -756,3 +756,29 @@ func TestConcurrencyIsClampedToTheHostCeiling(t *testing.T) {
 		t.Fatalf("Concurrency = %d, want the ceiling %d", r.Opts.Concurrency, MaxConcurrency)
 	}
 }
+
+func TestCheckProvidesVerifiesThePromisedFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	r := &Runner{Opts: Options{DataDir: dataDir, User: "alice"}}
+	dir := flow.SampleDir(dataDir, "alice", "run-1", "count", "s01-s001")
+	u := flow.Unit{
+		Node: "count", Segment: "s01-s001",
+		Tags:    map[string]string{"run": "run-1"},
+		Outputs: []string{filepath.Join(dir, "outs")},
+		Tool: &tool.Tool{Interface: tool.Interface{Outputs: []tool.Output{{
+			Name: "outs", Type: tool.OutDirectory, Provides: []string{"counts.txt"},
+		}}}},
+	}
+	if err := r.checkProvides(u); err == nil {
+		t.Fatal("a missing provided file was accepted")
+	}
+	if err := os.MkdirAll(u.Outputs[0], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(u.Outputs[0], "counts.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.checkProvides(u); err != nil {
+		t.Fatalf("present provided file rejected: %v", err)
+	}
+}

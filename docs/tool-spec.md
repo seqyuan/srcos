@@ -225,7 +225,7 @@ home:
 | `name` | ✅ | 同上 |
 | `type` | ✅ | `file` \| `directory`（输出只允许这两类） |
 | `label` / `description` | — | 同上 |
-| `provides` | — | 该输出目录下**保证产出**的文件名列表，用于编排连线校验与产物校验 |
+| `provides` | — | 该输出目录下**保证产出**的文件名列表；仅对 `type: directory` 合法。流程节点成功后 `flowrun` 会检查这些文件，缺失则节点失败 |
 
 ### 2.4 版本与内容摘要（`version` 与 `digest`）
 
@@ -770,7 +770,7 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `from` 必须是 `requires_storages` 的子集 | 拒绝注册 |
 | `type: enum` 必须有 `values` | 拒绝注册 |
 | `interface` 的 `name` 在同一工具内唯一 | 拒绝注册 |
-| `outputs[].type` 只能是 `file` / `directory` | 拒绝注册 |
+| `outputs[].type` 只能是 `file` / `directory`；`provides` 只能用于 directory | 拒绝注册 |
 | `job.json.params` 含未声明的键 | 拒绝提交 |
 | `job.json.resources` 超过 `Grant` 配额 | 拒绝提交 |
 | `interface.inputs[].default` 不满足自己的 `type` / `min` / `max` / `values` | 拒绝注册 |

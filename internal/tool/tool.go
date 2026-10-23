@@ -836,6 +836,9 @@ func (t *Tool) Validate() error {
 		default:
 			bad("%s: type must be file|directory, got %q", where, out.Type)
 		}
+		if len(out.Provides) > 0 && out.Type != OutDirectory {
+			bad("%s: provides is only meaningful for type: directory", where)
+		}
 	}
 
 	// ── env ──────────────────────────────────────────────────

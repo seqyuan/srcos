@@ -787,6 +787,35 @@ func (r *Runner) runJob(ctx context.Context, u flow.Unit, jobID string, onStarte
 		}
 		return fmt.Errorf("state %s", inst.State)
 	}
+	return r.checkProvides(u)
+}
+
+// checkProvides verifies the files a directory output promised via
+// interface.outputs[].provides. The flow plan appends output paths in manifest
+// order, so index i is the host/sandbox output for Interface.Outputs[i].
+func (r *Runner) checkProvides(u flow.Unit) error {
+	if u.Tool == nil || len(u.Tool.Interface.Outputs) == 0 {
+		return nil
+	}
+	sampleDir := flow.SampleDir(r.Opts.DataDir, r.Opts.User, u.Tags["run"], u.Node, u.Segment)
+	for i, out := range u.Tool.Interface.Outputs {
+		if len(out.Provides) == 0 {
+			continue
+		}
+		if i >= len(u.Outputs) {
+			return fmt.Errorf("output %s has no path in the plan", out.Name)
+		}
+		dir := filepath.Join(sampleDir, filepath.Base(u.Outputs[i]))
+		var missing []string
+		for _, name := range out.Provides {
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("output %s is missing provided file(s): %s", out.Name, strings.Join(missing, ", "))
+		}
+	}
 	return nil
 }
 
