@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/seqyuan/srcos/internal/job"
+	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -111,6 +112,60 @@ func ValidatePathParams(t *tool.Tool, j *job.Job, storages storage.Provider) err
 		}
 	}
 	return nil
+}
+
+// ValidateOutputMounts checks that every declared output lives on a writable
+// mount. `job.Validate` can only see the string grammar; at this point the
+// instance's mount table exists, so "/tool/foo" (read-only) or "/etc/passwd"
+// (not mounted) is a manifest bug that should fail before the tool runs.
+func ValidateOutputMounts(spec *sandbox.Spec, outputs []string, degraded bool) error {
+	if spec == nil {
+		return nil
+	}
+	for _, out := range outputs {
+		if degraded {
+			// In degraded mode a flow plan may hand us the host-side output
+			// path, while a ordinary job still uses the contract spelling
+			// (`/workspace/...`). Accept either, but only on a writable mount.
+			if _, mount, err := spec.Resolve(out); err == nil {
+				if mount.Mode != sandbox.ReadWrite {
+					return fmt.Errorf("output %q is on the read-only mount %s", out, mount.SandboxPath)
+				}
+				continue
+			}
+			matched := false
+			for _, m := range spec.Mounts() {
+				if !hostPathUnder(out, m.HostPath) {
+					continue
+				}
+				matched = true
+				if m.Mode != sandbox.ReadWrite {
+					return fmt.Errorf("output %q is on the read-only mount %s", out, m.HostPath)
+				}
+				break
+			}
+			if !matched {
+				return fmt.Errorf("output %q is not inside any mount", out)
+			}
+			continue
+		}
+		_, mount, err := spec.Resolve(out)
+		if err != nil {
+			return fmt.Errorf("output %q is not inside any mount: %v", out, err)
+		}
+		if mount.Mode != sandbox.ReadWrite {
+			return fmt.Errorf("output %q is on the read-only mount %s", out, mount.SandboxPath)
+		}
+	}
+	return nil
+}
+
+func hostPathUnder(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
 }
 
 // splitStorageIDs is the runtime copy of the contract's comma-separated list.

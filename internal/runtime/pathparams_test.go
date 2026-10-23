@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/seqyuan/srcos/internal/job"
+	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -66,5 +67,23 @@ func TestValidatePathParamsLeavesUnboundInputsAlone(t *testing.T) {
 	tl := pathParamTool()
 	if err := ValidatePathParams(tl, &job.Job{Params: map[string]any{"raw": "/workspace/input.txt"}}, nil); err != nil {
 		t.Fatalf("unbound input rejected: %v", err)
+	}
+}
+
+func TestValidateOutputMountsRejectsReadOnlyAndInvisiblePaths(t *testing.T) {
+	spec := &sandbox.Spec{}
+	if err := spec.Add(sandbox.Mount{HostPath: "/host/ws", SandboxPath: "/workspace", Mode: sandbox.ReadWrite, Origin: "builtin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.Add(sandbox.Mount{HostPath: "/host/tool", SandboxPath: "/tool", Mode: sandbox.ReadOnly, Origin: "tool"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateOutputMounts(spec, []string{"/workspace/out"}, false); err != nil {
+		t.Fatalf("writable output rejected: %v", err)
+	}
+	for _, out := range []string{"/tool/report.txt", "/etc/passwd"} {
+		if err := ValidateOutputMounts(spec, []string{out}, false); err == nil {
+			t.Errorf("output %q was accepted", out)
+		}
 	}
 }

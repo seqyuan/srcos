@@ -308,7 +308,8 @@ SRCOS 扫描它、发现任务，没有提交守护进程、没有消息中间�
 | `tags` | — | 键值对，用于任务列表筛选（如按 sample） |
 | `doneWhen` | — | 覆盖 `tool.yaml` 的完成判定（§7.3） |
 
-`outputs` 目前是**字面沙箱路径**，不支持 `${SRCOS_TASK_ID}` 之类的模板。
+`outputs` 目前是**字面沙箱路径**，不支持 `${SRCOS_TASK_ID}` 之类的模板。它必须落在
+实例可写的挂载上（`/workspace`、虚拟 home、`/flow` 或 `rw` storage），否则在启动前被拒绝。
 需要"每任务一个产物目录"时，把它做成子目录（如产物写到 `/workspace/out/${SRCOS_TASK_ID}/`，
 `outputs` 仍声明父目录 `/workspace/out`）—— 见 §4.3 关于幂等粒度的说明。
 
@@ -765,6 +766,7 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 | `type: path` 必须有 `from` | 拒绝注册 |
 | `interface.inputs[].files` 含路径分隔符 / `..` / 绝对路径 | 拒绝注册 |
 | 提交的 `type: file/directory/path` 值落在 `from` 声明的 storage 之外，或实际类型不符 | 拒绝提交（`runtime.ValidatePathParams`） |
+| `job.outputs` 落在只读挂载（如 `/tool`）或未挂载路径（如 `/etc`） | 拒绝运行（`runtime.ValidateOutputMounts`） |
 | `from` 必须是 `requires_storages` 的子集 | 拒绝注册 |
 | `type: enum` 必须有 `values` | 拒绝注册 |
 | `interface` 的 `name` 在同一工具内唯一 | 拒绝注册 |

@@ -194,6 +194,11 @@ func (r *Runner) prepare(t *tool.Tool, j *job.Job, jobID string) (*prepared, err
 	if err != nil {
 		return nil, err
 	}
+	if j != nil {
+		if err := ValidateOutputMounts(spec, j.Outputs, view.Degraded); err != nil {
+			return nil, err
+		}
+	}
 
 	res := t.Resources
 	if j != nil {
