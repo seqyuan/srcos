@@ -36,11 +36,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/seqyuan/srcos/internal/resource"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 )
 
@@ -197,8 +199,14 @@ func New(items []Storage) (Provider, error) {
 		if !filepath.IsAbs(s.HostRoot) {
 			bad("%s: host_root must be an absolute host path, got %q", where, s.HostRoot)
 		}
+		if filepath.Clean(s.HostRoot) == "/" {
+			bad("%s: host_root must not be / — bind the narrowest data root, never the whole host", where)
+		}
 		if !strings.HasPrefix(s.SandboxPath, "/") {
 			bad("%s: sandbox_path must be absolute, got %q", where, s.SandboxPath)
+		}
+		if filepath.ToSlash(filepath.Clean(s.SandboxPath)) == "/" {
+			bad("%s: sandbox_path must not be / — bind the exact data root, never the sandbox root", where)
 		}
 		if sandbox.SandboxPathIsReserved(s.SandboxPath) {
 			bad("%s: sandbox_path %q is inside a read-only system directory — use %s or another fresh top-level path",
@@ -383,19 +391,27 @@ func (p *fileProvider) Listing(ctx context.Context, storageID, sandboxPath strin
 		return nil, err
 	}
 
-	fi, err := os.Stat(host)
+	_, mount, err := p.spec.Resolve(sandboxPath)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	// Resolve and open are separate syscalls; a tool with write access to a
+	// storage can swap a path for a symlink in between. Verify the descriptor.
+	if err := safefs.VerifyOpen(dir, mount.HostPath); err != nil {
+		return nil, err
+	}
+	fi, err := dir.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", sandboxPath)
 	}
-
-	dir, err := os.Open(host)
-	if err != nil {
-		return nil, err
-	}
-	defer dir.Close()
 
 	entries, err := dir.ReadDir(limit + 1)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/grant"
@@ -358,5 +359,81 @@ func TestAdminLogsAndStop(t *testing.T) {
 	rec = h.asAdmin("POST", "/api/admin/instances/"+inst.ID+"/stop", "")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("stop without a supervisor = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Administering the platform is not in the agent scope set (read/submit), and
+// the management surface is dispatched before the generic scope gate. It is
+// therefore session-only: even an admin-owned submit token must not be able to
+// change grants, groups, admins or instances.
+func TestAdminSurfaceIsSessionOnly(t *testing.T) {
+	h := newAdminHarness(t)
+	store := agenttoken.New(config.AgentTokensPath(h.configDir))
+	store.AttachUserCheck(h.Registry)
+	h.opts.AgentTokens = store
+
+	for _, scope := range []agenttoken.Scope{agenttoken.ScopeRead, agenttoken.ScopeSubmit} {
+		token := mintToken(t, store, "root", scope)
+		if rec := tokenJSON(h.Handler, "GET", "/api/admin/instances", token, ""); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s-token admin GET = %d %s, want 403", scope, rec.Code, rec.Body)
+		}
+		if rec := tokenJSON(h.Handler, "PUT", "/api/admin/grants/demo", token, `{"public":true}`); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s-token admin write = %d %s, want 403", scope, rec.Code, rec.Body)
+		}
+	}
+}
+
+// An operator may start a service for a user, but the target user still needs
+// the Grant: starting must not silently grant access the grant file does not
+// contain.
+func TestAdminStartRequiresTheTargetUsersGrant(t *testing.T) {
+	h := newAdminHarness(t)
+	dir := filepath.Join(h.toolsDir, "svc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `schemaVersion: 1
+id: svc
+version: 0.1.0
+name: Svc
+kind: service
+backend: local
+entry: work.sh
+resources: {cpu: 1, memory: "1Gi"}
+ingress: {healthcheck: {path: "/"}}
+lifecycle: {max_lifetime: "1h"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "tool.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "work.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.opts.Runner = &runtime.Runner{}
+
+	rec := h.asAdmin("POST", "/api/admin/instances", `{"user":"alice","tool":"svc"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("start without a target grant = %d %s, want 403", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "no grant") {
+		t.Fatalf("error should explain the missing grant: %s", rec.Body)
+	}
+}
+
+// A mutation that cannot be persisted must not remain live in memory: the API
+// says 500, so the policy must still be the one on disk.
+func TestAdminPolicySaveFailureRollsBack(t *testing.T) {
+	h := newAdminHarness(t)
+	h.opts.PolicyPath = t.TempDir() // a directory, so the atomic rename fails
+
+	rec := h.asAdmin("PUT", "/api/admin/grants/demo", `{"public":true}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("save failure = %d %s, want 500", rec.Code, rec.Body)
+	}
+	if h.policy.Allowed("bob", "demo") {
+		t.Fatal("a failed save left the new grant live in memory")
+	}
+	if !h.policy.Allowed("alice", "demo") {
+		t.Fatal("rollback lost the previous grant")
 	}
 }

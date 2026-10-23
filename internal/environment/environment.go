@@ -107,6 +107,9 @@ func New(items []Environment) (Provider, error) {
 		if !filepath.IsAbs(e.Root) {
 			return nil, fmt.Errorf("environment %s: root must be an absolute host path, got %q", e.ID, e.Root)
 		}
+		if filepath.Clean(e.Root) == "/" {
+			return nil, fmt.Errorf("environment %s: root must not be / — declare the interpreter prefix, not the whole host", e.ID)
+		}
 		if err := validateEnv(e); err != nil {
 			return nil, err
 		}

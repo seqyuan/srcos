@@ -22,9 +22,9 @@ func TestServiceToolPageOffersLifecycle(t *testing.T) {
 	for _, want := range []string{
 		"启动服务",                  // the form's action label
 		"/api/tools/", "/start", // the script routes services to the start endpoint
-		"svcStop('alice-web-svc')", // the stop button
-		"打开服务",                     // the route link
-		`href="/proxy/alice/web/"`, // and where it points
+		"svcStop(&#34;alice-web-svc&#34;)", // the stop button
+		"打开服务",                             // the route link
+		`href="/proxy/alice/web/"`,         // and where it points
 		"运行中",
 	} {
 		if !strings.Contains(html, want) {
@@ -64,7 +64,7 @@ func TestTaskPageOffersStopForALiveInstance(t *testing.T) {
 		State: "running", RoutePath: "/proxy/alice/web",
 	}
 	html := TaskPage("srcos", running, nil, "")
-	if !strings.Contains(html, "tkStop('alice-web-svc')") {
+	if !strings.Contains(html, "tkStop(&#34;alice-web-svc&#34;)") {
 		t.Error("a running instance must offer a stop button")
 	}
 	if !strings.Contains(html, `href="/proxy/alice/web/"`) {
@@ -77,5 +77,20 @@ func TestTaskPageOffersStopForALiveInstance(t *testing.T) {
 	html = TaskPage("srcos", done, nil, "")
 	if strings.Contains(html, "tkStop(") {
 		t.Error("a finished instance has nothing to stop")
+	}
+}
+
+func TestRawFileInputFallsBackToText(t *testing.T) {
+	tl := &tool.Tool{
+		ID: "raw", Name: "Raw", Kind: tool.KindTask, Version: "1", Entry: "work.sh",
+		Resources: tool.Resources{CPU: 1, Memory: "1Gi", Walltime: "0:10:00"},
+		Interface: tool.Interface{Inputs: []tool.Input{{Name: "f", Type: tool.TypeFile}}},
+	}
+	page := ToolFormPage("srcos", "alice", tl, nil, nil)
+	if !strings.Contains(page, `<input type="text" name="f"`) {
+		t.Fatalf("a raw file input should be a text field:\n%s", page)
+	}
+	if strings.Contains(page, `input="f"`) {
+		t.Fatalf("a raw file input should not render the storage picker:\n%s", page)
 	}
 }

@@ -30,6 +30,11 @@ type ApptainerOptions struct {
 	Env []string
 	// Argv is the command to run inside the container.
 	Argv []string
+	// Network is "none" to create a fresh network namespace. It is opt-in
+	// because the flags differ across Singularity/Apptainer versions; an
+	// isolated task passes --net, a service never does (its ingress is reached
+	// over loopback).
+	Network string
 }
 
 // ApptainerArgv builds the full `apptainer exec ... <image> <argv>` vector.
@@ -58,6 +63,10 @@ func ApptainerArgv(spec *Spec, o ApptainerOptions) []string {
 		"--no-home",
 		"--cleanenv",
 		"--pwd", cwd,
+	}
+	if o.Network == "none" {
+		// A new network namespace, with only the container's own loopback.
+		args = append(args, "--net")
 	}
 
 	for _, m := range spec.Mounts() {

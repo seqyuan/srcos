@@ -81,6 +81,10 @@ func (s *Server) sweepInstanceCredentials() {
 			log.Printf("[srcos] instance credential sweep: %v", err)
 			continue
 		}
+		// The credential is revoked; its file is dead weight. Use the same
+		// per-instance path as mint, never a shared one (a user may host
+		// several agent services at once).
+		_ = os.Remove(config.InstanceTokenPath(config.DirOf(s.registry), t.User, t.Instance))
 		log.Printf("[srcos] revoked the credential of dead instance %s", t.Instance)
 	}
 }
@@ -281,7 +285,17 @@ func (s *Server) syncRoutesFrom(insts []*runtime.Instance) {
 	}
 	live := map[string]bool{}
 	for _, inst := range insts {
-		e, ok := routeEntryFrom(inst)
+		var fallback *runtime.IngressRoute
+		if !inst.Ingress.Configured && s.toolsDir != "" {
+			// A record written before ingress settings were persisted: recover
+			// them from the tool package. New records carry them themselves, so
+			// the common path does not read a manifest per instance per tick.
+			if t, err := tool.Find(s.toolsDir, inst.Tool); err == nil {
+				ing := runtime.IngressForTool(t)
+				fallback = &ing
+			}
+		}
+		e, ok := routeEntryFrom(inst, fallback)
 		if !ok {
 			continue
 		}
@@ -310,7 +324,7 @@ func (s *Server) syncRoutesFrom(insts []*runtime.Instance) {
 // The frontend path is *derived* (user + tool), never read from the record: a
 // hand-edited file must not be able to move a service to another user's URL
 // space, which is where the route cookies and the <base> rewriting point.
-func routeEntryFrom(inst *runtime.Instance) (route.Entry, bool) {
+func routeEntryFrom(inst *runtime.Instance, fallback *runtime.IngressRoute) (route.Entry, bool) {
 	if inst.Kind != string(tool.KindService) {
 		return route.Entry{}, false
 	}
@@ -321,16 +335,28 @@ func routeEntryFrom(inst *runtime.Instance) (route.Entry, bool) {
 	if err != nil {
 		return route.Entry{}, false
 	}
+	ing := inst.Ingress
+	if !ing.Configured && fallback != nil {
+		ing = *fallback
+	}
+	ws := true
+	if ing.WebSocket != nil {
+		ws = *ing.WebSocket
+	}
 	return route.Entry{
 		User:       inst.User,
 		Tool:       inst.Tool,
 		InstanceID: inst.ID,
 		Path:       route.DefaultPath(inst.User, inst.Tool),
 		Target:     target,
-		// Service instances are proxied with WebSocket support: a notebook or
-		// a terminal in the browser is the normal case, not the exception.
-		WebSocket: true,
-		State:     string(inst.State),
+		// Service instances are proxied with WebSocket support unless the tool
+		// explicitly turned it off (the default is on: an app server usually
+		// needs it). The value now comes from the record, not a hardcoded true,
+		// so a scan tick cannot re-enable an upgrade the tool disabled.
+		WebSocket:   ws,
+		BWLimit:     ing.BWLimit,
+		BackendPath: ing.BackendPath,
+		State:       string(inst.State),
 	}, true
 }
 
@@ -346,7 +372,14 @@ func (s *Server) publishInstanceRoute(user, toolID string) (route.Entry, bool) {
 	if err != nil {
 		return route.Entry{}, false
 	}
-	e, ok := routeEntryFrom(inst)
+	var fallback *runtime.IngressRoute
+	if !inst.Ingress.Configured && s.toolsDir != "" {
+		if t, terr := tool.Find(s.toolsDir, inst.Tool); terr == nil {
+			ing := runtime.IngressForTool(t)
+			fallback = &ing
+		}
+	}
+	e, ok := routeEntryFrom(inst, fallback)
 	if !ok {
 		return route.Entry{}, false
 	}

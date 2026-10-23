@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -264,7 +265,7 @@ func ParamEnv(params map[string]any) []string {
 // Only lowering is allowed, so a plain min() is the correct semantics.
 func EffectiveResources(j *Job, t *tool.Tool) tool.Resources {
 	out := t.Resources
-	if j.Resources == nil {
+	if j == nil || j.Resources == nil {
 		return out
 	}
 	if j.Resources.CPU > 0 && (out.CPU == 0 || j.Resources.CPU < out.CPU) {
@@ -419,7 +420,7 @@ func Submit(configDir, user, toolID string, j *Job) (string, string, error) {
 // one there means this submission already happened.
 func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string, error) {
 	jobsDir := config.JobsDir(configDir, user, toolID)
-	if err := os.MkdirAll(jobsDir, 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(config.DataDir(configDir), jobsDir, 0o755); err != nil {
 		return "", "", err
 	}
 	if id == "" {
@@ -429,7 +430,7 @@ func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string
 	if _, err := os.Stat(filepath.Join(dir, "job.json")); err == nil {
 		return id, dir, ErrJobExists
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(config.DataDir(configDir), dir, 0o755); err != nil {
 		return "", "", err
 	}
 	if j.SchemaVersion == 0 {
@@ -439,7 +440,7 @@ func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string
 	if err != nil {
 		return "", "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
+	if err := safefs.WriteFileBeneath(config.DataDir(configDir), filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
 		return "", "", err
 	}
 	return id, dir, nil

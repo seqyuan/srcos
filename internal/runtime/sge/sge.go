@@ -37,6 +37,7 @@ import (
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -258,7 +259,7 @@ func (b *Backend) Start(ctx context.Context, req runtime.StartRequest) (runtime.
 		return nil, err
 	}
 	rd := b.Config.rendezvousFor(req.InstanceID)
-	if err := os.MkdirAll(rd, 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(b.Config.RendezvousDir, rd, 0o755); err != nil {
 		return nil, err
 	}
 	// A stale endpoint from a previous run of the same instance would make the
@@ -269,7 +270,15 @@ func (b *Backend) Start(ctx context.Context, req runtime.StartRequest) (runtime.
 
 	script := b.renderScript(req, t)
 	scriptPath := filepath.Join(b.Config.SubmitDir, req.UnitName+".sh")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+	f, err := safefs.OpenFile(scriptPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Write([]byte(script)); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
 		return nil, err
 	}
 

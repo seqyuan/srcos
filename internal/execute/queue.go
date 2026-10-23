@@ -167,8 +167,17 @@ func (q *Queue) Tick(ctx context.Context) int {
 				q.release(user, toolID)
 				continue
 			}
+			// Admit under the quota lock *before* claiming: a claim is a
+			// commitment to run, and a run that cannot fit the quota would
+			// otherwise sit claimed with no owner.
+			reservation, aerr := q.ctrl.admit(user, t, loaded.Job, runtime.InstanceID(user, t.ID, loaded.ID))
+			if aerr != nil {
+				q.release(user, toolID)
+				continue // quota backpressure: leave it queued for the next tick
+			}
 			taken, err := job.Claim(loaded.Dir)
 			if err != nil {
+				reservation.Release()
 				q.log("[srcos] task queue: claim %s: %v", loaded.Dir, err)
 				q.release(user, toolID)
 				continue
@@ -176,11 +185,12 @@ func (q *Queue) Tick(ctx context.Context) int {
 			if !taken {
 				// Another consumer (a `srcos job run` in another process) got
 				// there first between our scan and our claim.
+				reservation.Release()
 				q.release(user, toolID)
 				continue
 			}
 			started++
-			go q.run(user, t, loaded)
+			go q.run(user, t, loaded, reservation)
 		}
 	}
 	return started
@@ -270,11 +280,8 @@ func (q *Queue) nextJob(user, toolID string) (*job.Loaded, *tool.Tool, bool) {
 			}
 			continue
 		}
-		// Quota is backpressure, not an error: leave the job queued and try
-		// again next tick (the user's own runs will finish).
-		if err := q.ctrl.checkQuota(user, t, loaded.Job); err != nil {
-			return nil, nil, false
-		}
+		// Quota admission happens in Tick, immediately before the claim: it
+		// must be atomic with the other starters, not a separate pre-check.
 		return loaded, t, true
 	}
 	return nil, nil, false
@@ -308,15 +315,19 @@ func (q *Queue) attempted(user, toolID, jobID string) (runtime.State, bool) {
 // started it, and a shutdown mid-run must not mark the work cancelled — the
 // process is owned by systemd, not by this loop, and a restart reconciles the
 // record from what is actually still running.
-func (q *Queue) run(user string, t *tool.Tool, loaded *job.Loaded) {
+func (q *Queue) run(user string, t *tool.Tool, loaded *job.Loaded, reservation *quotaReservation) {
 	defer q.release(user, t.ID)
+	defer reservation.Release()
 	runner, err := q.ctrl.runnerFor(user)
 	if err != nil {
 		q.log("[srcos] task queue: %s/%s: %v", user, t.ID, err)
 		q.recordFailure(user, t, loaded, err)
 		return
 	}
-	inst, err := runner.RunTask(context.Background(), t, loaded)
+	// Release the admission reservation as soon as the record says `running`;
+	// the record then counts toward the quota and the reservation must not
+	// double-count it.
+	inst, err := runner.RunTaskWithStarted(context.Background(), t, loaded, reservation.Release)
 	if err != nil {
 		q.log("[srcos] task queue: %s/%s job %s: %v", user, t.ID, loaded.ID, err)
 		q.recordFailure(user, t, loaded, err)

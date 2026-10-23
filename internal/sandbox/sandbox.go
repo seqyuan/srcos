@@ -83,6 +83,9 @@ func (s *Spec) Add(m Mount) error {
 	}
 	m.HostPath = filepath.Clean(m.HostPath)
 	m.SandboxPath = cleanSlash(m.SandboxPath)
+	if m.SandboxPath == "/" {
+		return fmt.Errorf("mount %s: refusing to bind the sandbox root — bind the exact path you need, never a parent", m.Origin)
+	}
 	for _, existing := range s.mounts {
 		if existing.SandboxPath == m.SandboxPath {
 			return fmt.Errorf("duplicate sandbox path %s (%s and %s)", m.SandboxPath, existing.Origin, m.Origin)
@@ -209,6 +212,9 @@ func cleanSlash(p string) string {
 
 // isUnder reports whether child is strictly below parent (segment boundary).
 func isUnder(child, parent string) bool {
+	if parent == "/" {
+		return child != "/" && strings.HasPrefix(child, "/")
+	}
 	return strings.HasPrefix(child, parent+"/")
 }
 

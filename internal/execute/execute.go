@@ -43,6 +43,7 @@ import (
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/runtime"
 	"github.com/seqyuan/srcos/internal/runtime/sge"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -113,6 +114,14 @@ type Controller struct {
 	// of submissions each reads the same "nothing running yet" and all pass a
 	// quota meant to admit one.
 	mu sync.Mutex
+
+	// quotaMu guards reserved, the in-process reservations that make "check
+	// quota, then start" atomic across the queue, services and flows. A
+	// reservation covers the window before the instance record is visible; the
+	// record itself is the authority after that. mu and quotaMu have a single
+	// lock order: mu -> quotaMu (never the reverse).
+	quotaMu  sync.Mutex
+	reserved map[string]map[*quotaReservation]struct{}
 	// wake tells the task queue that work is waiting. Set by NewQueue; nil in a
 	// deployment that does not drain (the CLI, tests), where a submission simply
 	// waits for whoever reads the drop-box.
@@ -129,6 +138,7 @@ func New(opts Options) *Controller {
 			Storages:  opts.Storages,
 			Grants:    grantsFor(opts.Grants),
 		},
+		reserved: map[string]map[*quotaReservation]struct{}{},
 	}
 }
 
@@ -227,6 +237,22 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *
 	if err := job.Validate(j, t); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
+	if err := runtime.ValidatePathParams(t, j, c.opts.Storages); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
+
+	// Idempotency is checked before the quota: a retry of a request that
+	// already ran must return its outcome even if the user is now at the
+	// ceiling. A replay is not a new consumption.
+	pinnedID := ""
+	if key := strings.TrimSpace(req.IdempotencyKey); key != "" {
+		pinnedID = job.IdempotentID(ident.User, t.ID, key)
+		dir := filepath.Join(config.JobsDir(c.opts.ConfigDir, ident.User, t.ID), pinnedID)
+		if _, serr := os.Stat(filepath.Join(dir, "job.json")); serr == nil {
+			replayed = true
+			return c.replay(ident.User, t.ID, pinnedID, dir), nil
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -241,21 +267,13 @@ func (c *Controller) Submit(ident agenttoken.Identity, req SubmitRequest) (res *
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
 
-	// Idempotency: a client-supplied key pins the submission to one job
-	// directory. A replay returns the first submission — including a failed one:
-	// the key means "this exact request", and a fresh attempt needs a new key.
-	pinnedID := ""
-	if key := strings.TrimSpace(req.IdempotencyKey); key != "" {
-		pinnedID = job.IdempotentID(ident.User, t.ID, key)
-		dir := filepath.Join(config.JobsDir(c.opts.ConfigDir, ident.User, t.ID), pinnedID)
-		if _, serr := os.Stat(filepath.Join(dir, "job.json")); serr == nil {
+	jobID, dir, err := job.SubmitAs(c.opts.ConfigDir, ident.User, t.ID, j, pinnedID)
+	if err != nil {
+		if errors.Is(err, job.ErrJobExists) {
+			// Another concurrent request with the same key won the create.
 			replayed = true
 			return c.replay(ident.User, t.ID, pinnedID, dir), nil
 		}
-	}
-
-	jobID, dir, err := job.SubmitAs(c.opts.ConfigDir, ident.User, t.ID, j, pinnedID)
-	if err != nil {
 		return nil, err
 	}
 	loaded := &job.Loaded{ID: jobID, Dir: dir, Path: filepath.Join(dir, "job.json"), Job: j}
@@ -471,6 +489,9 @@ func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity
 	if verr := job.Validate(j, t); verr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRequest, verr)
 	}
+	if verr := runtime.ValidatePathParams(t, j, c.opts.Storages); verr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadRequest, verr)
+	}
 
 	runner, err := c.startRunner(ident.User)
 	if err != nil {
@@ -497,13 +518,17 @@ func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity
 	if prev, lerr := runtime.LoadInstance(prevPath); lerr == nil && !prev.State.Terminal() {
 		_ = runner.StopService(ctx, prev)
 	}
-	if qerr := c.checkQuota(ident.User, t, j); qerr != nil {
+	reservation, qerr := c.admit(ident.User, t, j, runtime.InstanceID(ident.User, t.ID, ""))
+	if qerr != nil {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, qerr)
 	}
 	c.mu.Unlock()
+	// The reservation covers the healthcheck window; once StartService has
+	// written the running/failed record, the record itself is the authority.
+	defer reservation.Release()
 
-	inst, err := runner.StartService(ctx, t, j)
+	inst, err := runner.StartServiceWithStarted(ctx, t, j, reservation.Release)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
@@ -591,6 +616,9 @@ func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (res
 		}
 	}
 
+	if req.Concurrency > flowrun.MaxConcurrency {
+		return nil, fmt.Errorf("%w: concurrency %d exceeds the host ceiling %d", ErrBadRequest, req.Concurrency, flowrun.MaxConcurrency)
+	}
 	samples, err := flow.ParseSamples(req.Samples)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
@@ -608,7 +636,20 @@ func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (res
 		Runner:      runner,
 		Policy:      policyFor(c.opts.Grants),
 		Concurrency: req.Concurrency,
-		Log:         func(format string, a ...any) { log.Printf("[srcos] flow "+format, a...) },
+		// The gateway admits each unit through the same quota lock as the task
+		// queue and service starts; a flow cannot race a submission past the
+		// aggregate ceiling.
+		Admit: func(ctx context.Context, u flow.Unit) (*flowrun.Admission, error) {
+			if u.Tool == nil {
+				return nil, fmt.Errorf("%w: flow unit has no tool", ErrBadRequest)
+			}
+			res, err := c.admit(ident.User, u.Tool, &job.Job{Params: u.Params}, "")
+			if err != nil {
+				return nil, err
+			}
+			return &flowrun.Admission{Release: res.Release, Bind: res.Bind}, nil
+		},
+		Log: func(format string, a ...any) { log.Printf("[srcos] flow "+format, a...) },
 	})
 
 	units, _, err := ex.Plan(f, samples, req.Params, "")
@@ -633,11 +674,11 @@ func (c *Controller) RunFlow(ident agenttoken.Identity, req FlowRunRequest) (res
 	// `flow status` and to the resume path (Run re-saves it as it progresses).
 	// The directory has to exist first: the record is written atomically through
 	// a temp file beside it.
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(config.DataDir(c.opts.ConfigDir), runDir, 0o755); err != nil {
 		return nil, err
 	}
 	recordPath := flow.RecordPath(config.DataDir(c.opts.ConfigDir), ident.User, runID)
-	if err := flow.SaveRun(recordPath, record); err != nil {
+	if err := flow.SaveRun(config.DataDir(c.opts.ConfigDir), recordPath, record); err != nil {
 		return nil, err
 	}
 
@@ -703,6 +744,12 @@ func translate(err error) error {
 // most this analysis can use", the grant's quota says "this is the most you
 // may take".
 func (c *Controller) checkQuota(user string, t *tool.Tool, j *job.Job) error {
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+	return c.checkQuotaLocked(user, t, j)
+}
+
+func (c *Controller) checkQuotaLocked(user string, t *tool.Tool, j *job.Job) error {
 	if c.opts.Grants == nil {
 		return nil
 	}
@@ -710,6 +757,51 @@ func (c *Controller) checkQuota(user string, t *tool.Tool, j *job.Job) error {
 	if q.IsZero() {
 		return nil
 	}
+	want := usageOf(t, j)
+	used, err := c.usageForLocked(user, t.ID)
+	if err != nil {
+		return err
+	}
+	return grant.CheckQuota(q, used, want)
+}
+
+// usageFor sums what a user is *currently consuming* of one tool, including
+// in-process reservations that have not reached an instance record yet.
+func (c *Controller) usageFor(user, toolID string) (grant.Usage, error) {
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+	return c.usageForLocked(user, toolID)
+}
+
+func (c *Controller) usageForLocked(user, toolID string) (grant.Usage, error) {
+	all, err := runtime.ListInstances(c.opts.ConfigDir)
+	if err != nil {
+		return grant.Usage{}, err
+	}
+	var u grant.Usage
+	live := map[string]bool{}
+	for _, inst := range all {
+		if inst.User != user || inst.Tool != toolID || !inst.State.ConsumesResources() {
+			continue
+		}
+		live[inst.ID] = true
+		u.Instances++
+		u.CPU += inst.CPURequest()
+		u.Memory += inst.MemoryRequestBytes()
+	}
+	for r := range c.reserved[user+"\x00"+toolID] {
+		if r.instanceID != "" && live[r.instanceID] {
+			continue // the record is already the authority for this unit
+		}
+		u.Instances += r.usage.Instances
+		u.CPU += r.usage.CPU
+		u.Memory += r.usage.Memory
+	}
+	return u, nil
+}
+
+// usageOf is what one more unit would consume.
+func usageOf(t *tool.Tool, j *job.Job) grant.Usage {
 	eff := job.EffectiveResources(j, t)
 	want := grant.Usage{Instances: 1, CPU: eff.CPU}
 	if eff.Memory != "" {
@@ -717,34 +809,80 @@ func (c *Controller) checkQuota(user string, t *tool.Tool, j *job.Job) error {
 			want.Memory = b
 		}
 	}
-	used, err := c.usageFor(user, t.ID)
-	if err != nil {
-		return err
-	}
-	return grant.CheckQuota(q, used, want)
+	return want
 }
 
-// usageFor sums what a user is *currently consuming* of one tool.
-//
-// Finished work does not count (a finished job holds nothing), and neither does
-// queued work: `pending` is a queue position, and charging for it would make a
-// queue impossible — the submission could not pass the check its own queue
-// position implies. What the ceiling bounds is simultaneous consumption.
-func (c *Controller) usageFor(user, toolID string) (grant.Usage, error) {
-	all, err := runtime.ListInstances(c.opts.ConfigDir)
-	if err != nil {
-		return grant.Usage{}, err
+// quotaReservation holds quota until the instance record becomes the
+// authority. Release is idempotent: every start path has several failure exits.
+type quotaReservation struct {
+	c     *Controller
+	key   string
+	usage grant.Usage
+	once  sync.Once
+	// instanceID is set as soon as it is known (the queue and service start
+	// paths know it immediately; a flow unit binds it after submit). Once the
+	// record with this id is consuming resources, the reservation is no longer
+	// added: the record and the reservation would otherwise charge the same
+	// unit twice.
+	instanceID string
+}
+
+// Reservation is the quota handle returned by AdmitFor.
+type Reservation = quotaReservation
+
+// Bind attaches the instance id to the reservation. It is called by the flow
+// runner after the job id exists.
+func (r *quotaReservation) Bind(instanceID string) {
+	if r == nil || instanceID == "" {
+		return
 	}
-	var u grant.Usage
-	for _, inst := range all {
-		if inst.User != user || inst.Tool != toolID || !inst.State.ConsumesResources() {
-			continue
+	r.c.quotaMu.Lock()
+	r.instanceID = instanceID
+	r.c.quotaMu.Unlock()
+}
+
+func (r *quotaReservation) Release() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.c.quotaMu.Lock()
+		defer r.c.quotaMu.Unlock()
+		if set := r.c.reserved[r.key]; set != nil {
+			delete(set, r)
+			if len(set) == 0 {
+				delete(r.c.reserved, r.key)
+			}
 		}
-		u.Instances++
-		u.CPU += inst.CPURequest()
-		u.Memory += inst.MemoryRequestBytes()
+	})
+}
+
+// admit checks the quota and reserves the unit in one critical section. Every
+// path that actually starts work (queue, service, flow unit) uses it, so two
+// concurrent starts cannot both pass the check and then both write a record.
+func (c *Controller) admit(user string, t *tool.Tool, j *job.Job, instanceID string) (*quotaReservation, error) {
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+	if c.opts.Grants != nil && !c.opts.Grants.Allowed(user, t.ID) {
+		return nil, fmt.Errorf("user %s is not authorized for tool %s", user, t.ID)
 	}
-	return u, nil
+	if err := c.checkQuotaLocked(user, t, j); err != nil {
+		return nil, err
+	}
+	key := user + "\x00" + t.ID
+	r := &quotaReservation{c: c, key: key, usage: usageOf(t, j), instanceID: instanceID}
+	if c.reserved[key] == nil {
+		c.reserved[key] = map[*quotaReservation]struct{}{}
+	}
+	c.reserved[key][r] = struct{}{}
+	return r, nil
+}
+
+// AdmitFor is the exported admission hook for callers outside the package
+// (the admin console starting a service on behalf of a user). The flow runner
+// uses the Unbound/Bind pair through its own Admit option.
+func (c *Controller) AdmitFor(user string, t *tool.Tool, j *job.Job, instanceID string) (*Reservation, error) {
+	return c.admit(user, t, j, instanceID)
 }
 
 // runnerFor builds the runner that starts a unit for one user. Tasks do not

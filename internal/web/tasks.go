@@ -149,7 +149,7 @@ func TaskPage(siteTitle string, view inspect.InstanceView, artifacts []inspect.A
 		acts += fmt.Sprintf(`<a class="tk-open" href="%s/">打开服务</a>`, esc(view.RoutePath))
 	}
 	if !stateFinished(view.State) {
-		acts += fmt.Sprintf(`<button type="button" class="tk-stop" onclick="tkStop('%s')">停止</button>`, esc(view.ID))
+		acts += fmt.Sprintf(`<button type="button" class="tk-stop" onclick="tkStop(%s)">停止</button>`, jsString(view.ID))
 	}
 	if acts != "" {
 		fmt.Fprintf(&b, `<p class="tk-actions">%s</p>`, acts)

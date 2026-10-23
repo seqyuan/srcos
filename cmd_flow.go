@@ -400,7 +400,7 @@ func runFlowCancel(args []string) {
 	}
 
 	// 1. The flag: the running scheduler notices it between jobs.
-	if err := flow.RequestCancel(flow.CancelPath(dataDir, user, runID)); err != nil {
+	if err := flow.RequestCancel(dataDir, flow.CancelPath(dataDir, user, runID)); err != nil {
 		fatalf("could not write the cancel flag: %v", err)
 	}
 	// 2. The jobs already in flight (read from disk by StopRun: the scheduler
@@ -413,7 +413,7 @@ func runFlowCancel(args []string) {
 	if record.State == flow.RunRunning {
 		record.State = flow.RunCancelled
 		record.EndedAt = time.Now().UTC()
-		if err := flow.SaveRun(flow.RecordPath(dataDir, user, runID), record); err != nil {
+		if err := flow.SaveRun(dataDir, flow.RecordPath(dataDir, user, runID), record); err != nil {
 			fatalf("%v", err)
 		}
 	}

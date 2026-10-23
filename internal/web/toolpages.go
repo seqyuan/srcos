@@ -76,8 +76,8 @@ func toolsRequestableSection(rs []inspect.ToolView) string {
   <div class="card-head"><span class="card-name">%s</span><span class="badge">可申请</span></div>
   <div class="card-desc">%s</div>
   <div class="card-meta">%s v%s</div>
-  <button type="button" class="btn" style="margin-top:10px" onclick="reqAsk('%s')">申请访问</button>
-</div>`, esc(t.Name), esc(desc), esc(t.ID), esc(t.Version), esc(t.ID))
+  <button type="button" class="btn" style="margin-top:10px" onclick="reqAsk(%s)">申请访问</button>
+</div>`, esc(t.Name), esc(desc), esc(t.ID), esc(t.Version), jsString(t.ID))
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -183,7 +183,7 @@ func servicePanel(inst *inspect.InstanceView) string {
 		fmt.Fprintf(&b, ` · <a href="/tasks/%s">上次运行</a>`, esc(url.PathEscape(inst.ID)))
 	} else {
 		fmt.Fprintf(&b, ` · <a href="/tasks/%s">详情与日志</a>`, esc(url.PathEscape(inst.ID)))
-		fmt.Fprintf(&b, `<button type="button" class="svc-stop" onclick="svcStop('%s')">停止</button>`, esc(inst.ID))
+		fmt.Fprintf(&b, `<button type="button" class="svc-stop" onclick="svcStop(%s)">停止</button>`, jsString(inst.ID))
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -234,6 +234,15 @@ func field(toolID string, in tool.Input) string {
 
 	switch in.Type {
 	case tool.TypePath, tool.TypeFile, tool.TypeDirectory, tool.TypeDirPath:
+		// A raw file/directory input (no `from`) is a literal sandbox path,
+		// not a storage-bound selection. The path picker only knows storages,
+		// so a text field is the honest control rather than a picker that
+		// always answers "not storage-bound".
+		if in.Type != tool.TypePath && strings.TrimSpace(in.From) == "" {
+			return fmt.Sprintf(
+				`<label>%s<input type="text" name="%s" value="%s" placeholder="/workspace/..."%s>%s</label>`,
+				esc(label), esc(in.Name), esc(def), req, desc)
+		}
 		// The primitive control, not a hand-rolled picker: the same element a
 		// tool's own UI embeds.
 		sel := ""

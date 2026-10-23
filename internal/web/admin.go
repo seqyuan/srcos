@@ -84,7 +84,7 @@ func adminStartServiceForm(data AdminData) string {
 	}
 	b.WriteString(`</select>`)
 	b.WriteString(`<button type="button" class="adm-btn primary" onclick="admStartService(this)">启动服务</button>`)
-	b.WriteString(`<span class="adm-hint-inline">以该用户身份启动一个实例（等价于 <span class="mono">srcos svc start --user</span>）；已存在则先停后起。</span>`)
+	b.WriteString(`<span class="adm-hint-inline">以该用户身份启动一个实例（等价于 <span class="mono">srcos svc start --user</span>）；该用户必须已有该工具的 Grant；已存在则先停后起。</span>`)
 	b.WriteString(`</form>`)
 	return b.String()
 }
@@ -104,12 +104,12 @@ func adminRequestsTable(reqs []accessrequest.Request) string {
       <td><code>%s</code></td>
       <td>%s</td>
       <td class="right">
-        <button type="button" class="adm-btn primary sm" onclick="admApproveRequest('%s')">批准</button>
-        <button type="button" class="adm-btn sm danger" onclick="admDenyRequest('%s')">拒绝</button>
+        <button type="button" class="adm-btn primary sm" onclick="admApproveRequest(%s)">批准</button>
+        <button type="button" class="adm-btn sm danger" onclick="admDenyRequest(%s)">拒绝</button>
       </td>
     </tr>`,
 			esc(r.CreatedAt.Local().Format("2006-01-02 15:04")), esc(r.User), esc(r.Tool),
-			esc(r.Reason), esc(r.ID), esc(r.ID))
+			esc(r.Reason), jsString(r.ID), jsString(r.ID))
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
@@ -153,10 +153,10 @@ func adminInstancesTable(instances []inspect.AdminInstance) string {
 
 		action := `<span class="muted">-</span>`
 		if !instanceTerminal(inst.State) {
-			action = fmt.Sprintf(`<button type="button" class="adm-btn sm danger" onclick="admStop('%s')">强制停止</button>
-        <button type="button" class="adm-btn sm" onclick="admLogs('%s')">日志</button>`, esc(inst.ID), esc(inst.ID))
+			action = fmt.Sprintf(`<button type="button" class="adm-btn sm danger" onclick="admStop(%s)">强制停止</button>
+        <button type="button" class="adm-btn sm" onclick="admLogs(%s)">日志</button>`, jsString(inst.ID), jsString(inst.ID))
 		} else {
-			action = fmt.Sprintf(`<button type="button" class="adm-btn sm" onclick="admLogs('%s')">日志</button>`, esc(inst.ID))
+			action = fmt.Sprintf(`<button type="button" class="adm-btn sm" onclick="admLogs(%s)">日志</button>`, jsString(inst.ID))
 		}
 
 		fmt.Fprintf(&b, `<tr>
@@ -252,9 +252,9 @@ func grantForm(t inspect.AdminTool) string {
       </div>
       <div class="adm-actions">
         <button type="button" class="adm-btn primary sm" onclick="admSaveGrant(this)">保存</button>
-        <button type="button" class="adm-btn sm danger" onclick="admRemoveGrant('%s')">删除授权（等于下架）</button>
+        <button type="button" class="adm-btn sm danger" onclick="admRemoveGrant(%s)">删除授权（等于下架）</button>
       </div>
-    </div>`, esc(t.ID), esc(users), esc(groups), checked, reqChecked, maxCPU, esc(maxMemory), maxInstances, esc(t.ID))
+    </div>`, esc(t.ID), esc(users), esc(groups), checked, reqChecked, maxCPU, esc(maxMemory), maxInstances, jsString(t.ID))
 }
 
 // adminUsersTable renders the groups and admins, with an editor that replaces
@@ -290,8 +290,8 @@ func adminUsersTable(data AdminData) string {
 		b.WriteString(`<tr><td colspan="2" class="adm-empty">没有管理员（应当手动编辑 grants.yaml 修复）。</td></tr>`)
 	}
 	for _, a := range data.Admins {
-		fmt.Fprintf(&b, `<tr><td class="mono">%s</td><td class="right"><button type="button" class="adm-btn sm danger" onclick="admRemoveAdmin('%s')">移除</button></td></tr>`,
-			esc(a), esc(a))
+		fmt.Fprintf(&b, `<tr><td class="mono">%s</td><td class="right"><button type="button" class="adm-btn sm danger" onclick="admRemoveAdmin(%s)">移除</button></td></tr>`,
+			esc(a), jsString(a))
 	}
 	b.WriteString(`<tr><td colspan="2">
     <div class="grant-form" data-admin-add="1">

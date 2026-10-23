@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/route"
+	"github.com/seqyuan/srcos/internal/safefs"
 )
 
 // The rendezvous directory is the control channel between a compute node and
@@ -57,14 +59,43 @@ const (
 	StateDeleted   = "deleted"
 )
 
+// ensureRealDir refuses a directory that is itself a symlink. The rendezvous
+// directory is on a shared filesystem and every instance runs as the same OS
+// user, so a tool can otherwise replace its own control directory with a link
+// and make SRCOS read — or, worse, ClearRendezvous delete — somewhere else.
+func ensureRealDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("rendezvous directory %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("rendezvous path %s is not a directory", dir)
+	}
+	return nil
+}
+
 // WriteRendezvous writes one field atomically.
 func WriteRendezvous(dir, name, value string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	if err := ensureRealDir(dir); err != nil {
+		return err
+	}
 	dst := filepath.Join(dir, name)
 	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, []byte(value+"\n"), 0o644); err != nil {
+	f, err := safefs.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write([]byte(value + "\n")); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, dst)
@@ -73,6 +104,9 @@ func WriteRendezvous(dir, name, value string) error {
 // ReadRendezvous reads one field. A missing field is an error, never an empty
 // success: for liveness questions "no answer" must not read as "alive".
 func ReadRendezvous(dir, name string) (string, error) {
+	if err := ensureRealDir(dir); err != nil {
+		return "", err
+	}
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		return "", err
@@ -83,11 +117,18 @@ func ReadRendezvous(dir, name string) (string, error) {
 // ClearRendezvous removes every field, so a stale endpoint from a previous run
 // of the same instance cannot make a healthcheck pass against a dead process.
 func ClearRendezvous(dir string) error {
-	entries, err := os.ReadDir(dir)
+	fi, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to clear %s: it is a symlink", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return err
 	}
 	for _, e := range entries {
@@ -101,13 +142,30 @@ func ClearRendezvous(dir string) error {
 	return nil
 }
 
+// endpointHostRe is deliberately narrower than a general URI host: it is a
+// compute-node DNS name or an IP literal. In particular it must not start with
+// '-', because the value is later handed to ssh as its destination argument;
+// ssh would parse "-oProxyCommand=..." as an option and execute it on the
+// login node.
+var endpointHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+
+func validEndpointHost(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasPrefix(host, "-") {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true // IPv4/IPv6 literals are valid ssh destinations
+	}
+	return endpointHostRe.MatchString(host)
+}
+
 // ReadEndpoint parses the endpoint field into a route target.
 //
-// The host is validated as loopback-or-remote-allowed here because this value
-// originates on a compute node: a machine that has been compromised, or a job
-// that writes garbage, must not be able to point the gateway at an arbitrary
-// address. A compute node's own address is legitimate; anything resolvable from
-// a shared file is not trusted further than that.
+// The host is validated here because this value originates on a compute node:
+// a machine that has been compromised, or a job that writes garbage, must not
+// be able to point the gateway at an arbitrary address or inject an ssh option.
+// A compute node's own address is legitimate; anything resolvable from a shared
+// file is not trusted further than that.
 func ReadEndpoint(dir string) (route.Target, error) {
 	raw, err := ReadRendezvous(dir, FileEndpoint)
 	if err != nil {
@@ -121,8 +179,8 @@ func ReadEndpoint(dir string) (route.Target, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		return route.Target{}, fmt.Errorf("endpoint %q has an invalid port", raw)
 	}
-	if host == "" {
-		return route.Target{}, fmt.Errorf("endpoint %q has an empty host", raw)
+	if !validEndpointHost(host) {
+		return route.Target{}, fmt.Errorf("endpoint %q has an invalid host", raw)
 	}
 	return route.Target{Host: host, Port: port}, nil
 }
@@ -225,7 +283,10 @@ func (t *Tunnel) Args() []string {
 		"-L", fmt.Sprintf("127.0.0.1:%d:%s:%d", t.LocalPort, t.RemoteHost, t.RemotePort),
 	}
 	args = append(args, t.ExtraArgs...)
-	return append(args, dest)
+	// `--` ends option parsing: even if a caller slipped a value through, ssh
+	// must treat it as a destination, never as an option. ReadEndpoint already
+	// validates the host; this is the second lock on the same door.
+	return append(args, "--", dest)
 }
 
 // Start launches the tunnel and waits until the forward actually works.

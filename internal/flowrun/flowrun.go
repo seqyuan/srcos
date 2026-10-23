@@ -32,10 +32,19 @@ import (
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
 // Options is the deployment the runner acts in.
+// Admission is one unit's quota reservation. Release is idempotent; Bind
+// attaches the instance id once the submitted job id exists, so the record and
+// the reservation do not charge the same unit twice.
+type Admission struct {
+	Release func()
+	Bind    func(instanceID string)
+}
+
 type Options struct {
 	ConfigDir string
 	DataDir   string
@@ -54,6 +63,11 @@ type Options struct {
 	// (0 → DefaultConcurrency). It is the flow's resource control: a login node
 	// is shared, and "one flow" must not mean "all of it".
 	Concurrency int
+	// Admit reserves quota for one unit before it is submitted and returns a
+	// release function. When set (the gateway's path), it replaces the local
+	// checkQuota and makes the check+reservation atomic with the queue and
+	// service start paths. Nil falls back to checkQuota (CLI/tests).
+	Admit func(ctx context.Context, u flow.Unit) (*Admission, error)
 	// RetryBackoff is how long to wait before the nth retry of a unit
 	// (0 → retryBackoff). Injected so tests do not sleep.
 	RetryBackoff func(attempt int) time.Duration
@@ -61,6 +75,40 @@ type Options struct {
 	Sleep func(ctx context.Context, d time.Duration) error
 	// Log receives progress lines (the CLI prints them; tests collect them).
 	Log func(format string, a ...any)
+}
+
+// MaxConcurrency is the server-side ceiling on a flow's parallelism. It is a
+// host-protection limit, not the per-user quota: a caller can otherwise ask for
+// thousands of simultaneous units and bypass the task queue's four-worker cap.
+const MaxConcurrency = 32
+
+// MaxGlobalUnits bounds units in flight across *all* flows in this process.
+// Per-run concurrency alone is not enough: a user can start many flows, and
+// each one would otherwise be entitled to its own window. The task queue has a
+// similar host-wide cap; flows bypass it because they schedule their own DAG.
+const MaxGlobalUnits = 16
+
+// globalUnitSlots is the process-wide flow window. A slot is taken before the
+// job is submitted and released when its runJob returns, so a scheduler that
+// exits early cannot leak capacity.
+var globalUnitSlots = make(chan struct{}, MaxGlobalUnits)
+
+func acquireUnitSlot(ctx context.Context) bool {
+	select {
+	case globalUnitSlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-time.After(200 * time.Millisecond):
+		return false
+	}
+}
+
+func releaseUnitSlot() {
+	select {
+	case <-globalUnitSlots:
+	default:
+	}
 }
 
 // DefaultConcurrency is the flow-level parallelism cap.
@@ -103,6 +151,12 @@ func New(opts Options) *Runner {
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = DefaultConcurrency
+	}
+	if opts.Concurrency > MaxConcurrency {
+		opts.Concurrency = MaxConcurrency
+	}
+	if opts.DataDir == "" && opts.ConfigDir != "" {
+		opts.DataDir = config.DataDir(opts.ConfigDir)
 	}
 	if opts.RetryBackoff == nil {
 		opts.RetryBackoff = retryBackoff
@@ -237,13 +291,13 @@ type result struct {
 // another process. The loop notices it between jobs, stops launching, and marks
 // the run cancelled; the in-flight jobs are stopped by whoever wrote the flag.
 func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record *flow.Run, samples *flow.Samples, runDir string) error {
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(r.Opts.DataDir, runDir, 0o755); err != nil {
 		return err
 	}
 	// Archive the sample table first: a run must be reproducible from its own
 	// directory, and the operator's file will change tomorrow.
 	if samples != nil && len(samples.Rows) > 0 {
-		if err := archiveSamples(samples, runDir); err != nil {
+		if err := archiveSamples(r.Opts.DataDir, samples, runDir); err != nil {
 			r.Opts.Log("warning: could not archive the sample table: %v", err)
 		}
 	}
@@ -291,6 +345,7 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 	}
 
 	for {
+		blockedOnGlobal := false
 		if !cancelled && flow.IsCancelled(cancelPath) {
 			cancelled = true
 			r.Opts.Log("cancel requested: no new jobs will be submitted")
@@ -299,6 +354,7 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 		now := r.Opts.Now()
 		launched := 0
 		if !cancelled {
+		nodeLoop:
 			for _, nodeID := range nodeOrder {
 				if inFlight >= r.Opts.Concurrency {
 					break // the window is the bound for the whole run, not per node
@@ -373,12 +429,34 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 						}
 					}
 					// Quota: the flow must not be a way around the aggregate
-					// ceiling a grant sets for this user and tool.
-					if err := r.checkQuota(u.plan, units); err != nil {
+					// ceiling a grant sets for this user and tool. When the
+					// controller supplies Admit, reservation and check are one
+					// atomic operation across queue/service/flow.
+					var admission *Admission
+					var admitErr error
+					if r.Opts.Admit != nil {
+						admission, admitErr = r.Opts.Admit(ctx, u.plan)
+					} else {
+						admitErr = r.checkQuota(u.plan, units)
+					}
+					if admitErr != nil {
 						u.failed = true
-						u.err = err.Error()
-						r.Opts.Log("fail  %-14s sample %s: %v", u.plan.Node, u.plan.Segment, err)
+						u.err = admitErr.Error()
+						r.Opts.Log("fail  %-14s sample %s: %v", u.plan.Node, u.plan.Segment, admitErr)
 						continue
+					}
+					releaseAdmission := func() {
+						if admission != nil && admission.Release != nil {
+							admission.Release()
+						}
+					}
+					// The host-wide window is acquired before the submission:
+					// once job.json is claimed, leaving it unlaunched would
+					// orphan a job nobody owns.
+					if !acquireUnitSlot(ctx) {
+						releaseAdmission()
+						blockedOnGlobal = true
+						break nodeLoop
 					}
 					// The job is written here, in the loop, before the
 					// goroutine starts it: a `flow cancel` in another process
@@ -386,6 +464,8 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 					// only exists once the job has been submitted.
 					jobID, err := r.submit(ctx, u.plan)
 					if err != nil {
+						releaseAdmission()
+						releaseUnitSlot()
 						if jobID != "" {
 							ns.JobIDs = append(ns.JobIDs, jobID)
 						}
@@ -396,10 +476,16 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 						continue
 					}
 					ns.JobIDs = append(ns.JobIDs, jobID)
+					instanceID := runtime.InstanceID(r.Opts.User, u.plan.ToolID, jobID)
+					if admission != nil && admission.Bind != nil {
+						admission.Bind(instanceID)
+					}
 					// Persist the id now: a `flow cancel` in another process
 					// finds running jobs by reading this file, so a job that is
 					// not yet recorded is a job that cannot be stopped.
 					if err := r.save(record); err != nil {
+						releaseAdmission()
+						releaseUnitSlot()
 						return err
 					}
 					u.attempts++
@@ -409,17 +495,29 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 					ns.AddUnitAttempt(u.plan.Segment)
 					inFlight++
 					launched++
-					go func(u *unit, jobID string) {
-						err := r.runJob(ctx, u.plan, jobID)
+					go func(u *unit, jobID string, release func()) {
+						defer releaseUnitSlot()
+						if release != nil {
+							defer release()
+						}
+						err := r.runJob(ctx, u.plan, jobID, release)
 						results <- result{key: u.key(), jobID: jobID, err: err,
 							instanceID: runtime.InstanceID(r.Opts.User, u.plan.ToolID, jobID)}
-					}(u, jobID)
+					}(u, jobID, releaseAdmission)
 				}
 			}
 		}
 
 		if inFlight == 0 {
 			if launched > 0 {
+				continue
+			}
+			if blockedOnGlobal {
+				// Other flows hold every host-wide slot. Retry rather than
+				// concluding that this run has nothing left to do.
+				if err := r.Opts.Sleep(ctx, 200*time.Millisecond); err != nil {
+					return err
+				}
 				continue
 			}
 			// Nothing is running, nothing could be launched: either the run is
@@ -575,7 +673,7 @@ func (r *Runner) settleNode(f *flow.Flow, record *flow.Run, ns *flow.NodeState, 
 		// The sign file is the durable "this step is done", and writing it on
 		// success is what makes the file the authority rather than a second
 		// opinion.
-		if err := flow.Sign(flow.SignPath(r.Opts.DataDir, r.Opts.User, record.ID, ns.ID)); err != nil {
+		if err := flow.Sign(r.Opts.DataDir, flow.SignPath(r.Opts.DataDir, r.Opts.User, record.ID, ns.ID)); err != nil {
 			r.Opts.Log("warning: could not write the sign file for %s: %v", ns.ID, err)
 		}
 	case anyFailed && !busy:
@@ -671,15 +769,15 @@ func findUnit(units []*unit, key string) *unit {
 // runJob executes an already-submitted job to completion.
 //
 // It is called from a worker goroutine and must not touch runner state.
-func (r *Runner) runJob(ctx context.Context, u flow.Unit, jobID string) error {
+func (r *Runner) runJob(ctx context.Context, u flow.Unit, jobID string, onStarted func()) error {
 	dir := filepath.Join(config.JobsDir(r.Opts.ConfigDir, r.Opts.User, u.ToolID), jobID)
 	j, err := job.Load(dir)
 	if err != nil {
 		return err
 	}
-	inst, err := r.Opts.Runner.RunTask(ctx, u.Tool, &job.Loaded{
+	inst, err := r.Opts.Runner.RunTaskWithStarted(ctx, u.Tool, &job.Loaded{
 		ID: jobID, Dir: dir, Path: filepath.Join(dir, "job.json"), Job: j,
-	})
+	}, onStarted)
 	if err != nil {
 		return err
 	}
@@ -729,7 +827,7 @@ func (r *Runner) submit(ctx context.Context, unit flow.Unit) (string, error) {
 	// The unit's working directory exists before the tool runs: a tool may copy
 	// or write into it without creating it first, and "mkdir -p" is not part of
 	// the tool contract.
-	if err := os.MkdirAll(flow.SampleDir(r.Opts.DataDir, r.Opts.User, unit.Tags["run"], unit.Node, unit.Segment), 0o755); err != nil {
+	if err := safefs.MkdirAllBeneath(r.Opts.DataDir, flow.SampleDir(r.Opts.DataDir, r.Opts.User, unit.Tags["run"], unit.Node, unit.Segment), 0o755); err != nil {
 		return "", err
 	}
 	j := &job.Job{
@@ -818,7 +916,7 @@ func (r *Runner) StopRun(ctx context.Context, f *flow.Flow, runID string) (int, 
 }
 
 // archiveSamples copies the submitted table into the run directory.
-func archiveSamples(samples *flow.Samples, runDir string) error {
+func archiveSamples(root string, samples *flow.Samples, runDir string) error {
 	var b strings.Builder
 	b.WriteString(strings.Join(samples.Columns, ","))
 	b.WriteString("\n")
@@ -834,12 +932,12 @@ func archiveSamples(samples *flow.Samples, runDir string) error {
 		b.WriteString(strings.Join(fields, ","))
 		b.WriteString("\n")
 	}
-	return os.WriteFile(runDir+"/"+flow.SamplesCopyName, []byte(b.String()), 0o644)
+	return safefs.WriteFileBeneath(root, runDir+"/"+flow.SamplesCopyName, []byte(b.String()), 0o644)
 }
 
 // save writes the run record.
 func (r *Runner) save(record *flow.Run) error {
-	return flow.SaveRun(flow.RecordPath(r.Opts.DataDir, r.Opts.User, record.ID), record)
+	return flow.SaveRun(r.Opts.DataDir, flow.RecordPath(r.Opts.DataDir, r.Opts.User, record.ID), record)
 }
 
 func nodeOf(f *flow.Flow, id string) *flow.Node {

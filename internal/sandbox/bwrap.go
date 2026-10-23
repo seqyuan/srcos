@@ -19,6 +19,9 @@ type BwrapOptions struct {
 	Env []string
 	// Argv is the command to execute inside the sandbox.
 	Argv []string
+	// Network is "none" to create a fresh network namespace. Empty (the zero
+	// value) keeps the host namespace, which is what the probe and tests use.
+	Network string
 }
 
 // systemRoDirs are the host directories a Linux userspace needs to execute
@@ -81,6 +84,13 @@ func BwrapArgv(spec *Spec, o BwrapOptions) []string {
 		// A fresh tmpfs for /tmp: scratch space that never touches the host
 		// and disappears with the instance.
 		"--tmpfs", PathTmp,
+	}
+	if o.Network == "none" {
+		// Without this the sandbox shares the host network namespace. Every
+		// SRCOS instance runs as the same OS user and services listen on
+		// 127.0.0.1, so sharing it lets one user's task reach another user's
+		// service (and bind ports the gateway did not publish).
+		args = append(args, "--unshare-net")
 	}
 
 	// Host userspace, read-only. We deliberately do NOT `--ro-bind / /`:

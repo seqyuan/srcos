@@ -261,7 +261,7 @@ func TestTouchedSignSkipsANode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := flow.Sign(flow.SignPath(dataDir, f.user, "run-1", "count")); err != nil {
+	if err := flow.Sign(dataDir, flow.SignPath(dataDir, f.user, "run-1", "count")); err != nil {
 		t.Fatal(err)
 	}
 	record := f.runOnce(t, "run-1")
@@ -687,7 +687,7 @@ func TestStopRunStopsInFlightJobs(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 running:
-	if err := flow.RequestCancel(flow.CancelPath(dataDir, f.user, "run-1")); err != nil {
+	if err := flow.RequestCancel(dataDir, flow.CancelPath(dataDir, f.user, "run-1")); err != nil {
 		t.Fatal(err)
 	}
 	// A cancel is a cross-process operation: StopRun reads the record from disk
@@ -748,4 +748,11 @@ func nodeErrors(record *flow.Run, nodeID string) []string {
 		}
 	}
 	return out
+}
+
+func TestConcurrencyIsClampedToTheHostCeiling(t *testing.T) {
+	r := New(Options{Concurrency: MaxConcurrency + 1000})
+	if r.Opts.Concurrency != MaxConcurrency {
+		t.Fatalf("Concurrency = %d, want the ceiling %d", r.Opts.Concurrency, MaxConcurrency)
+	}
 }

@@ -806,3 +806,83 @@ func TestDigestSkipsBuildAndVCSJunk(t *testing.T) {
 		t.Fatal("build/VCS junk must not change the digest")
 	}
 }
+
+const minimalBwrapTask = minimalTask + "\nsandbox: bwrap\n"
+
+const minimalService = `
+schemaVersion: 1
+id: web
+version: 0.1.0
+name: Web
+kind: service
+backend: local
+sandbox: bwrap
+entry: work.sh
+interface:
+  inputs: []
+  outputs: []
+resources: {cpu: 1, memory: "1Gi"}
+ingress: {healthcheck: {path: "/"}}
+lifecycle: {max_lifetime: "1h"}
+`
+
+func TestNetworkDefaultsAndValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		want    NetworkMode
+		wantErr string
+	}{
+		{"bwrap task defaults to none", minimalBwrapTask, NetworkNone, ""},
+		{"sandbox none task defaults to host", minimalTask, NetworkHost, ""},
+		{"bwrap service defaults to host", minimalService, NetworkHost, ""},
+		{"explicit host is kept", minimalBwrapTask + "network: host\n", NetworkHost, ""},
+		{"service cannot isolate its ingress", minimalService + "network: none\n", "", "network: host"},
+		{"sandbox none cannot enforce none", minimalTask + "network: none\n", "", "requires a mount namespace"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := writeTool(t, map[string]string{"tool.yaml": c.yaml, "work.sh": minimalWork})
+			tl, err := Load(dir)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("error = %v, want it to mention %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if tl.Network != c.want {
+				t.Fatalf("Network = %q, want %q", tl.Network, c.want)
+			}
+		})
+	}
+}
+
+func TestPathSelectDefaultsToDirectory(t *testing.T) {
+	const manifest = `
+schemaVersion: 1
+id: pathy
+version: 0.1.0
+name: Pathy
+kind: task
+backend: local
+sandbox: bwrap
+entry: work.sh
+requires_storages: [data]
+interface:
+  inputs:
+    - {name: ref, type: path, from: data}
+  outputs: []
+resources: {cpu: 1, memory: "1Gi", walltime: "0:10:00"}
+`
+	dir := writeTool(t, map[string]string{"tool.yaml": manifest, "work.sh": minimalWork})
+	tl, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := tl.Interface.Inputs[0].Select; got != "directory" {
+		t.Fatalf("path select = %q, want the documented default directory", got)
+	}
+}

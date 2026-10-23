@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/inspect"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -42,10 +44,23 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	username := h.requireAdmin(w, r)
-	if username == "" {
+	ident, ok := h.requireAdmin(w, r)
+	if !ok {
 		return true
 	}
+	// Administering the platform is not an execution capability. The agent
+	// scope set has no admin scope, so allowing a bearer token here would make
+	// "admin + submit" (or even an instance token minted with read) a policy
+	// administrator. Keep the management surface session-only, like /api/tokens.
+	if ident.Agent {
+		log.Printf("[srcos] agent %s refused (management is session-only): %s %s", ident.Describe(), r.Method, r.URL.Path)
+		h.auditDeny(r, &ident, "session", "the management surface requires a browser session; agent tokens cannot administer it")
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "the management surface requires a browser session; agent tokens cannot administer it",
+		})
+		return true
+	}
+	username := ident.User
 
 	// Flows have their own file (the management surface's write half is the
 	// canvas): /api/admin/flows...
@@ -137,10 +152,10 @@ func (h *Handler) adminHandler(w http.ResponseWriter, r *http.Request) bool {
 
 // requireAdmin resolves the identity and refuses anyone the policy does not
 // call an admin.
-func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) string {
+func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (agenttoken.Identity, bool) {
 	ident, ok := h.identity(w, r)
 	if !ok {
-		return ""
+		return agenttoken.Identity{}, false
 	}
 	if !h.opts.Policy.IsAdmin(ident.User) {
 		// 403, not 404: an authenticated user is allowed to know that a
@@ -148,9 +163,9 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) string {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "this is an administrator-only surface",
 		})
-		return ""
+		return agenttoken.Identity{}, false
 	}
-	return ident.User
+	return ident, true
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -237,6 +252,15 @@ func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, use
 		})
 		return
 	}
+	// The operator may start a service *for* a user, but not grant it: access
+	// is still the user's Grant, and "why can alice use this" must point at a
+	// line in grants.yaml. Grant the tool first, then start it.
+	if h.opts.Policy != nil && !h.opts.Policy.Allowed(user, t.ID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "user " + user + " has no grant for tool " + t.ID + "; grant it first",
+		})
+		return
+	}
 
 	runner := h.opts.Runner.ForUser(user)
 	// Hold the (user, tool) start lock across the whole replacement, so a
@@ -252,7 +276,25 @@ func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, use
 			_ = runner.StopService(r.Context(), prev)
 		}
 	}
-	inst, err := runner.StartService(r.Context(), t, nil)
+
+	// Quota is the user's ceiling, not the operator's: starting on their behalf
+	// still consumes their allowance. Admission happens *after* stopping the
+	// predecessor (the replacement frees its slot), and the reservation is
+	// released as soon as the record says `starting`.
+	var reservation *execute.Reservation
+	if h.opts.Execute != nil {
+		reservation, err = h.opts.Execute.AdmitFor(user, t, nil, runtime.InstanceID(user, t.ID, ""))
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		defer reservation.Release()
+	}
+	var onStarted func()
+	if reservation != nil {
+		onStarted = reservation.Release
+	}
+	inst, err := runner.StartServiceWithStarted(r.Context(), t, nil, onStarted)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -369,8 +411,7 @@ func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, username
 			MaxInstances: body.MaxInstances,
 		},
 	}
-	policy.SetGrant(g)
-	if err := h.savePolicy(); err != nil {
+	if err := h.mutatePolicy(func() { policy.SetGrant(g) }); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -384,11 +425,18 @@ func (h *Handler) adminSetGrant(w http.ResponseWriter, r *http.Request, username
 }
 
 func (h *Handler) adminRemoveGrant(w http.ResponseWriter, r *http.Request, username, toolID string) {
-	if !h.opts.Policy.RemoveGrant(toolID) {
+	found := false
+	for _, g := range h.opts.Policy.Snapshot().Grants {
+		if g.Tool == toolID {
+			found = true
+			break
+		}
+	}
+	if !found {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no grant for " + toolID})
 		return
 	}
-	if err := h.savePolicy(); err != nil {
+	if err := h.mutatePolicy(func() { h.opts.Policy.RemoveGrant(toolID) }); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -427,8 +475,7 @@ func (h *Handler) adminSetGroup(w http.ResponseWriter, r *http.Request, username
 			return
 		}
 	}
-	h.opts.Policy.SetGroup(body.Name, body.Users)
-	if err := h.savePolicy(); err != nil {
+	if err := h.mutatePolicy(func() { h.opts.Policy.SetGroup(body.Name, body.Users) }); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -455,8 +502,7 @@ func (h *Handler) adminSetAdmins(w http.ResponseWriter, r *http.Request, usernam
 			"who can manage it — edit config/grants.yaml by hand if that is really what you want"})
 		return
 	}
-	h.opts.Policy.SetAdmins(body.Admins)
-	if err := h.savePolicy(); err != nil {
+	if err := h.mutatePolicy(func() { h.opts.Policy.SetAdmins(body.Admins) }); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -502,6 +548,21 @@ func (h *Handler) adminAudit(w http.ResponseWriter, r *http.Request) {
 		events = []audit.Event{} // JSON [] rather than null
 	}
 	writeJSON(w, 200, map[string]any{"events": events, "count": len(events)})
+}
+
+// mutatePolicy applies a mutation to the live policy, persists it, and rolls
+// back if the save fails. The lock covers the snapshot, mutation and save, so
+// two concurrent admin edits cannot persist one over the other's snapshot.
+func (h *Handler) mutatePolicy(fn func()) error {
+	h.policySaveMu.Lock()
+	defer h.policySaveMu.Unlock()
+	prev := h.opts.Policy.Snapshot()
+	fn()
+	if err := h.savePolicy(); err != nil {
+		h.opts.Policy.ReplaceWith(prev)
+		return err
+	}
+	return nil
 }
 
 // savePolicy persists the live policy.

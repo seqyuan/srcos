@@ -64,10 +64,24 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	sendHTML(w, 200, web.LoginPage(s.siteTitle, "", next))
 }
 
-// validLoginNext restricts post-login redirects to in-site proxy URLs,
-// preventing open-redirect abuse.
+// validLoginNext restricts post-login redirects to in-site paths, preventing
+// open-redirect abuse while preserving deep links to /tasks, /view, /admin, ...
+//
+// A leading single slash, no scheme/host, and no backslash/control characters
+// are enough: a browser treats the result as a path on this origin. The old
+// /proxy/-only rule silently threw away every non-proxy destination.
 func validLoginNext(next string) bool {
-	return strings.HasPrefix(next, "/proxy/") && !strings.HasPrefix(next, "//")
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return false
+	}
+	if strings.ContainsAny(next, "\\\r\n") {
+		return false
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" {
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

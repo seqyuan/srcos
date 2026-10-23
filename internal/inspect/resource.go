@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/resource"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 )
@@ -147,16 +149,29 @@ func (r *Reader) ResolveResource(username string, req ResourceRequest) (*Resourc
 	if rel != "" {
 		sandboxPath = root + "/" + filepath.ToSlash(rel)
 	}
-	host, err := resolveHost(spec, sandboxPath)
+	host, mount, err := resolveHost(spec, sandboxPath)
 	if err != nil {
 		return nil, err
 	}
-	fi, err := os.Stat(host)
+	// O_NONBLOCK keeps a FIFO planted in a workspace from hanging a metadata
+	// request; regular files and directories ignore it.
+	f, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, sandboxPath)
 		}
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	defer f.Close()
+	if err := safefs.VerifyOpen(f, mount.HostPath); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	if !fi.Mode().IsRegular() && !fi.IsDir() {
+		return nil, fmt.Errorf("%w: %s is not a regular file or directory", ErrForbidden, sandboxPath)
 	}
 
 	return &ResourceView{
@@ -266,16 +281,25 @@ func (r *Reader) OpenResource(username string, req ResourceRequest) (*os.File, e
 	if rel != "" {
 		sandboxPath = root + "/" + filepath.ToSlash(rel)
 	}
-	host, err := resolveHost(spec, sandboxPath)
+	host, mount, err := resolveHost(spec, sandboxPath)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(host)
+	f, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, view.SandboxPath)
 		}
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	if err := safefs.VerifyOpen(f, mount.HostPath); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrBadRequest, view.SandboxPath)
 	}
 	return f, nil
 }
@@ -288,22 +312,22 @@ func (r *Reader) OpenResource(username string, req ResourceRequest) (*os.File, e
 // lookup reports a missing file as a "symlink escape". Asking Lstat first turns
 // that into the honest ErrNotFound, and leaves ResolveExisting to do the job it
 // was written for.
-func resolveHost(spec *sandbox.Spec, sandboxPath string) (string, error) {
-	host, _, err := spec.Resolve(sandboxPath)
+func resolveHost(spec *sandbox.Spec, sandboxPath string) (string, sandbox.Mount, error) {
+	host, mount, err := spec.Resolve(sandboxPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrForbidden, err)
+		return "", sandbox.Mount{}, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
 	if _, err := os.Lstat(host); err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("%w: %s", ErrNotFound, sandboxPath)
+			return "", sandbox.Mount{}, fmt.Errorf("%w: %s", ErrNotFound, sandboxPath)
 		}
-		return "", fmt.Errorf("%w: %v", ErrForbidden, err)
+		return "", sandbox.Mount{}, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
 	canonical, err := spec.ResolveExisting(sandboxPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrForbidden, err)
+		return "", sandbox.Mount{}, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
-	return canonical, nil
+	return canonical, mount, nil
 }
 
 // DescribeResource resolves an address, decides which viewer claims it, and (for
@@ -383,15 +407,21 @@ func (r *Reader) listResourceDir(username string, req ResourceRequest) ([]Resour
 	if rel != "" {
 		sandboxPath = root + "/" + filepath.ToSlash(rel)
 	}
-	host, err := resolveHost(spec, sandboxPath)
+	host, mount, err := resolveHost(spec, sandboxPath)
 	if err != nil {
 		return nil, false, err
 	}
-	dir, err := os.Open(host)
+	dir, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %v", ErrNotFound, err)
 	}
 	defer dir.Close()
+	if err := safefs.VerifyOpen(dir, mount.HostPath); err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	if fi, err := dir.Stat(); err != nil || !fi.IsDir() {
+		return nil, false, fmt.Errorf("%w: %s is not a directory", ErrBadRequest, sandboxPath)
+	}
 
 	raw, err := dir.ReadDir(maxResourceEntries + 1)
 	if err != nil && err != io.EOF {

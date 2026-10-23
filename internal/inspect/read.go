@@ -6,9 +6,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -68,10 +70,15 @@ func (r *Reader) ReadFile(username string, req ReadRequest) (*FileContent, error
 	if err != nil {
 		return nil, err
 	}
-	host, err := spec.ResolveExisting(path)
+	host, mount, err := spec.Resolve(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
 	}
+	canonical, err := spec.ResolveExisting(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	host = canonical
 
 	max := req.MaxBytes
 	if max <= 0 {
@@ -81,19 +88,27 @@ func (r *Reader) ReadFile(username string, req ReadRequest) (*FileContent, error
 		max = MaxReadBytes
 	}
 
-	fi, err := os.Stat(host)
+	f, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	defer f.Close()
+	if err := safefs.VerifyOpen(f, mount.HostPath); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
 	}
 	if fi.IsDir() {
 		return nil, fmt.Errorf("%w: %s is a directory (use srcos_list_paths)", ErrBadRequest, path)
 	}
-
-	f, err := os.Open(host)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrForbidden, err)
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrBadRequest, path)
 	}
-	defer f.Close()
 
 	data, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
@@ -135,7 +150,11 @@ func (r *Reader) readSpec(username, toolID string) (*sandbox.Spec, error) {
 	}
 
 	if strings.TrimSpace(toolID) != "" {
-		t, err := r.Manifest(toolID)
+		// Grant-checked on purpose: naming an ungranted tool must not mount
+		// that tool's storages. ReadFile is a user-level read; the
+		// instance-scoped answers (logs/artifacts) are the paths that stay
+		// readable after a grant is revoked.
+		t, err := r.VisibleManifest(username, toolID)
 		if err != nil {
 			return nil, err
 		}

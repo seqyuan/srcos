@@ -21,6 +21,7 @@ import (
 	"github.com/seqyuan/srcos/internal/job"
 	"github.com/seqyuan/srcos/internal/portpool"
 	"github.com/seqyuan/srcos/internal/route"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/storage"
 	"github.com/seqyuan/srcos/internal/tool"
@@ -303,6 +304,14 @@ func BuildSpec(t *tool.Tool, p Paths, storages storage.Provider) (*sandbox.Spec,
 // instance and returned with a nil error. Callers distinguish "SRCOS could not
 // run this" (error) from "the tool ran and failed" (state == failed).
 func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) (*Instance, error) {
+	return r.RunTaskWithStarted(ctx, t, loaded, nil)
+}
+
+// RunTaskWithStarted is RunTask with a callback invoked once the instance
+// record says the unit is running. It exists for the quota admission layer: a
+// reservation must stop counting the moment the record can count instead, or
+// a single run would consume two quota slots.
+func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *job.Loaded, onStarted func()) (*Instance, error) {
 	if t.Kind != tool.KindTask {
 		return nil, fmt.Errorf("tool %s is kind %s; RunTask only handles %s", t.ID, t.Kind, tool.KindTask)
 	}
@@ -383,6 +392,9 @@ func (r *Runner) RunTask(ctx context.Context, t *tool.Tool, loaded *job.Loaded) 
 	inst.LastActiveAt = inst.StartedAt
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		return nil, err
+	}
+	if onStarted != nil {
+		onStarted()
 	}
 
 	status := h.Wait(ctx)
@@ -492,6 +504,13 @@ func probeSatisfied(kind tool.DoneWhenType, host string) bool {
 // (so the proxy never forwards into a half-started process), and every failure
 // path releases the port.
 func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*Instance, error) {
+	return r.StartServiceWithStarted(ctx, t, j, nil)
+}
+
+// StartServiceWithStarted is StartService with a callback invoked once the
+// record says `starting` (the first state that consumes resources). The
+// admission layer uses it to release its reservation before the healthcheck.
+func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *job.Job, onStarted func()) (*Instance, error) {
 	if t.Kind != tool.KindService {
 		return nil, fmt.Errorf("tool %s is kind %s; StartService only handles %s", t.ID, t.Kind, tool.KindService)
 	}
@@ -520,7 +539,7 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	// An external backend runs nothing: forwarding has no argv, no port pool,
 	// no credential and no ownership (design §3).
 	if t.Backend == tool.BackendExternal {
-		return r.startExternal(ctx, t, j, prep)
+		return r.startExternal(ctx, t, j, prep, onStarted)
 	}
 
 	backend, err := r.backendFor(t)
@@ -607,6 +626,9 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 		_ = h.Stop(context.Background())
 		return nil, err
 	}
+	if onStarted != nil {
+		onStarted()
+	}
 
 	if err := r.healthcheck(ctx, t, h, port, prep); err != nil {
 		_ = h.Stop(context.Background())
@@ -617,7 +639,7 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 	inst.Healthcheck = "ok"
 	// The agent's credential, before the route is published: a hosted agent that
 	// cannot be given one must not be reported as a running service (A1).
-	if err := r.issueAgentToken(t, inst, prep); err != nil {
+	if err := r.issueAgentToken(t, inst); err != nil {
 		_ = h.Stop(context.Background())
 		return fail("agent credential: %v", err), nil
 	}
@@ -658,6 +680,7 @@ func newServiceInstance(t *tool.Tool, prep *prepared, j *job.Job) *Instance {
 		WorkDir:    prep.paths.Workspace,
 		RoutePath:  route.DefaultPath(prep.paths.User, t.ID),
 		StartedAt:  time.Now().UTC(),
+		Ingress:    IngressForTool(t),
 	}
 	inst.LastActiveAt = inst.StartedAt
 	if j != nil {
@@ -671,7 +694,7 @@ func newServiceInstance(t *tool.Tool, prep *prepared, j *job.Job) *Instance {
 // It shares everything it can with StartService — the record, the healthcheck,
 // the route — and differs only where "nothing is started" matters: no port
 // pool, no argv, no credential, and no ownership.
-func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, prep *prepared) (*Instance, error) {
+func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, prep *prepared, onStarted func()) (*Instance, error) {
 	inst := newServiceInstance(t, prep, j)
 	fail := func(format string, a ...any) *Instance {
 		inst.State = StateFailed
@@ -707,6 +730,9 @@ func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, pr
 	inst.State = StateStarting
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		return nil, err
+	}
+	if onStarted != nil {
+		onStarted()
 	}
 
 	path, timeout := healthcheckSpec(t)
@@ -750,8 +776,8 @@ func (r *Runner) publishRoute(t *tool.Tool, inst *Instance, target route.Target)
 // Not an environment variable: every instance runs as the same OS user, so a
 // token in /proc/<pid>/environ is readable from anywhere in that uid's view,
 // while a 0600 file is exactly the instance's own. The agent reads
-// $HOME/.srcos/agent-token.
-func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance, prep *prepared) error {
+// $HOME/.srcos/instances/<instance-id>/agent-token.
+func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance) error {
 	if t.Agent == nil {
 		return nil
 	}
@@ -762,11 +788,12 @@ func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance, prep *prepared) e
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(prep.paths.Home, ".srcos")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	path := config.InstanceTokenPath(r.opts.ConfigDir, inst.User, inst.ID)
+	root := config.DataDir(r.opts.ConfigDir)
+	if err := safefs.MkdirAllBeneath(root, filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "agent-token"), []byte(plaintext+"\n"), 0o600); err != nil {
+	if err := safefs.WriteFileBeneath(root, path, []byte(plaintext+"\n"), 0o600); err != nil {
 		return err
 	}
 	r.auditInstance(inst, "agenttoken.mint", map[string]any{
@@ -895,7 +922,9 @@ func (r *Runner) revokeInstanceCredential(inst *Instance) {
 		log.Printf("[srcos] revoke instance credential %s: %v", inst.ID, err)
 		return
 	}
-	_ = os.Remove(filepath.Join(config.HomeDir(r.opts.ConfigDir, inst.User), ".srcos", "agent-token"))
+	tokenPath := config.InstanceTokenPath(r.opts.ConfigDir, inst.User, inst.ID)
+	_ = os.Remove(tokenPath)
+	_ = os.Remove(filepath.Dir(tokenPath)) // only succeeds when empty; best effort
 	r.auditInstance(inst, "agenttoken.revoke", nil)
 }
 
@@ -1701,7 +1730,7 @@ func WriteServiceManifest(configDir, user, toolID string, j *job.Job) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return safefs.WriteFileBeneath(config.DataDir(configDir), path, append(data, '\n'), 0o644)
 }
 
 // PortPoolDefault is the range service instances are placed in.

@@ -91,6 +91,24 @@ func esc(s string) string {
 	return html.EscapeString(s)
 }
 
+// jsString renders s as a JavaScript string literal that is also safe inside a
+// double-quoted HTML attribute.
+//
+// HTML-escaping alone is not enough for an inline handler: the browser decodes
+// &#39; back to a quote before compiling the handler, so a value containing a
+// quote escapes the JavaScript string. json.Marshal handles quotes, backslashes,
+// control characters and line separators; html.EscapeString keeps the attribute
+// itself well-formed (the browser decodes it back to the JSON literal).
+//
+// Use it as the whole argument: onclick="f(%s)".
+func jsString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return html.EscapeString(string(b))
+}
+
 func LoginPage(siteTitle, errorMsg, next string) string {
 	errBlock := ""
 	if errorMsg != "" {

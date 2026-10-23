@@ -190,8 +190,7 @@ func (h *Handler) decideRequest(w http.ResponseWriter, r *http.Request, username
 			})
 			return
 		}
-		h.opts.Policy.AddUserToGrant(req.Tool, req.User)
-		if err := h.savePolicy(); err != nil {
+		if err := h.mutatePolicy(func() { h.opts.Policy.AddUserToGrant(req.Tool, req.User) }); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}

@@ -55,6 +55,20 @@ const (
 	SandboxApptainer Sandbox = "apptainer"
 )
 
+// NetworkMode is whether the unit shares the host network namespace.
+//
+// `bwrap` isolates mount/pid/ipc/uts but, without --unshare-net, the host
+// network namespace is shared: a sandboxed task could reach another user's
+// loopback service (all instances run as one OS user) or bind a port on
+// 0.0.0.0 and bypass the gateway. Tasks therefore default to `none`; a task
+// that genuinely needs egress declares `network: host`.
+type NetworkMode string
+
+const (
+	NetworkHost NetworkMode = "host"
+	NetworkNone NetworkMode = "none"
+)
+
 // InputType is the frozen type set of interface.inputs (ADR-018: this set is
 // frozen in Phase 1, additions only).
 type InputType string
@@ -88,11 +102,14 @@ type Tool struct {
 	Name          string `yaml:"name"`
 	Description   string `yaml:"description,omitempty"`
 
-	Kind    Kind     `yaml:"kind"`
-	Backend Backend  `yaml:"backend"`
-	Sandbox Sandbox  `yaml:"sandbox,omitempty"`
-	Image   string   `yaml:"image,omitempty"`
-	Env     []string `yaml:"env,omitempty"`
+	Kind    Kind    `yaml:"kind"`
+	Backend Backend `yaml:"backend"`
+	Sandbox Sandbox `yaml:"sandbox,omitempty"`
+	// Network defaults to none for a bwrap task and host otherwise. A service
+	// needs host networking because its ingress is reached over loopback.
+	Network NetworkMode `yaml:"network,omitempty"`
+	Image   string      `yaml:"image,omitempty"`
+	Env     []string    `yaml:"env,omitempty"`
 
 	ROMounts []ROMount `yaml:"ro_mounts,omitempty"`
 	Entry    string    `yaml:"entry"`
@@ -478,7 +495,15 @@ func Discover(root string) ([]*Tool, error) {
 }
 
 // Find returns the tool with the given id under root.
+//
+// The id is the only user-controlled component of the path (it arrives from a
+// URL, an agent token's allowlist, or a workspace directory name). Validate it
+// against the same grammar registration uses, so a value like `../other` can
+// never turn the lookup into a directory traversal outside root.
 func Find(root, id string) (*Tool, error) {
+	if !idRe.MatchString(id) {
+		return nil, fmt.Errorf("invalid tool id %q", id)
+	}
 	return Load(filepath.Join(root, id))
 }
 
@@ -581,6 +606,9 @@ func (t *Tool) Validate() error {
 		if t.Agent != nil {
 			bad("backend: external runs no unit, so it cannot host an agent")
 		}
+		if t.Network != "" {
+			bad("backend: external starts nothing, so network would never be used")
+		}
 		if len(t.RequiresStorages) > 0 {
 			bad("backend: external runs no unit, so requires_storages would never be mounted")
 		}
@@ -599,6 +627,27 @@ func (t *Tool) Validate() error {
 	}
 	if t.Sandbox == SandboxApptainer && t.Image == "" {
 		bad("sandbox: apptainer requires image")
+	}
+	// Network default is fail-closed where the runtime can enforce it: a task
+	// under bwrap gets its own network namespace unless it explicitly asks for
+	// host networking. Services need the host namespace for their ingress.
+	switch t.Network {
+	case "":
+		if t.Kind == KindTask && t.Sandbox == SandboxBwrap {
+			t.Network = NetworkNone
+		} else {
+			t.Network = NetworkHost
+		}
+	case NetworkHost, NetworkNone:
+	default:
+		bad("network must be one of host|none, got %q", t.Network)
+	}
+	if t.Network == NetworkNone && t.Sandbox == SandboxNone {
+		bad("network: none requires a mount namespace (sandbox: bwrap|apptainer); sandbox: none cannot enforce it")
+	}
+	if t.Network == NetworkNone && t.Kind == KindService {
+		bad("kind: service requires network: host — its ingress is reached over loopback; " +
+			"services with an isolated network need a Unix-socket ingress, which is not implemented yet")
 	}
 	if t.Ingress != nil && t.Ingress.BackendPath != "" && !pathIsAbs(t.Ingress.BackendPath) {
 		bad("ingress.backend_path must be absolute, got %q", t.Ingress.BackendPath)
@@ -712,6 +761,14 @@ func (t *Tool) Validate() error {
 		}
 		names[in.Name] = true
 
+		// A `type: path` without `select` means a directory (tool-spec §2.2).
+		// Normalize it here so the picker, the flow wire check, the MCP schema
+		// and submit-time validation all read the same effective contract.
+		if in.Type == TypePath && in.Select == "" {
+			in.Select = "directory"
+			t.Interface.Inputs[i].Select = "directory"
+		}
+
 		switch in.Type {
 		case TypeString, TypeBool:
 		case TypeInt, TypeFloat:
@@ -744,6 +801,15 @@ func (t *Tool) Validate() error {
 			}
 		default:
 			bad("%s: unknown type %q", where, in.Type)
+		}
+
+		// `files` is a list of file names inside the selected directory, not a
+		// second path syntax: a separator or `..` would let a manifest point at
+		// something outside the directory the user chose.
+		for _, f := range in.Files {
+			if f == "" || f == "." || f == ".." || filepath.IsAbs(f) || strings.ContainsAny(f, `/\\`) {
+				bad("%s: files entry %q must be a plain file name inside the selected directory", where, f)
+			}
 		}
 
 		// A declared default must satisfy its own declaration: a default that
@@ -793,8 +859,14 @@ func (t *Tool) Validate() error {
 		if !filepath.IsAbs(m.Host) {
 			bad("%s: host must be an absolute host path, got %q", where, m.Host)
 		}
+		if filepath.Clean(m.Host) == "/" {
+			bad("%s: host must not be / — bind the interpreter/environment prefix, never the whole host", where)
+		}
 		if !pathIsAbs(m.SandboxPath) {
 			bad("%s: sandbox_path must be absolute, got %q", where, m.SandboxPath)
+		}
+		if filepath.ToSlash(filepath.Clean(m.SandboxPath)) == "/" {
+			bad("%s: sandbox_path must not be / — bind the exact path, never the sandbox root", where)
 		}
 	}
 

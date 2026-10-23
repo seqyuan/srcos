@@ -185,6 +185,15 @@ func FlowRunsDir(configDir, user string) string {
 	return filepath.Join(DataDir(configDir), "flows", user)
 }
 
+// InstanceTokenPath is where a hosted agent's instance credential is written.
+//
+// One directory per instance, not one file per user: a user may run several
+// agent services at once, and a shared $HOME/.srcos/agent-token would make
+// them overwrite (and delete) each other's credential.
+func InstanceTokenPath(configDir, user, instanceID string) string {
+	return filepath.Join(HomeDir(configDir, user), ".srcos", "instances", instanceID, "agent-token")
+}
+
 // InstancesDir holds the runtime instance records (data/instances).
 func InstancesDir(configDir string) string {
 	return filepath.Join(DataDir(configDir), "instances")

@@ -48,6 +48,17 @@ func BuildInner(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, arg
 // runs on a compute node. Keeping this shared is what makes "the same tool
 // definition runs on either backend" true rather than aspirational.
 func BuildInnerWith(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string, argv, env []string, o BuildOptions) ([]string, error) {
+	// Tool.Validate fills this in for every loaded manifest. The fallback keeps
+	// tests and manually constructed tools honest: a bwrap task has no network
+	// unless it asked for it.
+	network := string(t.Network)
+	if network == "" {
+		if t.Kind == tool.KindTask && t.Sandbox == tool.SandboxBwrap {
+			network = string(tool.NetworkNone)
+		} else {
+			network = string(tool.NetworkHost)
+		}
+	}
 	switch t.Sandbox {
 	case tool.SandboxBwrap, "":
 		bwrapPath, ok, why := sandbox.BwrapProbe()
@@ -60,7 +71,7 @@ func BuildInnerWith(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string,
 			}
 			return nil, errors.New(why)
 		}
-		args := sandbox.BwrapArgv(spec, sandbox.BwrapOptions{Cwd: cwd, Env: env, Argv: argv})
+		args := sandbox.BwrapArgv(spec, sandbox.BwrapOptions{Cwd: cwd, Env: env, Argv: argv, Network: network})
 		return append([]string{bwrapPath}, args...), nil
 
 	case tool.SandboxNone:
@@ -92,10 +103,11 @@ func BuildInnerWith(t *tool.Tool, view PathView, spec *sandbox.Spec, cwd string,
 			bin = sandbox.ContainerPlaceholder
 		}
 		args := sandbox.ApptainerArgv(spec, sandbox.ApptainerOptions{
-			Image: t.Image,
-			Cwd:   cwd,
-			Env:   env,
-			Argv:  argv,
+			Image:   t.Image,
+			Cwd:     cwd,
+			Env:     env,
+			Argv:    argv,
+			Network: network,
 		})
 		return append([]string{bin}, args...), nil
 

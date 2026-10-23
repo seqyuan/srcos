@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
@@ -92,6 +93,11 @@ type Handler struct {
 	Registry      *config.UserRegistry
 	SessionSecret string
 	opts          Options
+	// policySaveMu serializes policy mutations with their persistence. It
+	// makes "mutate live policy, then save" atomic per process and lets a
+	// failed save roll back instead of leaving an unauthorized in-memory
+	// change behind.
+	policySaveMu sync.Mutex
 }
 
 // Executor exposes the write path. The gateway passes the same controller to
@@ -197,6 +203,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 		h.auditDeny(r, &ident, "scope", "agent token is read-only; writing requires the submit scope")
 		writeJSON(w, 403, map[string]string{
 			"error": "agent token is read-only (scope \"read\"); writing requires the \"submit\" scope",
+		})
+		return true
+	}
+	// The legacy service-card editor is a dashboard/configuration surface, not
+	// an execution capability. `submit` is about runs; a program credential must
+	// not be able to add a forwarder card, change a layout, or point a card at a
+	// new local service. Reads stay available (a service list is the user's own
+	// dashboard).
+	if ident.Agent && !isReadMethod(r.Method) &&
+		(path == "/api/services" || strings.HasPrefix(path, "/api/services/")) {
+		log.Printf("[srcos] agent %s refused (service cards are session-only): %s %s", ident.Describe(), r.Method, r.URL.Path)
+		h.auditDeny(r, &ident, "session", "service-card writes require a browser session; agent tokens cannot edit the dashboard")
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "service-card writes require a browser session; agent tokens cannot edit the dashboard",
 		})
 		return true
 	}

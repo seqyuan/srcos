@@ -315,3 +315,36 @@ func TestApptainerArgv(t *testing.T) {
 		t.Fatalf("tail = %v", got)
 	}
 }
+
+func TestBwrapArgvUnsharesNetworkOnlyWhenAsked(t *testing.T) {
+	host := BwrapArgv(&Spec{}, BwrapOptions{Argv: []string{"/bin/true"}})
+	if hasArg(host, "--unshare-net") {
+		t.Fatal("host network must be the zero-value default")
+	}
+	isolated := BwrapArgv(&Spec{}, BwrapOptions{Argv: []string{"/bin/true"}, Network: "none"})
+	if !hasArg(isolated, "--unshare-net") {
+		t.Fatal("network: none must add --unshare-net")
+	}
+}
+
+func hasArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAddRejectsTheSandboxRoot(t *testing.T) {
+	spec := &Spec{}
+	if err := spec.Add(Mount{HostPath: "/", SandboxPath: "/", Mode: ReadOnly, Origin: "storage:all"}); err == nil {
+		t.Fatal("binding / would expose the whole host and shadow every other mount")
+	}
+	if err := spec.Add(Mount{HostPath: "/host/ws", SandboxPath: "/workspace", Mode: ReadWrite, Origin: "builtin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.Add(Mount{HostPath: "/host/tmp", SandboxPath: "/", Mode: ReadOnly, Origin: "bad"}); err == nil {
+		t.Fatal("a root mount must be rejected even when /workspace is already mounted")
+	}
+}

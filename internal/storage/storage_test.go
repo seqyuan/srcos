@@ -409,3 +409,15 @@ func TestLoadFromYAML(t *testing.T) {
 		t.Fatalf("unexpected storage: %+v", got)
 	}
 }
+
+func TestStorageRejectsTheHostRootAndSandboxRoot(t *testing.T) {
+	for _, s := range []Storage{
+		{ID: "all", Kind: KindPosix, HostRoot: "/", SandboxPath: "/data", Mode: ReadOnly},
+		{ID: "all", Kind: KindPosix, HostRoot: "/data", SandboxPath: "/", Mode: ReadOnly},
+		{ID: "all", Kind: KindPosix, HostRoot: "/data", SandboxPath: "//", Mode: ReadOnly},
+	} {
+		if _, err := New([]Storage{s}); err == nil {
+			t.Fatalf("storage %+v was accepted", s)
+		}
+	}
+}

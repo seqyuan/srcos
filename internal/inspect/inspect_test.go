@@ -287,6 +287,14 @@ func TestReadFileRange(t *testing.T) {
 	if _, err := f.ReadFile("alice", ReadRequest{Path: "/scratch/anything"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("undeclared storage: %v", err)
 	}
+	// Naming an ungranted tool must not mount that tool's storages: otherwise
+	// the `tool` argument would be a way around the grant closure.
+	if err := os.WriteFile(filepath.Join(f.scratch, "secret.txt"), []byte("s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadFile("alice", ReadRequest{Path: "/scratch/secret.txt", Tool: "other"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an ungranted tool lent its storage to a read: %v", err)
+	}
 
 	// A workspace path needs the tool that owns it.
 	ws := config.WorkspaceDir(f.configDir, "alice", "demo")

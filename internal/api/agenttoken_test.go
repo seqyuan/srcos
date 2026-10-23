@@ -271,3 +271,14 @@ func TestScopeGateCoversEveryWriteMethod(t *testing.T) {
 		}
 	}
 }
+
+// Service cards are the user's dashboard configuration, not an execution
+// capability: a submit-scoped agent token must not be able to add or edit one.
+func TestServiceCardWritesAreSessionOnly(t *testing.T) {
+	h, store := newTokenHarness(t)
+	submit := mintToken(t, store, "alice", agenttoken.ScopeSubmit)
+	rec := tokenJSON(h.Handler, "POST", "/api/services", submit, `{}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("submit token service-card write = %d %s, want 403", rec.Code, rec.Body)
+	}
+}

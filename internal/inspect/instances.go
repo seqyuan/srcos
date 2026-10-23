@@ -5,10 +5,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/resource"
 	"github.com/seqyuan/srcos/internal/runtime"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -254,12 +256,6 @@ func (r *Reader) Artifacts(username, needle string) ([]Artifact, error) {
 		if addr, ok := addressForMount(mount, rec.User, rec.Tool, path); ok {
 			a.Addr = addr.String()
 		}
-		fi, err := os.Stat(host)
-		if err != nil {
-			a.Note = firstNote(recorded, "missing")
-			out = append(out, a)
-			continue
-		}
 		// A symlink inside a writable mount can point out of it; the artifact
 		// is reported but flagged rather than quietly attributed to the mount.
 		if _, err := spec.ResolveExisting(path); err != nil {
@@ -268,16 +264,45 @@ func (r *Reader) Artifacts(username, needle string) ([]Artifact, error) {
 			out = append(out, a)
 			continue
 		}
+		f, err := safefs.OpenFile(host, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			a.Note = firstNote(recorded, "missing")
+			out = append(out, a)
+			continue
+		}
+		// The path may have been swapped for a symlink between resolve and
+		// open; verify the descriptor, not the name.
+		if err := safefs.VerifyOpen(f, mount.HostPath); err != nil {
+			_ = f.Close()
+			a.Note = "escapes its mount (symlink)"
+			a.Addr = ""
+			out = append(out, a)
+			continue
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			a.Note = firstNote(recorded, "missing")
+			out = append(out, a)
+			continue
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
+			_ = f.Close()
+			a.Note = firstNote(recorded, "not a regular file or directory")
+			out = append(out, a)
+			continue
+		}
 		a.Exists = true
 		a.IsDir = fi.IsDir()
 		a.MTime = fi.ModTime().Format(time.RFC3339)
 		if fi.IsDir() {
-			if entries, err := os.ReadDir(host); err == nil {
+			if entries, err := f.ReadDir(-1); err == nil {
 				a.Entries = len(entries)
 			}
 		} else {
 			a.Size = fi.Size()
 		}
+		_ = f.Close()
 		out = append(out, a)
 	}
 	return out, nil

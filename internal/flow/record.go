@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/seqyuan/srcos/internal/safefs"
 )
 
 // This file is the run record: what a flow run did, and what it still has to do.
@@ -115,7 +117,7 @@ func (r *Run) Node(id string) *NodeState {
 
 // SaveRun writes the record atomically: a run's state is read by the next
 // `flow resume` (and by a human), so it must never be half-written.
-func SaveRun(path string, r *Run) error {
+func SaveRun(root, path string, r *Run) error {
 	data, err := yaml.Marshal(r)
 	if err != nil {
 		return err
@@ -125,7 +127,10 @@ func SaveRun(path string, r *Run) error {
 		"# 由 `srcos flow run` 维护；节点完成以 nodes/<节点>/.sign 为准（可以手工 touch 跳过）。\n" +
 		"# 这里只记索引：真正的任务状态在 data/instances/ 的实例记录里。\n\n"
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte(header), data...), 0o644); err != nil {
+	if err := safefs.MkdirAllBeneath(root, filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := safefs.WriteFileBeneath(root, tmp, append([]byte(header), data...), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -165,11 +170,11 @@ func IsCancelled(cancelPath string) bool {
 }
 
 // RequestCancel writes the cancel flag (creating the run directory if needed).
-func RequestCancel(cancelPath string) error {
-	if err := os.MkdirAll(filepath.Dir(cancelPath), 0o755); err != nil {
+func RequestCancel(root, cancelPath string) error {
+	if err := safefs.MkdirAllBeneath(root, filepath.Dir(cancelPath), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(cancelPath)
+	f, err := safefs.CreateBeneath(root, cancelPath, 0o666)
 	if err != nil {
 		return err
 	}
@@ -177,11 +182,11 @@ func RequestCancel(cancelPath string) error {
 }
 
 // Sign writes the node's completion marker.
-func Sign(signPath string) error {
-	if err := os.MkdirAll(filepath.Dir(signPath), 0o755); err != nil {
+func Sign(root, signPath string) error {
+	if err := safefs.MkdirAllBeneath(root, filepath.Dir(signPath), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(signPath)
+	f, err := safefs.CreateBeneath(root, signPath, 0o666)
 	if err != nil {
 		return err
 	}

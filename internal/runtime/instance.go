@@ -14,6 +14,7 @@ import (
 
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/job"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"github.com/seqyuan/srcos/internal/sandbox"
 	"github.com/seqyuan/srcos/internal/tool"
 )
@@ -87,6 +88,15 @@ type Instance struct {
 	Limiter string   `yaml:"limiter"` // systemd-run | prlimit | none
 	Command []string `yaml:"command,omitempty"`
 	Mounts  []string `yaml:"mounts,omitempty"` // "host:sandbox:mode:origin"
+
+	// Ingress is the effective route configuration captured when the service
+	// started. Routes are rebuilt every scan tick from the instance records, so
+	// anything only present in tool.yaml (bwlimit, backend_path, an explicit
+	// websocket: false) would otherwise be lost within one tick and again after
+	// a gateway restart. Configured distinguishes a record written by a build
+	// that knows these fields from a legacy record; the route rebuild may fall
+	// back to the tool package for the latter.
+	Ingress IngressRoute `yaml:"ingress,omitempty"`
 
 	// Service-only fields.
 	Endpoint    string `yaml:"endpoint,omitempty"` // 127.0.0.1:<port>
@@ -270,14 +280,41 @@ func sortNewestFirst(list []*Instance) {
 	})
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 路径
-// ─────────────────────────────────────────────────────────────────────────
+// IngressRoute is the persisted copy of a service's ingress settings.
+//
+// It lives on the instance record because the record is the source of truth
+// the scan tick, the proxy and a restarted gateway all rebuild routes from.
+// Keeping it out of tool.yaml at this point is deliberate: the tool package may
+// be upgraded (or removed) while an instance is running, and the instance must
+// keep the settings it actually started with.
+type IngressRoute struct {
+	WebSocket   *bool  `yaml:"websocket,omitempty"`
+	BWLimit     int64  `yaml:"bwlimit,omitempty"`
+	BackendPath string `yaml:"backend_path,omitempty"`
+	Configured  bool   `yaml:"configured,omitempty"`
+}
+
+// IngressForTool renders the effective settings of a tool's ingress.
+func IngressForTool(t *tool.Tool) IngressRoute {
+	ws := true
+	var bw int64
+	var bp string
+	if t != nil && t.Ingress != nil {
+		ws = t.Ingress.WebSocketEnabled()
+		bw = t.Ingress.BWLimit
+		bp = t.Ingress.BackendPath
+	}
+	return IngressRoute{WebSocket: &ws, BWLimit: bw, BackendPath: bp, Configured: true}
+}
 
 // Paths holds the concrete host paths of one unit.
 type Paths struct {
-	User      string
-	Tool      string
+	User string
+	Tool string
+	// DataDir is the trusted root above every tool-writable directory
+	// (workspace, home, flows, logs). Write helpers use it to refuse symlinks
+	// below it; it may itself be reached through a symlink.
+	DataDir   string
 	Workspace string
 	Home      string
 	// FlowRuns is the user's flow-run directory (data/flows/<user>), mounted at
@@ -298,6 +335,7 @@ func PathsFor(configDir, user, toolID, jobID string) Paths {
 	p := Paths{
 		User:      user,
 		Tool:      toolID,
+		DataDir:   config.DataDir(configDir),
 		Workspace: config.WorkspaceDir(configDir, user, toolID),
 		Home:      config.HomeDir(configDir, user),
 		FlowRuns:  config.FlowRunsDir(configDir, user),
@@ -324,18 +362,24 @@ func (p Paths) EnsureDirs(t *tool.Tool) error {
 	if p.JobDir != "" {
 		dirs = append(dirs, p.JobDir)
 	}
+	mkdir := func(d string) error {
+		if p.DataDir == "" {
+			return os.MkdirAll(d, 0o755)
+		}
+		return safefs.MkdirAllBeneath(p.DataDir, d, 0o755)
+	}
 	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := mkdir(d); err != nil {
 			return err
 		}
 	}
 	if t.Workspace != nil && t.Workspace.InitFrom != "" {
-		if err := InitFromTemplate(filepath.Join(t.Dir, t.Workspace.InitFrom), p.Workspace); err != nil {
+		if err := initTemplate(p.DataDir, filepath.Join(t.Dir, t.Workspace.InitFrom), p.Workspace); err != nil {
 			return err
 		}
 	}
 	if t.Home != nil && t.Home.InitFrom != "" {
-		if err := InitFromTemplate(filepath.Join(t.Dir, t.Home.InitFrom), p.Home); err != nil {
+		if err := initTemplate(p.DataDir, filepath.Join(t.Dir, t.Home.InitFrom), p.Home); err != nil {
 			return err
 		}
 	}

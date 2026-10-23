@@ -285,6 +285,8 @@ grants:
       max_cpu: 2
       max_memory: 1Gi
       max_instances: 1
+  - tool: $EXT
+    users: [$USER_NAME]
   - tool: $ASK
     users: [$ADMIN_USER]
     requestable: true
@@ -444,7 +446,7 @@ pass "service running and reachable at /proxy/$USER_NAME/$SVC/"
 
 # A hosted agent (A1): the credential is minted into the instance's home, it
 # authenticates, and stopping the instance revokes it.
-AGENT_TOK_FILE="$DATA/homes/$USER_NAME/.srcos/agent-token"
+AGENT_TOK_FILE="$DATA/homes/$USER_NAME/.srcos/instances/$USER_NAME-$SVC-svc/agent-token"
 [ -f "$AGENT_TOK_FILE" ] || fail "no agent credential was minted into the home"
 AGENT_TOK="$(tr -d '\n' < "$AGENT_TOK_FILE")"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGENT_TOK" "$BASE/api/tools")"
