@@ -34,6 +34,10 @@ make build        # 等价于 go build -ldflags "-X main.version=$(git describe 
 
 本地直接用 `go build` / `go install`（不带 ldflags）时版本显示为 `dev`。
 
+> **发布包请包含前端产物**：`internal/web/dist/` 是构建产物，不随源码提交。
+> `go install`/普通 `go build` 得到的二进制没有管理端画布；生产发布请先跑
+> `make webui && make build`，或直接分发该二进制。`make build` 在缺少前端时会给出提示。
+
 ## 快速开始
 
 三步即可上线：
