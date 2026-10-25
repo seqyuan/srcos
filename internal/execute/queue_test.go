@@ -150,8 +150,10 @@ func TestQueueRecordsAnInvalidSubmissionAsFailed(t *testing.T) {
 	if !strings.Contains(rec.Error, "invalid submission") || !strings.Contains(rec.Error, "nope") {
 		t.Fatalf("record = %+v", rec)
 	}
-	if !job.Claimed(dir) {
-		t.Error("an invalid submission should be claimed so it is not rescanned")
+	// The lease is released immediately for an invalid submission: the failed
+	// record, not a permanent marker, is what stops it being rescanned.
+	if job.Claimed(dir) {
+		t.Error("an invalid submission should not leave a held lease")
 	}
 	// A second pass must not touch it again.
 	if n := f.drain(t); n != 0 {
@@ -181,9 +183,11 @@ func TestQueueLeavesFlowNodesToTheFlowRunner(t *testing.T) {
 func TestQueueSkipsClaimedJobs(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	id, dir := submitRaw(t, f, "alice", "demo", "taken")
-	if taken, err := job.Claim(dir); err != nil || !taken {
-		t.Fatalf("claim: %v %v", taken, err)
+	lease, err := job.Claim(dir)
+	if err != nil || lease == nil {
+		t.Fatalf("claim: %v %v", lease, err)
 	}
+	defer lease.Release()
 	if n := f.drain(t); n != 0 {
 		t.Fatalf("queue started a claimed job (%d)", n)
 	}

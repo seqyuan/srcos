@@ -2,9 +2,11 @@ package job
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/seqyuan/srcos/internal/tool"
@@ -349,5 +351,102 @@ func TestSubmitScriptWritesOneSelfConsistentJob(t *testing.T) {
 	}
 	if len(temps) != 0 {
 		t.Fatalf("leftover temp files: %v", temps)
+	}
+}
+
+func TestSubmitAsRefusesAnExistingKeyedJob(t *testing.T) {
+	configDir := t.TempDir()
+	id, _, err := SubmitAs(configDir, "alice", "demo", &Job{Name: "keyed"}, "k-fixed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "k-fixed" {
+		t.Fatalf("id = %q", id)
+	}
+	if _, _, err := SubmitAs(configDir, "alice", "demo", &Job{Name: "keyed"}, "k-fixed"); !errors.Is(err, ErrJobExists) {
+		t.Fatalf("second submit = %v, want ErrJobExists", err)
+	}
+}
+
+func TestClaimIsExclusiveUntilReleased(t *testing.T) {
+	dir := t.TempDir()
+	lease, err := Claim(dir)
+	if err != nil || lease == nil {
+		t.Fatalf("first claim = %v %v", lease, err)
+	}
+	if !Claimed(dir) {
+		t.Fatal("a held lease must read as claimed")
+	}
+	if second, err := Claim(dir); err != nil || second != nil {
+		t.Fatalf("second claim = %v %v, want nil (held)", second, err)
+	}
+	lease.Release()
+	if Claimed(dir) {
+		t.Fatal("a released lease must not read as claimed")
+	}
+	again, err := Claim(dir)
+	if err != nil || again == nil {
+		t.Fatalf("claim after release = %v %v", again, err)
+	}
+	again.Release()
+}
+
+func TestClaimIsReleasedWhenTheProcessDies(t *testing.T) {
+	dir := t.TempDir()
+	lease, err := Claim(dir)
+	if err != nil || lease == nil {
+		t.Fatalf("claim = %v %v", lease, err)
+	}
+	// Closing the descriptor is what process death does; the kernel drops the
+	// flock, so the next claim succeeds without any TTL.
+	if err := lease.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lease.file = nil
+	if Claimed(dir) {
+		t.Fatal("a closed lease must not read as claimed")
+	}
+	next, err := Claim(dir)
+	if err != nil || next == nil {
+		t.Fatalf("claim after crash = %v %v", next, err)
+	}
+	next.Release()
+}
+
+func TestClaimHasOneWinner(t *testing.T) {
+	dir := t.TempDir()
+	const n = 8
+	var wg sync.WaitGroup
+	leases := make(chan *Lease, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			lease, err := Claim(dir)
+			if err != nil {
+				t.Errorf("claim: %v", err)
+				return
+			}
+			if lease != nil {
+				// Hold until every contender has tried; releasing here would let
+				// the next goroutine acquire it and make the count meaningless.
+				leases <- lease
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(leases)
+	var held []*Lease
+	for l := range leases {
+		held = append(held, l)
+	}
+	for _, l := range held {
+		l.Release()
+	}
+	if len(held) != 1 {
+		t.Fatalf("claim winners = %d, want exactly 1", len(held))
 	}
 }

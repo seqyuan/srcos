@@ -387,6 +387,7 @@ func runJobRun(args []string) {
 		prev, prevErr := runtime.LoadInstance(recordPath)
 		if !*jf.force {
 			if prevErr == nil && (prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning ||
+				prev.State == runtime.StateStarting || prev.State == runtime.StateStopping ||
 				prev.State == runtime.StateSubmitted) {
 				fmt.Printf("skip %s (already %s; use --force to re-run)\n", loaded.ID, prev.State)
 				continue
@@ -400,13 +401,25 @@ func runJobRun(args []string) {
 				continue
 			}
 		}
-		// Take the job, so the gateway's task loop does not start it too.
-		if _, cerr := job.Claim(loaded.Dir); cerr != nil {
+		// Take the lease, so the gateway's task loop does not start it too. A
+		// crash releases it automatically (flock is freed when the process
+		// exits), which is what keeps a submission from parking forever.
+		lease, cerr := job.Claim(loaded.Dir)
+		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not claim %s: %v\n", loaded.ID, cerr)
+		}
+		if lease == nil && !*jf.force {
+			fmt.Printf("skip %s (another runner has it; use --force to run it anyway)\n", loaded.ID)
+			continue
 		}
 
 		fmt.Printf("\n=== running %s (%s) ===\n", loaded.ID, loaded.Job.Name)
-		inst, err := runner.RunTask(context.Background(), t, loaded)
+		inst, err := func() (*runtime.Instance, error) {
+			if lease != nil {
+				defer lease.Release()
+			}
+			return runner.RunTask(context.Background(), t, loaded)
+		}()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

@@ -777,6 +777,14 @@ func (r *Runner) runJob(ctx context.Context, u flow.Unit, jobID string, onStarte
 	if err != nil {
 		return err
 	}
+	lease, err := job.Claim(dir)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		return fmt.Errorf("flow job %s is claimed by another runner", jobID)
+	}
+	defer lease.Release()
 	inst, err := r.Opts.Runner.RunTaskWithStarted(ctx, u.Tool, &job.Loaded{
 		ID: jobID, Dir: dir, Path: filepath.Join(dir, "job.json"), Job: j,
 	}, onStarted)
@@ -874,18 +882,14 @@ func (r *Runner) submit(ctx context.Context, unit flow.Unit) (string, error) {
 	// The drop-box directory is the queue, and the flow runner is a consumer of
 	// it exactly like a human running `srcos job run`: one code path, one set of
 	// guarantees (sandbox, limits, instance record, audit).
-	jobID, dir, err := job.Submit(r.Opts.ConfigDir, r.Opts.User, unit.ToolID, j)
+	jobID, _, err := job.Submit(r.Opts.ConfigDir, r.Opts.User, unit.ToolID, j)
 	if err != nil {
 		return "", err
 	}
-	// Take the submission before the gateway's task queue sees it. A flow node is
-	// a step in a DAG, not an independent queue item: if the queue ran it out of
-	// order (or twice) the pipeline would break in a way nobody could audit.
-	// Claiming is the same mechanism `job run` uses, so all three consumers
-	// agree on ownership.
-	if _, err := job.Claim(dir); err != nil {
-		r.Opts.Log("warning: could not claim flow job %s: %v", jobID, err)
-	}
+	// No claim here: a flow node is a step in a DAG, not an independent queue
+	// item, and the `run` tag already keeps the gateway's queue away. runJob
+	// takes the lease immediately before starting, so it can hold it for the
+	// whole execution (and release it automatically if this process dies).
 	return jobID, nil
 }
 

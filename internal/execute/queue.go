@@ -175,14 +175,16 @@ func (q *Queue) Tick(ctx context.Context) int {
 				q.release(user, toolID)
 				continue // quota backpressure: leave it queued for the next tick
 			}
-			taken, err := job.Claim(loaded.Dir)
+			lease, err := job.Claim(loaded.Dir)
 			if err != nil {
 				reservation.Release()
-				q.log("[srcos] task queue: claim %s: %v", loaded.Dir, err)
+				// A permanent EACCES/read-only marker would otherwise fill the
+				// log every tick; the record still keeps the job visible.
+				q.noteOnce(user, toolID, "claim %s: %v", loaded.Dir, err)
 				q.release(user, toolID)
 				continue
 			}
-			if !taken {
+			if lease == nil {
 				// Another consumer (a `srcos job run` in another process) got
 				// there first between our scan and our claim.
 				reservation.Release()
@@ -190,7 +192,7 @@ func (q *Queue) Tick(ctx context.Context) int {
 				continue
 			}
 			started++
-			go q.run(user, t, loaded, reservation)
+			go q.run(user, t, loaded, reservation, lease)
 		}
 	}
 	return started
@@ -252,6 +254,8 @@ func (q *Queue) nextJob(user, toolID string) (*job.Loaded, *tool.Tool, bool) {
 	sort.SliceStable(ordered, func(a, b int) bool { return submissionTime(ordered[a]).Before(submissionTime(ordered[b])) })
 
 	for _, loaded := range ordered {
+		// A live lease means a runner owns it. A crashed runner's lock was
+		// released by the kernel, so its marker does not park the submission.
 		if job.Claimed(loaded.Dir) {
 			continue
 		}
@@ -275,7 +279,8 @@ func (q *Queue) nextJob(user, toolID string) (*job.Loaded, *tool.Tool, bool) {
 			// A submission that cannot pass the tool's own contract will never
 			// run; record why (visible in the UI) instead of retrying it
 			// forever. The claim keeps it from being rescanned.
-			if _, cerr := job.Claim(loaded.Dir); cerr == nil {
+			if lease, cerr := job.Claim(loaded.Dir); cerr == nil && lease != nil {
+				lease.Release()
 				q.recordFailure(user, t, loaded, fmt.Errorf("invalid submission: %w", err))
 			}
 			continue
@@ -315,9 +320,10 @@ func (q *Queue) attempted(user, toolID, jobID string) (runtime.State, bool) {
 // started it, and a shutdown mid-run must not mark the work cancelled — the
 // process is owned by systemd, not by this loop, and a restart reconciles the
 // record from what is actually still running.
-func (q *Queue) run(user string, t *tool.Tool, loaded *job.Loaded, reservation *quotaReservation) {
+func (q *Queue) run(user string, t *tool.Tool, loaded *job.Loaded, reservation *quotaReservation, lease *job.Lease) {
 	defer q.release(user, t.ID)
 	defer reservation.Release()
+	defer lease.Release()
 	runner, err := q.ctrl.runnerFor(user)
 	if err != nil {
 		q.log("[srcos] task queue: %s/%s: %v", user, t.ID, err)

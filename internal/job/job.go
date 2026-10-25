@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
@@ -368,43 +369,78 @@ func randomSuffix() string {
 //
 // Two consumers share one queue: the gateway's task runner (which drains it
 // automatically) and `srcos job run` (a human asking for it now, in another
-// process). The window that matters is between "no instance record yet" and "the
-// record says running" — a create-with-O_EXCL closes it, so a submission is
-// executed once and not twice.
-//
-// The marker stays put after the run: a taken submission has been attempted,
-// and a daemon that retries forever is worse than one that runs once.
-// `srcos job run --force` is the deliberate way to try again.
+// process). The marker is an advisory *lease*: Claim takes an exclusive flock
+// on the file and the lock is released automatically when the owning process
+// exits. A crash therefore frees the submission immediately, while a live run
+// keeps it until it is done. The instance record (outside the tool-writable
+// workspace) remains the authority on what actually ran; this file only decides
+// who starts it.
 const claimFile = ".srcos-claimed"
 
 // ClaimPath is the claim marker of one job directory.
 func ClaimPath(jobDir string) string { return filepath.Join(jobDir, claimFile) }
 
-// Claim takes a submission for execution and reports whether it got it.
-//
-// The marker lives in the job directory, which is inside the user's workspace —
-// deliberately not a lock the platform depends on for *correctness*: the
-// instance record (outside the workspace, unwritable by the tool) is the
-// authority on what has run. This file only makes "who starts it"
-// deterministic.
-func Claim(jobDir string) (bool, error) {
-	f, err := os.OpenFile(ClaimPath(jobDir), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if os.IsExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	// The content is a hint for whoever looks at the directory; the existence
-	// of the file is what decides.
-	fmt.Fprintf(f, "claimed by pid %d at %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
-	return true, f.Close()
+// Lease is a held claim. Release (or process exit) frees it; the file itself
+// stays as a human-readable hint.
+type Lease struct {
+	file *os.File
+	once sync.Once
 }
 
-// Claimed reports whether a runner already took this submission.
+// Release unlocks and closes the lease. It is safe to call more than once.
+func (l *Lease) Release() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		if l.file != nil {
+			_ = unlockFile(l.file)
+			_ = l.file.Close()
+			l.file = nil
+		}
+	})
+}
+
+// Claim tries to take the lease for one submission. A non-nil lease means this
+// caller owns it until Release. A nil lease with a nil error means another
+// runner holds it. The marker is created on first use and rewritten with the
+// claimant's pid/time while the lock is held; the content is a hint, the flock
+// is what arbitrates.
+func Claim(jobDir string) (*Lease, error) {
+	f, err := os.OpenFile(ClaimPath(jobDir), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		if errors.Is(err, errLeaseHeld) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// We hold the lock: refresh the human-readable hint. A write failure does
+	// not invalidate the lease (the lock is the decision), so keep it.
+	_ = f.Truncate(0)
+	if _, err := f.Seek(0, 0); err == nil {
+		_, _ = fmt.Fprintf(f, "claimed by pid %d at %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	}
+	return &Lease{file: f}, nil
+}
+
+// Claimed reports whether another runner currently holds this submission's
+// lease. It is a best-effort early check: Claim is the decision, so a false
+// positive/negative here only costs one extra attempt.
 func Claimed(jobDir string) bool {
-	_, err := os.Stat(ClaimPath(jobDir))
-	return err == nil
+	f, err := os.OpenFile(ClaimPath(jobDir), os.O_RDWR, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := lockFile(f); err != nil {
+		return errors.Is(err, errLeaseHeld)
+	}
+	_ = unlockFile(f)
+	return false
 }
 
 // Submit writes a job into the drop-box and returns its id.
