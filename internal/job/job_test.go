@@ -342,4 +342,12 @@ func TestSubmitScriptWritesOneSelfConsistentJob(t *testing.T) {
 	if string(script) != "#!/bin/sh\necho hi\n" {
 		t.Fatalf("work.sh = %q", script)
 	}
+	// The publication step must not leave a temp file behind.
+	temps, err := filepath.Glob(filepath.Join(dir, ".job-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("leftover temp files: %v", temps)
+	}
 }

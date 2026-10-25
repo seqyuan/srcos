@@ -467,11 +467,40 @@ func SubmitScript(configDir, user, toolID string, j *Job, script []byte) (string
 		_ = os.RemoveAll(dir)
 		return "", "", err
 	}
-	if err := safefs.WriteFileBeneath(config.DataDir(configDir), filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
+	if err := writeJobFileAtomic(dir, append(data, '\n')); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", "", err
 	}
 	return id, dir, nil
+}
+
+// writeJobFileAtomic publishes job.json by writing a sibling temp file and
+// renaming it into place. job.json is the queue's publication marker, so a
+// reader must never see a half-written one; the unique temp name also keeps
+// concurrent writers from truncating each other's bytes.
+func writeJobFileAtomic(dir string, data []byte) error {
+	f, err := os.CreateTemp(dir, ".job-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, "job.json"))
 }
 
 func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string, error) {
