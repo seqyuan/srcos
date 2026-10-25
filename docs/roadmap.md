@@ -8,17 +8,20 @@
 
 ## 1. 定位与设计思想
 
-> ### SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。
+> ### SRCOS 是面向人的工具运行平台：工具自带页面，平台提供执行、挂载、资源、实例与审计。
+>
+> 更准确地说：SRCOS 是「工具的运行时契约层」——**拥有执行，不拥有呈现**。
 
 这条是本项目**全部设计取舍的最终判据**，展开论述见 [`../AGENTS.md`](../AGENTS.md)「定位」章。
+AI 探索/agent 能力保留为可选面（MCP/agent token），但不作为本阶段架构的优先级依据。
 
 **一句话**：SRCOS 把「一台服务器、一个 Web 入口、每人管理自己的转发」升级为
 「**一个入口，上架工具，授权使用，人人有隔离工作区，工具被实例化管理**」——
 一个面向实验室/HPC 的小型云工具平台。
 
 成本结构上，SRCOS 的赌注是：**一次性 token 投入（把探索出的方法固化成工具）+ 零边际 token 成本（反复执行）**
-—— 本质是**把 AI 的探索成果资本化**。因此 SRCOS 与 AI 平台是互补而非竞争关系，
-应该主动充当 AI 平台的执行层（MCP 就是对接口，见 ADR-019）。
+—— 本质是**把探索成果资本化**。AI 探索/agent 是可选的上层（MCP 是接口，见 ADR-019），
+但本阶段优先做面向人的工具运行平台；不让 agent 能力反向决定架构优先级。
 
 ### 1.1 沿用自原 goprox 的四条不变原则
 
@@ -101,12 +104,12 @@
   （submit/cancel/run_flow）、拒绝事件（CSRF/未认证/只读试写）、配置变更（grant/group/admins/token，API 与 CLI 两条门）、生命周期（done/settled/reaped/stopped/orphaned/adopted）+ `srcos audit prune`（保留策略，显式）+ hash chain（`srcos audit verify`，每文件）+ **外发**（`state.yaml` 的 `audit.forward_url`，信任锚）
 - **统一的服务实例化**（ADR-026/027/028）：`environment:` 具名环境（管理端声明 root/env/provides，工具只引用 id）
   + `command:` 声明式启动（与 `entry` 二选一，`${SRCOS_*}` 从环境展开）+ `ingress` 补齐（websocket/bwlimit/port 可选）
-  + `backend: external`（转发既存后端：不启动/不停止/不回收）+ content digest（版本 = 可验证内容）
+  + `backend: external`（转发既存后端：不启动/不停止/不回收）+ content digest（仅审计线索；不做版本控制）
 - **工具访问申请/审批**（B3）：`grant.requestable` 显式开关 + `internal/accessrequest`
   （`data/requests/*.yaml`）+ `/api/requests`（用户）+ `/api/admin/requests`（approve/deny）
   + `/requests` 页 + `/admin` 待审区；批准 = `AddUserToGrant` + 落盘，审计 `request.*`
 - **托管 agent 凭据**（ADR-025）：工具 `agent: {mcp, tools}` 声明 → 实例启动签发 `data/agent-tokens.yaml`
-  → `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`（0600）→ 停止撤销 + 启动清扫；认证走 `agenttoken.Chain`（REST 与 MCP 一致）
+  → 宿主 `data/instance-credentials/<id>/agent-token`（0600），只读挂进该实例（`$SRCOS_AGENT_TOKEN_FILE`）→ 停止撤销 + 启动清扫；认证走 `agenttoken.Chain`（REST 与 MCP 一致）
 
 **工程基线**
 
@@ -517,12 +520,17 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   bundle/profile 剥离 agent 栈）回归风险大且逆着 dsh 的设计走。
 - **禁止**：把 dsh 变成硬依赖或核心路径。没有 dsh 时 SRCOS 必须照常工作（对齐 `ennote` 的 degraded 模式）。
 
-### ADR-017：战略定位 —— AI 平台的确定性执行后端
+### ADR-017：战略定位 —— 运行时契约层（2026-10-25 更新）
+
+> **更新**：本 ADR 最初的表述是「AI 平台的确定性执行后端」。AGENTS.md 现已把定位调整为
+> 「面向人的工具运行平台：拥有执行，不拥有呈现」。下文的三个支柱仍然成立，但
+> “AI 平台执行层 / agent 优先”不再是本阶段的优先级依据；MCP/agent token 代码保留。
+
 - **背景**：生信云平台可能势微，通用 AI 平台上升，但**确定性场景**（企业内部项目管理、非工程师使用、受控输入输出）有独立且持久的价值。
-- **决策**：把定位固化为「**SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。**」并写入 [`AGENTS.md`](../AGENTS.md) 作为全部设计取舍的最终判据。
+- **决策**：把定位固化为「**SRCOS 是工具的运行时契约层：拥有执行，不拥有呈现。**」并写入 [`AGENTS.md`](../AGENTS.md) 作为全部设计取舍的最终判据。
 - **三个支柱**：
   1. **执行路径 0 token** —— 一次性 token 投入（把方法固化成工具）+ 零边际 token 成本（反复执行），本质是**把 AI 的探索成果资本化**。
-  2. **确定性 / 可复现 / 可审计** —— `work.sh` + `.sign` + 版本化工具 + `interface` 签名；谁、何时、哪个版本、什么参数全部留痕。这是企业内场景的真正诉求。
+  2. **确定性 / 可复现 / 可审计** —— `work.sh` + `.sign` + 工具引用 + `interface` 签名；谁、何时、哪个工具、什么参数全部留痕。工具内容版本由外部 git/制品库管理。
   3. **不碰工具 UI** —— AI 让造 UI 的边际成本趋近于零，UI 因此不再是护城河；平台价值转移到**注册、授权、隔离、资源、编排、审计**。
 - **推论链（推导出后面所有设计）**：
   ```
@@ -535,7 +543,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 - **必要补全（否则「不管 UI」自相矛盾）**：**SRCOS 从 `interface` 自动生成 fallback 表单**
   （`type: string` → 文本框，`type: path` → 路径选择器……）。
   工具想要更好看的 UI 就自己写 shiny 覆盖它，不想写就用自动生成的。**渐进增强。**
-- **与 AI 平台的关系**：互补，不是竞争。SRCOS 应主动做 AI 平台的执行层，MCP 就是对接口（ADR-019）。
+- **与 AI 平台的关系（更新后）**：互补，不是竞争；MCP/agent token 作为可选接口保留，
+  但当前阶段的默认用户是人，工具自带页面，平台只提供执行/挂载/资源/实例/审计。
 - **不把定位收窄到生信**：生信是第一个落地场景，但差异化三角（确定性 / 0 token / 可审计）适用于任何需要受控执行的场景。
 
 ### ADR-018：一份 `interface` 派生三个前端
@@ -743,7 +752,7 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
   - **存在运行态文件 `data/agent-tokens.yaml`**，与 `config/agent-tokens.yaml`（人签发的）分开 ——
     两个写入者、两个文件，而不是两个进程抢一个文件。认证用 `agenttoken.Chain`（用户令牌 + 实例
     令牌），REST 与 MCP 两面一致。
-  - **投递是虚拟 home 里 0600 的 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`**，不是环境变量：所有实例共用一个 OS
+  - **投递是共享 home 之外的 0600 文件，并只读 bind 进本实例的 mount namespace**（`$SRCOS_AGENT_TOKEN_FILE`）：所有实例共用一个 OS
     用户，`/proc/<pid>/environ` 在同 uid 的视野里可读；0600 文件正好只属于这个实例。
   - **生命周期 = 实例**：启动签发；停止（显式 stop / 回收 / 管理端强制停）撤销；网关启动时清扫
     「实例已不在」的令牌 —— 崩溃不会删任何东西，清扫是这条保证的兜底。
@@ -847,18 +856,16 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 
 ---
 
-### ADR-028：工具的内容摘要（`digest`）—— 不是签名
+### ADR-028：工具的内容摘要（`digest`）—— 仅审计线索，不是版本控制
 
-- **背景**：`version` 是工具作者写的字符串，**它变了才说明问题**；而包里的文件可以改了而不改版本号。
-  「可复现 / 可审计」要求「到底跑的哪份代码」可答。
+- **背景**：SRCOS 只负责注册与引用工具；工具版本/内容由外部（git、制品库、镜像）管理。
+  「可审计」仍要求运行记录能指回“当时引用的目录内容”，但那是一条线索，不是平台的版本机制。
 - **决策**：`tool.Digest(dir)` = 包内容的 sha256（相对路径 + 权限 + 内容，稳定排序），加载时算一次；
   排除构建缓存与版本控制元数据（`__pycache__` / `node_modules` / `.git` / `.DS_Store` / `*.pyc`）。
-  记录在三处：**实例记录**（`tool_digest`，每个实例都留）、**审计**（`Target.Digest`，
-  显示成 `demo@0.1.0#a58e88795f2a`）、**`tool list` / `/api/tools`**。
+  记录在三处：**实例记录**（`tool_digest`）、**审计**（`Target.Digest`）、**`tool list` / `/api/tools`**。
+- **明确不是版本控制**：不做 digest pin、不可变快照、回滚或多版本共存；排队中的任务仍按运行时
+  引用的目录执行。需要强版本保证时，应由外部 git/制品库 + 重放流程解决，而不是在 SRCOS 里加机制。
 - **明确不是签名**：它证明「内容与记录一致」，不证明「内容可信」——后者是审计的外部锚（ADR-024）。
-  两件事混在一起会把这个能力说大。
-- **不做（暂）**：git 的 `HEAD` + dirty 记录。它要为**每次加载**起一个子进程，收益不足以现在付；
-  digest 已经把「变了看得出来」做到了。
 - **推论**：工具包不要放镜像/环境大文件（走 `ro_mounts` / `environment`），否则每次加载都要重算摘要。
 
 ---
@@ -1169,9 +1176,9 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-26 | **管理端启动服务（B/1）** —— 控制台以前能停不能起。`runtime.Runner.ForUser`（浅拷贝共享端口池/路由表/后端/存储/审计，只换 User）+ `POST /api/admin/instances`（{user,tool}，仅管理员，先停后起，审计 `instance.started`）+ `/admin` 表单（用户×service 工具下拉）。e2e 新增第 11 步：管理员启动 `e2e-web`（python http.server）→ 路由经 `/proxy/<user>/<tool>/` 200 → 审计 started → 停止 → 审计 stopped；**这是 e2e 首次覆盖 service 路径**。剩：storages 编辑 / 申请审批流 |
 | 2026-09-26 | **B3：工具访问申请/审批流**（设计已确认 → 已实现）—— `grant.requestable` 显式开关（只公开存在性，默认 false；`Policy.Requestable` 里具体 grant 优先于 `*`）+ `internal/accessrequest`（`data/requests/*.yaml`，幂等/状态机/原子写/0600）+ API（`GET/POST /api/requests` 只认 session；`GET /api/admin/requests`、`POST /api/admin/requests/<id>/approve|deny`；批准先写 grant 并落盘再标记 decided）+ UI（`/tools` 可申请区 + `/requests` 用户页 + `/admin` 待审区）+ 审计 `request.*`。**e2e 抓到一处遗漏**：`/api/requests` 未注册进 server mux 的 srcos API 路径表 → 请求掉进 `/api/` 代理回退 404；第 12 步现覆盖 申请→待审→批准→可见→审计 |
 | 2026-09-26 | **A2：提交幂等键** —— `job.IdempotentID(user,tool,key)` + `job.SubmitAs`（已有 job.json 则报 `ErrJobExists`，不覆盖）+ `execute.SubmitRequest.IdempotencyKey`（重放时直接返回首次的 job/instance + 终态）；API `POST /api/jobs` 的 `idempotencyKey`、MCP `srcos_submit_job` 的 `idempotency_key`；重放审计带 `idempotent_replay=true`。e2e 第 13 步：同 key 同 job、异 key 新 job |
-| 2026-09-26 | **A1：托管 agent 的实例身份**（ADR-025）—— `tool.AgentSpec`（`agent: {mcp, tools}`，只对 service 合法，注册期校验）+ `agenttoken.MintInstance/RevokeInstance/InstanceTokens` + `agenttoken.Chain`（用户令牌 + 实例令牌；新增 `ErrUnknownToken` 哨兵让 Chain 能区分「这个 store 没有」与「凭据无效」）+ `runtime.Options.AgentTokens`（StartService 签发到 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token` 0600、StopService 撤销）+ 网关启动清扫死实例的令牌 + `data/agent-tokens.yaml`（`config.InstanceTokensPath`，与人的令牌分文件）+ `audit.Actor.Instance`。e2e 第 11 步：启动 e2e-web（带 `agent:`）→ 凭证落在 home 且可用 → 停止后 401 → 审计有 `agenttoken.revoke` |
+| 2026-09-26 | **A1：托管 agent 的实例身份**（ADR-025）—— `tool.AgentSpec`（`agent: {mcp, tools}`，只对 service 合法，注册期校验）+ `agenttoken.MintInstance/RevokeInstance/InstanceTokens` + `agenttoken.Chain`（用户令牌 + 实例令牌；新增 `ErrUnknownToken` 哨兵让 Chain 能区分「这个 store 没有」与「凭据无效」）+ `runtime.Options.AgentTokens`（StartService 签发到宿主 `data/instance-credentials/<id>/agent-token` 0600，并只读挂进实例；StopService 撤销）+ 网关启动清扫死实例的令牌 + `data/agent-tokens.yaml`（`config.InstanceTokensPath`，与人的令牌分文件）+ `audit.Actor.Instance`。e2e 第 11 步：启动 e2e-web（带 `agent:`）→ 凭证落在 home 且可用 → 停止后 401 → 审计有 `agenttoken.revoke` |
 | 2026-09-26 | **第一个真实服务工具 `srcos-tools/shiny-demo`** —— R Shiny 应用作为 `kind: service` 实例。做它的时候撞出并修了**三个真问题**：① 路由的 `BackendPath` 取自 healthcheck 路径（探活不在根的服务经代理全 404，见上一条）；② `tool.yaml` 的 `env:` 从未生效（见上一条）；③ 沙箱里挂 `/pmo/miniforge3` 会让 R 的启动脚本报 `bin/sed: not found` —— `/pmo` 是指向 `/Volumes/data/pmo` 的符号链接，R 内部用真实路径，必须挂真实路径（记入 environments.md）。**关键结论：Shiny 在 `/proxy/<用户>/<工具>/` 前缀下可直接工作** —— 它从 `window.location.pathname` 推导 base，资源与 WebSocket 自动落回前缀，不需要 base-path 配置。验证：headless Chromium 打开 `/proxy/alice/shiny-demo/` → 标题、直方图（经 WebSocket 送达）、实例身份、零 console 错误；前缀下 WebSocket 101。CI 加 `tool validate --tools-dir srcos-tools` |
-| 2026-09-26 | **`SRCOS_API` 注入 + shiny 用实例凭据调 SRCOS（A1 的首个真实消费者）** —— `SRCOS_API` 是 roadmap §4.4 写了、代码里一直**没有**的「工具回调平台的 REST 通道」：`config.GatewayAPIBase`（网关进程用自己的监听端口，否则读 state.yaml 的记录端口；都没有则不注入）+ `PathView.APIBase` → `SRCOS_API`。shiny-demo 声明 `agent: {mcp: [read]}`，app.R 用 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token` 调 `$SRCOS_API/tools` 并把结果显示在页面上。**实测**：headless Chromium 显示「实例凭据可用（只读）——SRCOS 回了 2 个工具」；网关日志 `agent alice via token <id> (instance alice-shiny-demo-svc) [read] GET /api/tools` —— 调用归属到实例；停止后凭据文件被删 + 审计 `agenttoken.revoke` |
+| 2026-09-26 | **`SRCOS_API` 注入 + shiny 用实例凭据调 SRCOS（A1 的首个真实消费者）** —— `SRCOS_API` 是 roadmap §4.4 写了、代码里一直**没有**的「工具回调平台的 REST 通道」：`config.GatewayAPIBase`（网关进程用自己的监听端口，否则读 state.yaml 的记录端口；都没有则不注入）+ `PathView.APIBase` → `SRCOS_API`。shiny-demo 声明 `agent: {mcp: [read]}`，app.R 用 `$SRCOS_AGENT_TOKEN_FILE` 调 `$SRCOS_API/tools` 并把结果显示在页面上。**实测**：headless Chromium 显示「实例凭据可用（只读）——SRCOS 回了 2 个工具」；网关日志 `agent alice via token <id> (instance alice-shiny-demo-svc) [read] GET /api/tools` —— 调用归属到实例；停止后凭据文件被删 + 审计 `agenttoken.revoke` |
 | 2026-09-26 | **审计外发（信任锚）** —— `audit.Sink`（`HTTPSink`：每事件 POST 一次）+ `audit.Forwarder`（本地 spool 一事件一文件 → 后台**按序**发送、成功才删 → 采集端故障保留重试 → 超 `forward_max` 丢最旧并计数）+ `Recorder.ForwardTo/ForwardStatus`；`state.yaml` 的 `audit.forward_url` / `forward_token` / `forward_max`；`/admin/audit` 显示待发送/已丢弃。**本地签名明确不做**（密钥在同一个写域，挡不住能重写全部文件的人，只是看起来像防篡改）。e2e 第 14 步：起 python 采集端 → 预写 state.yaml → 断言收到事件且带 `hash`（该步又抓到一个真 bug：端口变量带了尾空格 → URL 非法） |
 | 2026-09-26 | **专题指南 `docs/agent-mcp-positioning.md`**（D）—— 把 agent/dsh/MCP 的定位讨论落成文件：agent 的三层含义（外部/托管/dsh 内）、两条通道（MCP vs `srcos://`+REST）、三条不做（MCP Client / 直改 workspace / 推理循环）、优缺点表（A1 托管 agent 无实例身份、A2 agent 无幂等键、M1 `srcos://` 而非 MCP resources…）与建议；dsh 四个接触点与「为什么删路 B」。结论指向 ADR-011/016/017/019/024，不新增决策 |
 | 2026-09-26 | **B2（`storages.yaml` 管理端编辑）评估后不做** —— 网关在**构造时**把 storage provider 交给 api/execute/runtime，要即时生效需先把它做成可原地替换的（同 grants 的 `ReplaceWith`）；是可行的，但**价值偏低**（storages 很少变，重启一次可接受），而 UI 编辑会碰**安全边界**（`host_root` 的粒度就是数据可见范围，表单无法知道正确粒度）。结论：保留「手写文件 + 重启」；若将来真需要，做「编辑 + 明确提示需重启」而不做热加载 |
@@ -1188,7 +1195,8 @@ SRCOS 注册用户的运行时视图全部由 SRCOS 构造：
 | 2026-09-29 | **实例记录保留策略 + 列表不再随记录数变慢**（review P2）—— `internal/runtime/instance.go`：`sortNewestFirst` 从插入排序（O(n²)）改为 `sort.Slice`（O(n log n)）—— 记录只增不减，而它每 tick 被调多次；不可解析的记录不再静默消失（每进程每文件只记一次日志）。新增 `internal/runtime/prune.go`：`StaleInstances` / `PruneInstances`（只动**终态且超过保留期**的记录，连同它的日志与 `.verdict`；产物与 workspace 永不触碰）+ CLI `srcos job prune --keep 30d [--dry-run]`（显式，对齐 `audit prune`，动作本身记 `instance.prune`）；三个单测锁定「只删过期终态」「keep=0 no-op」「列表倒序」。注：扫描 tick 仍会多次调用 `ListInstances`（每个 reconcile/回收方法各自加载），但这已是线性且量小，未做跨方法共享快照（改动风险大于收益） |
 | 2026-09-29 | **降级模式的服务也显式设工作目录** —— `startService` 以前不设 `WorkingDirectory`：systemd 用户单元的默认 cwd 是 OS 用户的**真实 home**（不是虚拟 home，`$HOME` 虽指向虚拟 home，但进程 cwd 不是），于是 `sandbox: none` 的服务里相对路径会写到 workspace 之外；而普通子进程回退分支本就设了 `cmd.Dir`，两条路径不一致。抽出纯函数 `Local.serviceCommand` 并仅在 `View.Degraded` 时加 `-p WorkingDirectory=<cwd>`（沙箱内由 bwrap `--chdir` 设定，宿主路径在 namespace 里不存在，不能传给沙箱模式）。顺带与 task 的 TaskCommand 用同一种可移植写法。新增单测（降级设 / 沙箱不设）|
 | 2026-09-29 | **评审遗留项处置 step 0–3/5–6（性能与凭据）** —— ① **基准（step 0）**：新增 `BenchmarkListInstances`（1k≈106ms、10k≈1.04s、151MB/次扫描）与 `BenchmarkDiscover`（带 50MiB 负载的工具包 74ms/请求）——后者说明扫描成本在 YAML 解析与分配，不在磁盘。② **`#2-a`**：`ScanLoop` 每 tick 只 `ListInstances` 一次，快照供六个消费者共享；写入路径先 `reloadForWrite` 重读（10k 记录时每 tick 从 ~6s/~900MB 降到 ~1s/~150MB）。③ **`#3`**：digest 增加 stat 签名缓存（含 mode，与内容摘要同一次 walk），50MiB 工具包 74ms→0.235ms。④ **`#5.2`**：新增 `audit.forward_token_file`（0600 文件，不落 state.yaml；不用环境变量）。⑤ **`#5.1`**：`warnedInstances` 只补注释。**`#2-b`**（flowrun 每轮快照）经核对无效、搁置；**`#4`** 待拍板覆盖范围。方案与审核修正见 `docs/plans/2026-09-29-review-remediation-plan.md` |
-| 2026-10-23 | **评审修复：隔离、注入与路由一致性** —— ① **SGE endpoint 主机校验 + `ssh --`**（`ReadEndpoint` 现在只接受 DNS 名/IP，拒绝 `-` 开头；`Tunnel.Args` 用 `--` 终止选项），并让 rendezvous 目录拒绝 symlink（防止 `ClearRendezvous` 误删目标目录）。② **bwrap 网络默认隔离**：`tool.yaml` 新增 `network: host` / `none`；bwrap task 默认 `none`（`--unshare-net`），service 必须 `host`（ingress 走 loopback）。③ **管理端/任务页 XSS**：实例 ID 不再拼进单引号内联 JS，改用 `jsString`（JSON + HTML 双转义）。④ **路由字段不再被 tick 丢掉**：`bwlimit` / `backend_path` / 显式 `websocket: false` 持久化到实例记录的 `ingress`，`routeEntryFrom` 从记录重建。⑤ **实例凭据按实例隔离**（`$HOME/.srcos/instances/<id>/agent-token`）；同一用户的多个 agent 服务不再互相覆盖/删除。⑥ **写路径 symlink 加固**（`internal/safefs`：目录/文件写入拒绝 symlink；读路径 open 后校验 `/proc/self/fd`）；根挂载 `/` 被拒绝。⑦ flow 并发有上限（`MaxConcurrency`）；登录深链接不再丢失。新增对应单测（SGE 注入/路由 ingress/safefs/XSS/network/并发/登录 next） |
+| 2026-10-23 | **评审修复：隔离、注入与路由一致性** —— ① **SGE endpoint 主机校验 + `ssh --`**（`ReadEndpoint` 现在只接受 DNS 名/IP，拒绝 `-` 开头；`Tunnel.Args` 用 `--` 终止选项），并让 rendezvous 目录拒绝 symlink（防止 `ClearRendezvous` 误删目标目录）。② **bwrap 网络默认隔离**：`tool.yaml` 新增 `network: host` / `none`；bwrap task 默认 `none`（`--unshare-net`），service 必须 `host`（ingress 走 loopback）。③ **管理端/任务页 XSS**：实例 ID 不再拼进单引号内联 JS，改用 `jsString`（JSON + HTML 双转义）。④ **路由字段不再被 tick 丢掉**：`bwlimit` / `backend_path` / 显式 `websocket: false` 持久化到实例记录的 `ingress`，`routeEntryFrom` 从记录重建。⑤ **实例凭据按实例隔离**（宿主 `data/instance-credentials/<id>/agent-token` + 只读 bind 进实例，`$SRCOS_AGENT_TOKEN_FILE`）；同一用户的多个 agent 服务既不会互相覆盖，也不会互相读取。⑥ **写路径 symlink 加固**（`internal/safefs`：目录/文件写入拒绝 symlink；读路径 open 后校验 `/proc/self/fd`）；根挂载 `/` 被拒绝。⑦ flow 并发有上限（`MaxConcurrency`）；登录深链接不再丢失。新增对应单测（SGE 注入/路由 ingress/safefs/XSS/network/并发/登录 next） |
 | 2026-10-23 | **核心接口与授权收口（第二轮）** —— ① `srcos_read_file` 的 `tool` 参数改用 `VisibleManifest`：未授权工具不能再“借”自己的 storage 给读取（此前可绕过 ADR-020 闭包）。② 管理面改成**仅浏览器 session**（agent token 的 scope 只有 read/submit，没有 admin）；`/api/services` 的增删改（服务卡片/布局）同样 session-only，`submit` 只覆盖执行。③ `runtime.ValidatePathParams` 在提交/启动/流程执行前校验 `file/directory/path` 的 `from` 归属、文件系统类型与 `files` 存在性；MCP/REST/CLI 不能再绕过路径选择器。④ `type: path` 的 `select` 未写时按文档归一化为 `directory`；`files` 只允许纯文件名；`tool.Find` 校验 id 语法，堵住路径穿越。⑤ `ReadFile` 增加 open 后 `/proc/self/fd` 校验与 `O_NOFOLLOW`，并拒绝 FIFO/设备。新增 `pathparams`、admin-session、service-card-session、read-file-grant 等回归测试 |
 | 2026-10-23 | **授权收口（第三轮）** —— ① **配额预留**：`execute.Controller` 新增 `quotaMu` + `reserved`，队列启动、服务启动、flow unit 启动统一走 `admit`（检查 + 预留原子化）；`RunTaskWithStarted` / `StartServiceWithStarted` 在实例记录进入 `running`/`starting` 时释放预留，避免与记录重复计费。② 管理端代启动**要求目标用户已有该工具 Grant**（管理员不能隐式代授权）。③ `mutatePolicy` 串行化“改内存 + 写盘”，写盘失败回滚到快照；申请审批也走同一路径。④ `type: path` 明确为输入选择器（默认 directory、要求存在），输出目录用 string/原始 directory；提交/启动前 `runtime.ValidatePathParams` 校验 `from`/类型/`files`。⑤ 新增 quota admission、save rollback、target-grant、path-params 回归测试 |
 | 2026-10-23 | **产物契约收口** —— ① `job.outputs` 在启动前按实例挂载表校验：只允许可写挂载（`/workspace`、home、`/flow`、rw storage），`/tool` 或未挂载路径直接拒绝；degraded 模式同时接受 host/sandbox 两种拼写。② `interface.outputs[].provides` 只允许 directory；流程节点成功后 `flowrun.checkProvides` 校验承诺的文件，缺失即节点失败。 |
+| 2026-10-25 | **执行链路收口（评审落地）** —— ① `completion.doneWhen` 工具级生效（job 可覆盖），`submitted` 状态/探针宿主路径/deadline 持久化，`ReconcileTasks` 在重启后继续探测；探针期间 `stopped` 是权威；deadline 回退到 walltime。② 注册期补校验：`doneWhen` type/path/timeout、lifecycle restart/时长、healthcheck path/timeout/grace（并真正使用 startup_grace，支持 `60s` 与 `H:MM:SS`）、模板/entry 的路径与 symlink 边界、GPU 非负；`h_vmem/v_mem` 不再静默忽略。③ `server.Options.ToolsDir` 默认值修复（任务队列）；CLI 脚本提交走 `SubmitScript`（先 work.sh 后 job.json，恰好一个 job）。④ 实例凭据迁到 `data/instance-credentials/<id>/agent-token` 并只读 bind 到 `$SRCOS_AGENT_TOKEN_FILE`，不再落在共享 home。⑤ `SaveInstance`/`SaveRun`/token 文件改成唯一 temp + fsync；`sandbox.Spec` canonicalize 挂载根（修复 symlink data/storage）；GPU lower-only；degraded flow 产物解析；`flow.Run.Samples` 改为样本行数；REST/MCP 解码 UseNumber。⑥ 性能：`inspect.record` 完整 id 直查、`Discover` 2s TTL 缓存；`StartService` 启动不再被请求 context 取消；端口释放按 pool owner。 |

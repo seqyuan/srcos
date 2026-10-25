@@ -40,7 +40,7 @@
 
 - 默认 `<flows-dir>` = `<程序目录>/srcos-flows`（与 `srcos-tools` 并列），
   可用 `--flows-dir` / `$SRCOS_FLOWS_DIR` 覆盖（解析顺序与工具一致）。
-- 流程只**引用**工具，不打包工具：节点指向工具目录里已注册的 `id@version`。
+- 流程只**引用**工具，不打包工具：节点指向工具目录里已注册的 `id`（可选 `@version` 后缀）。
 
 ---
 
@@ -210,7 +210,7 @@ expose:
 
 **节点与工具**
 
-6. `tool` 引用的工具存在于工具目录；带 `@version` 时版本必须精确匹配。
+6. `tool` 引用的工具存在于工具目录；带 `@version` 时工具的 `version` 必须精确匹配（工具 `version` 本身可选）。
 7. 节点工具必须 `kind: task`（服务不能进流程）。
 8. 工具自身的注册期校验必须通过（`tool.yaml` 合法：13 类检查，含 `executor × backend` 交叉校验 —— 见 ADR-007）。
 

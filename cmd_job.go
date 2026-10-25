@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -68,7 +67,7 @@ func runToolCmd(args []string) {
 		fmt.Printf("%-20s %-8s %-12s %-8s %-7s %-9s %s\n", "ID", "VERSION", "DIGEST", "KIND", "SANDBOX", "BACKEND", "NAME")
 		for _, t := range tools {
 			fmt.Printf("%-20s %-8s %-12s %-8s %-7s %-9s %s\n",
-				t.ID, t.Version, tool.ShortDigest(t.Digest), t.Kind, t.Sandbox, t.Backend, t.Name)
+				t.ID, versionLabel(t.Version), tool.ShortDigest(t.Digest), t.Kind, t.Sandbox, t.Backend, t.Name)
 		}
 
 	case "validate":
@@ -95,6 +94,15 @@ func runToolCmd(args []string) {
 	}
 }
 
+// versionLabel keeps a table aligned when version is omitted (it is an
+// optional human label; SRCOS does not manage versions).
+func versionLabel(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "-"
+	}
+	return v
+}
+
 // validateOneTool loads a tool and reports its contract plus whether the
 // declared sandbox can actually run on this host.
 func validateOneTool(dir string, envs environment.Provider, envPath string) {
@@ -104,14 +112,17 @@ func validateOneTool(dir string, envs environment.Provider, envPath string) {
 		os.Exit(1)
 	}
 	fmt.Printf("ok   %-20s v%-8s %-8s backend=%-6s sandbox=%-10s\n",
-		t.ID, t.Version, t.Kind, t.Backend, t.Sandbox)
+		t.ID, versionLabel(t.Version), t.Kind, t.Backend, t.Sandbox)
+	if t.Root != "" {
+		fmt.Printf("     root     %s\n", t.PackageRootDir())
+	}
 	if t.Entry != "" {
-		fmt.Printf("     entry    %s\n", t.Entry)
+		fmt.Printf("     entry    %s\n", t.EntryPath())
 	} else {
 		fmt.Printf("     command  %s\n", strings.Join(t.Command, " "))
 	}
-	// The version is a string someone wrote; the digest is what makes "which
-	// code ran" answerable when the files change without it.
+	// The digest is an audit clue (what the referenced directory contained),
+	// not a version-control mechanism. `version` is an optional human label.
 	fmt.Printf("     digest   %s\n", t.ShortDigestOrDash())
 	fmt.Printf("     inputs   %d, outputs %d, storages %v\n",
 		len(t.Interface.Inputs), len(t.Interface.Outputs), t.RequiresStorages)
@@ -275,31 +286,31 @@ func runJobSubmit(args []string) {
 		os.Exit(1)
 	}
 
-	// Materialize the submission. The directory is the queue (ADR-004), and
-	// the same helper backs POST /api/jobs so the two entry points cannot
-	// drift on validation or layout.
-	jobID, dir, err := job.Submit(*jf.configDir, user, t.ID, j)
-	if err != nil {
-		fatalf("%v", err)
-	}
-	// An explicit script argument means the caller generated this run's
-	// work.sh; otherwise the tool package's entry is used at run time.
+	// An explicit script argument means the caller generated this run's work.sh;
+	// otherwise the tool package's entry is used at run time.
+	var script []byte
 	if len(positional) > 0 {
 		data, rerr := os.ReadFile(positional[0])
 		if rerr != nil {
 			fatalf("read %s: %v", positional[0], rerr)
 		}
-		if werr := os.WriteFile(filepath.Join(dir, "work.sh"), data, 0o755); werr != nil {
-			fatalf("%v", werr)
-		}
-		if j.Command == nil {
-			j.Command = []string{"bash", "work.sh"}
-			// Re-write job.json so the recorded command matches the script we
-			// just placed next to it.
-			if _, _, err := job.Submit(*jf.configDir, user, t.ID, j); err != nil {
-				fatalf("%v", err)
-			}
-		}
+		script = data
+	}
+
+	// Materialize the submission. The directory is the queue (ADR-004), and
+	// the same helper backs POST /api/jobs so the two entry points cannot
+	// drift on validation or layout. A submission with a script writes work.sh
+	// before job.json (the publication step), so the queue cannot claim a job
+	// whose script is not there yet.
+	var jobID, dir string
+	var err error
+	if script != nil {
+		jobID, dir, err = job.SubmitScript(*jf.configDir, user, t.ID, j, script)
+	} else {
+		jobID, dir, err = job.Submit(*jf.configDir, user, t.ID, j)
+	}
+	if err != nil {
+		fatalf("%v", err)
 	}
 
 	fmt.Printf("submitted %s\n", jobID)
@@ -375,7 +386,8 @@ func runJobRun(args []string) {
 		recordPath := runtime.InstancePath(*jf.configDir, instID)
 		prev, prevErr := runtime.LoadInstance(recordPath)
 		if !*jf.force {
-			if prevErr == nil && (prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning) {
+			if prevErr == nil && (prev.State == runtime.StateSucceeded || prev.State == runtime.StateRunning ||
+				prev.State == runtime.StateSubmitted) {
 				fmt.Printf("skip %s (already %s; use --force to re-run)\n", loaded.ID, prev.State)
 				continue
 			}

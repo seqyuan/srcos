@@ -84,7 +84,7 @@ func (s *Server) sweepInstanceCredentials() {
 		// The credential is revoked; its file is dead weight. Use the same
 		// per-instance path as mint, never a shared one (a user may host
 		// several agent services at once).
-		_ = os.Remove(config.InstanceTokenPath(config.DirOf(s.registry), t.User, t.Instance))
+		_ = os.Remove(config.InstanceTokenPath(config.DirOf(s.registry), t.Instance))
 		log.Printf("[srcos] revoked the credential of dead instance %s", t.Instance)
 	}
 }

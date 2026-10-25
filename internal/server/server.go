@@ -14,6 +14,7 @@ import (
 	"github.com/seqyuan/srcos/internal/audit"
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/environment"
 	"github.com/seqyuan/srcos/internal/execute"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/mcp"
@@ -106,6 +107,11 @@ type Options struct {
 	ToolsDir string
 	// Storages is the StorageProvider. Nil means "load config/storages.yaml".
 	Storages storage.Provider
+	// Environments resolves a tool's `environment:` (config/environments.yaml).
+	// Nil means "load config/environments.yaml"; a missing file is not an error
+	// (this deployment declares no named environments), so a submission that
+	// references one then fails with a clear message instead of a nil provider.
+	Environments environment.Provider
 	// Grants gates tool visibility and execution. Nil means "allow all", which
 	// is the pre-authorization default and is replaced in Phase 3.
 	Grants api.GrantChecker
@@ -210,6 +216,26 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		}
 	}
 
+	// Named environments: the write path needs the same provider the supervisor
+	// was built with, or a task/flow submitted through the gateway fails at
+	// prepare time with "no environment provider is configured". A malformed
+	// file is reported but must not take the gateway down: tools that do not
+	// reference an environment keep working.
+	environments := opts.Environments
+	if environments == nil {
+		provider, err := environment.Load(config.EnvironmentsPath(configDir))
+		if err != nil {
+			log.Printf("[srcos] environments.yaml: %v (tools declaring an environment will fail until it is fixed)", err)
+		} else {
+			environments = provider
+		}
+	}
+	if checker, ok := environments.(environment.ReachabilityChecker); ok {
+		for _, problem := range checker.CheckReachable() {
+			log.Printf("[srcos] warning: %s", problem)
+		}
+	}
+
 	// The authorization policy. A configured-or-defaulted policy is always
 	// present, because "no policy" and "policy allowing everything" must not be
 	// the same state: a deployment that forgot the file should deny, not open.
@@ -294,6 +320,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		ConfigDir:     configDir,
 		ToolsDir:      toolsDir,
 		Storages:      storages,
+		Environments:  environments,
 		Grants:        grants,
 		AgentTokens:   agentTokens,
 		Authenticator: authenticator,
@@ -356,7 +383,16 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// The task queue drains the submission drop-box. It shares the API handler's
 	// write-path controller, so a queued run goes through exactly the same
 	// validation, grants and quotas a submitted one does.
-	if opts.TaskWorkers >= 0 && opts.ToolsDir != "" && srv.apiHandler.Executor() != nil {
+	// Use the resolved toolsDir, not opts.ToolsDir: a deployment that relies on
+	// the default (SRCOS_TOOLS_DIR / <program dir>/srcos-tools) has an empty
+	// opts.ToolsDir, and gating the queue on the raw option silently disabled
+	// "submit and it runs" for exactly the common case.
+	if opts.TaskWorkers >= 0 && toolsDir != "" && srv.apiHandler.Executor() != nil {
+		workers := opts.TaskWorkers
+		if workers <= 0 {
+			workers = execute.DefaultTaskWorkers
+		}
+		log.Printf("[srcos] task queue: %d worker(s), tools dir %s", workers, toolsDir)
 		srv.taskQueue = execute.NewQueue(srv.apiHandler.Executor(), execute.QueueOptions{
 			Workers: opts.TaskWorkers,
 			Users: func() []string {

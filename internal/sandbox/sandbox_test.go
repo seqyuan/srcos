@@ -348,3 +348,34 @@ func TestAddRejectsTheSandboxRoot(t *testing.T) {
 		t.Fatal("a root mount must be rejected even when /workspace is already mounted")
 	}
 }
+
+// A mount root may itself be a symlink (a deployment often moves data to
+// another volume). ResolveExisting must compare against the canonical root,
+// not the raw spelling, or every read under the mount is reported as an escape.
+func TestResolveExistingAcceptsSymlinkedMountRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, "ref"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	spec := &Spec{}
+	if err := spec.Add(Mount{HostPath: linkRoot, SandboxPath: "/data", Mode: ReadOnly, Origin: "storage:data"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := spec.ResolveExisting("/data/ref")
+	if err != nil {
+		t.Fatalf("a symlinked mount root was rejected: %v", err)
+	}
+	want := filepath.Join(realRoot, "ref")
+	if got != want {
+		t.Fatalf("ResolveExisting = %q, want %q", got, want)
+	}
+	if display, err := spec.Display(want); err != nil || display != "/data/ref" {
+		t.Fatalf("Display = %q, %v", display, err)
+	}
+}

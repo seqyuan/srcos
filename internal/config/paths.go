@@ -187,11 +187,13 @@ func FlowRunsDir(configDir, user string) string {
 
 // InstanceTokenPath is where a hosted agent's instance credential is written.
 //
-// One directory per instance, not one file per user: a user may run several
-// agent services at once, and a shared $HOME/.srcos/agent-token would make
-// them overwrite (and delete) each other's credential.
-func InstanceTokenPath(configDir, user, instanceID string) string {
-	return filepath.Join(HomeDir(configDir, user), ".srcos", "instances", instanceID, "agent-token")
+// It deliberately lives outside the virtual home. Every instance of one SRCOS
+// user gets the same data/homes/<user> mount, so a 0600 file there is readable
+// by that user's other instances (all instances run as the same OS user). The
+// runtime bind-mounts this file read-only into the owning instance's namespace
+// at sandbox.PathAgentToken instead; the host path is not mounted anywhere else.
+func InstanceTokenPath(configDir, instanceID string) string {
+	return filepath.Join(DataDir(configDir), "instance-credentials", instanceID, "agent-token")
 }
 
 // InstancesDir holds the runtime instance records (data/instances).

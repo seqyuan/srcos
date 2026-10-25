@@ -42,6 +42,10 @@ const (
 	PathTool      = "/tool" // the tool package                ro, builtin
 	PathFlow      = "/flow" // the user's flow runs (../flow.PathFlow)  rw, builtin
 	PathTmp       = "/tmp"  // tmpfs                           rw, builtin
+	// PathAgentToken is the per-instance credential mount. It is not a shared
+	// directory: the runtime binds the owning instance's 0600 token file here,
+	// so a sibling instance cannot read it through the shared virtual home.
+	PathAgentToken = "/run/srcos/agent-token"
 )
 
 // HomePath returns the virtual home's sandbox path for a registered user.
@@ -75,6 +79,13 @@ func (s *Spec) Add(m Mount) error {
 	if m.HostPath == "" {
 		return fmt.Errorf("mount for %s: empty host path", m.SandboxPath)
 	}
+	if !filepath.IsAbs(m.HostPath) {
+		abs, err := filepath.Abs(m.HostPath)
+		if err != nil {
+			return fmt.Errorf("mount %s: resolve host path %q: %w", m.SandboxPath, m.HostPath, err)
+		}
+		m.HostPath = abs
+	}
 	if !strings.HasPrefix(m.SandboxPath, "/") {
 		return fmt.Errorf("mount %s: sandbox path must be absolute", m.SandboxPath)
 	}
@@ -82,6 +93,13 @@ func (s *Spec) Add(m Mount) error {
 		return fmt.Errorf("mount %s: mode must be ro|rw, got %q", m.SandboxPath, m.Mode)
 	}
 	m.HostPath = filepath.Clean(m.HostPath)
+	// Resolve the mount root once, through its deepest existing ancestor. A
+	// deployment commonly reaches data through a symlink; keeping the raw
+	// spelling would make ResolveExisting compare a canonical target with an
+	// unresolved root and reject every read under it.
+	if canonical, err := canonicalHostPath(m.HostPath); err == nil {
+		m.HostPath = canonical
+	}
 	m.SandboxPath = cleanSlash(m.SandboxPath)
 	if m.SandboxPath == "/" {
 		return fmt.Errorf("mount %s: refusing to bind the sandbox root — bind the exact path you need, never a parent", m.Origin)
@@ -154,7 +172,11 @@ func (s *Spec) ResolveExisting(sandboxPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !isUnderFS(canonical, m.HostPath) {
+	root := m.HostPath
+	if canonicalRoot, rerr := canonicalHostPath(root); rerr == nil {
+		root = canonicalRoot
+	}
+	if !isUnderFS(canonical, root) {
 		return "", fmt.Errorf("symlink escapes mount %s: %s", m.SandboxPath, sandboxPath)
 	}
 	// Rebuild the tail that did not exist yet on top of the canonical prefix.
@@ -172,6 +194,9 @@ func (s *Spec) ResolveExisting(sandboxPath string) (string, error) {
 // SRCOS reports a location back to a user or hands a path to a tool.
 func (s *Spec) Display(hostPath string) (string, error) {
 	p := filepath.Clean(hostPath)
+	if canonical, err := canonicalHostPath(p); err == nil {
+		p = canonical
+	}
 	for _, m := range s.mounts {
 		if !isUnderFS(p, m.HostPath) {
 			continue
@@ -226,6 +251,28 @@ func isUnderFS(child, parent string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+// canonicalHostPath resolves a host path through its deepest existing ancestor.
+// It lets a mount root that is itself a symlink behave like the directory it
+// points at, which is the normal way a deployment moves data to another volume.
+func canonicalHostPath(p string) (string, error) {
+	existing, err := deepestExisting(p)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	if existing != p {
+		tail, err := filepath.Rel(existing, p)
+		if err != nil {
+			return "", err
+		}
+		canonical = filepath.Join(canonical, tail)
+	}
+	return canonical, nil
 }
 
 func deepestExisting(p string) (string, error) {

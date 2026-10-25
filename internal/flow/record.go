@@ -126,14 +126,44 @@ func SaveRun(root, path string, r *Run) error {
 		"#\n" +
 		"# 由 `srcos flow run` 维护；节点完成以 nodes/<节点>/.sign 为准（可以手工 touch 跳过）。\n" +
 		"# 这里只记索引：真正的任务状态在 data/instances/ 的实例记录里。\n\n"
-	tmp := path + ".tmp"
-	if err := safefs.MkdirAllBeneath(root, filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := safefs.MkdirAllBeneath(root, dir, 0o755); err != nil {
 		return err
 	}
-	if err := safefs.WriteFileBeneath(root, tmp, append([]byte(header), data...), 0o644); err != nil {
+	f, err := os.CreateTemp(dir, ".flowrun-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) }
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if _, err := f.Write(append([]byte(header), data...)); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // LoadRun reads a run record.

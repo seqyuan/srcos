@@ -135,6 +135,23 @@ type Instance struct {
 	// and re-arms it.
 	LeaseWarnedDeadline time.Time `yaml:"lease_warned_deadline,omitempty"`
 
+	// UnitName is the backend unit name derived from the instance id. It is
+	// persisted before the unit starts, so a restart can find (or rule out) a
+	// process whose record was never advanced to `running`.
+	UnitName string `yaml:"unit_name,omitempty"`
+
+	// DoneWhen is the effective completion probe for a task (job overrides the
+	// tool). DoneWhenHost is the resolved host path, stored so a restart does not
+	// have to rebuild the mount table, and DoneWhenDeadline is when an
+	// unsatisfied probe becomes a failure.
+	//
+	// They are persisted because a doneWhen probe outlives the process: after a
+	// restart the platform must be able to continue waiting instead of treating
+	// exit 0 as success.
+	DoneWhen         *tool.DoneWhen `yaml:"done_when,omitempty"`
+	DoneWhenHost     string         `yaml:"done_when_host,omitempty"`
+	DoneWhenDeadline time.Time      `yaml:"done_when_deadline,omitempty"`
+
 	Outputs []string          `yaml:"outputs,omitempty"`
 	Tags    map[string]string `yaml:"tags,omitempty"`
 
@@ -183,19 +200,58 @@ func InstancePath(configDir, id string) string {
 
 // SaveInstance writes the record atomically so a crash mid-write cannot leave
 // a half-parsed YAML behind.
+//
+// The temp file is unique per writer, not "<path>.tmp": the gateway, a CLI
+// `svc stop` and the admin console may all save the same instance, and a fixed
+// temp name lets one process rename another's half-written content into place.
+// The file and directory are synced because this record is the authority on
+// what is running; losing it after a crash would turn a live unit into an
+// orphan with no way to reconcile it.
 func SaveInstance(path string, inst *Instance) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(inst)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) }
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return err
+	}
+	// Best effort: the rename is already atomic; syncing the directory makes
+	// the new name durable across a power loss too.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // LoadInstance reads a record.
@@ -453,7 +509,7 @@ func (v PathView) FlowRuns() string {
 
 func (v PathView) ToolDir(t *tool.Tool) string {
 	if v.Degraded {
-		return t.Dir
+		return t.PackageRootDir()
 	}
 	return sandbox.PathTool
 }
@@ -481,6 +537,9 @@ func (v PathView) Env(t *tool.Tool, j *job.Job) []string {
 		"SRCOS_USER=" + v.User,
 		"SRCOS_TOOL=" + t.ID,
 		"SRCOS_TOOL_VERSION=" + t.Version,
+		// SRCOS_TOOL_DIR is the package root mounted at /tool. Components that
+		// share a package (ui/ and task/) use it instead of cwd or `..`.
+		"SRCOS_TOOL_DIR=" + v.ToolDir(t),
 	}
 	if v.Paths.JobID != "" {
 		out = append(out,
@@ -495,8 +554,11 @@ func (v PathView) Env(t *tool.Tool, j *job.Job) []string {
 		out = append(out, job.ParamEnv(job.EffectiveParams(j, t))...)
 	}
 	// SRCOS_API: the gateway's REST base, so a tool UI (or an agent hosted by a
-	// service) can talk back. Absent when no gateway is reachable from here.
-	if v.APIBase != "" {
+	// service) can talk back. Absent when no gateway is reachable from here, and
+	// absent for a network-isolated task: its fresh netns makes the host's
+	// loopback unreachable, so advertising a URL that can never work is worse
+	// than omitting it.
+	if v.APIBase != "" && !(t.Kind == tool.KindTask && t.Network == tool.NetworkNone) {
 		out = append(out, "SRCOS_API="+v.APIBase)
 	}
 	// The named environment's variables, then the tool's own: a tool may

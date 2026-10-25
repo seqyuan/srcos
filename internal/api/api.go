@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,15 +268,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) bool {
 	case path == "/api/jobs" && r.Method == "GET":
 		h.handleListJobs(w, r, username)
 
-	// One instance's log: a plain tail by default, an SSE stream with
-	// ?follow=1 (the page's live view).
+	// One instance: state JSON, its log (plain tail or SSE with ?follow=1),
+	// and the declared artifacts. All three are reads; the shape of each path
+	// is fixed, so `/api/jobs/<id>/other` is a 404 rather than a lookup.
 	case strings.HasPrefix(path, "/api/jobs/") && r.Method == "GET":
-		id, ok := jobLogID(path)
-		if !ok {
-			writeJSON(w, 404, map[string]string{"error": "not found"})
-			return true
+		switch {
+		case strings.HasSuffix(path, "/logs"):
+			id, ok := jobLogID(path)
+			if !ok {
+				writeJSON(w, 404, map[string]string{"error": "not found"})
+				return true
+			}
+			h.handleLogs(w, r, username, id)
+		case strings.HasSuffix(path, "/artifacts"):
+			id, ok := jobArtifactsID(path)
+			if !ok {
+				writeJSON(w, 404, map[string]string{"error": "not found"})
+				return true
+			}
+			h.handleJobArtifacts(w, r, username, id)
+		default:
+			id, ok := jobStatusID(path)
+			if !ok {
+				writeJSON(w, 404, map[string]string{"error": "not found"})
+				return true
+			}
+			h.handleJobStatus(w, r, username, id)
 		}
-		h.handleLogs(w, r, username, id)
 
 	// Cancelling is a write: it needs the submit scope and the tool allowlist,
 	// which handleCancelInstance checks.
@@ -702,7 +721,12 @@ func parseBody(r *http.Request, v interface{}) error {
 	if len(data) > maxBodySize {
 		return errBodyTooLarge
 	}
-	if err := json.Unmarshal(data, v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber keeps large integer parameters exact. A tool's `int` input may
+	// legitimately carry a database id or a genomic coordinate; float64 silently
+	// rounds anything above 2^53.
+	dec.UseNumber()
+	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil

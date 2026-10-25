@@ -301,7 +301,9 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 			r.Opts.Log("warning: could not archive the sample table: %v", err)
 		}
 	}
-	record.Samples = len(plan)
+	if samples != nil {
+		record.Samples = len(samples.Rows)
+	}
 	if record.State == "" || record.State == flow.RunRunning {
 		record.State = flow.RunRunning
 	}

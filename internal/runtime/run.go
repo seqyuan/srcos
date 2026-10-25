@@ -251,7 +251,7 @@ func BuildSpec(t *tool.Tool, p Paths, storages storage.Provider) (*sandbox.Spec,
 		{HostPath: p.Workspace, SandboxPath: sandbox.PathWorkspace, Mode: sandbox.ReadWrite, Origin: "builtin"},
 		{HostPath: p.Home, SandboxPath: sandbox.HomePath(p.User), Mode: sandbox.ReadWrite, Origin: "builtin"},
 		{HostPath: p.FlowRuns, SandboxPath: sandbox.PathFlow, Mode: sandbox.ReadWrite, Origin: "builtin"},
-		{HostPath: t.Dir, SandboxPath: sandbox.PathTool, Mode: sandbox.ReadOnly, Origin: "tool"},
+		{HostPath: t.PackageRootDir(), SandboxPath: sandbox.PathTool, Mode: sandbox.ReadOnly, Origin: "tool"},
 	} {
 		if err := spec.Add(m); err != nil {
 			return nil, err
@@ -297,6 +297,15 @@ func BuildSpec(t *tool.Tool, p Paths, storages storage.Provider) (*sandbox.Spec,
 		}
 	}
 	return spec, nil
+}
+
+// canProbeByName reports whether the backend can answer liveness from the
+// deterministic unit name before Start returns. It is what makes a pre-start
+// `starting` record safe: a later reconcile can find the unit instead of
+// leaving a phantom record (or treating exit 0 as success).
+func canProbeByName(b Backend) bool {
+	p, ok := b.(interface{ CanProbeByName() bool })
+	return ok && p.CanProbeByName()
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -377,6 +386,17 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 		InstanceID: inst.ID,
 	}
 
+	// Persist the deterministic unit name before launching. If the process dies
+	// between Start and the `running` write, ReconcileTasks can still ask systemd
+	// whether the unit exists and settle it from its verdict.
+	if canProbeByName(backend) {
+		inst.UnitName = req.UnitName
+		inst.BackendRef = req.UnitName
+		inst.State = StateStarting
+		if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+			return nil, err
+		}
+	}
 	h, err := backend.Start(ctx, req)
 	if err != nil {
 		return fail("%v", err), nil
@@ -414,9 +434,7 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 		return persisted, nil
 	}
 
-	inst.EndedAt = time.Now().UTC()
-	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
-
+	finished := time.Now().UTC()
 	switch {
 	case ctx.Err() != nil:
 		inst.ExitCode = status.Code
@@ -427,15 +445,63 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 	}
 
 	// A doneWhen probe defers the real verdict: exit 0 then only means
-	// "submitted", and success is decided by the probe (ADR-006).
-	if inst.State == StateSucceeded && loaded.Job.DoneWhen != nil {
-		if err := r.waitForProbe(ctx, loaded.Job.DoneWhen, prep, inst); err != nil {
+	// "submitted", and success is decided by the probe (ADR-006). The job may
+	// override the tool's declaration; a tool-level probe is the normal case for
+	// a submitter whose work.sh only queues child jobs.
+	probe := loaded.Job.DoneWhen
+	if probe == nil && prep.tool.Completion != nil {
+		probe = prep.tool.Completion.DoneWhen
+	}
+	if probe != nil && probe.Type == tool.DoneWhenExitCode {
+		probe = nil
+	}
+	if probe != nil && inst.State == StateSucceeded {
+		host, _, rerr := prep.spec.Resolve(probe.Path)
+		if rerr != nil {
 			inst.State = StateFailed
-			inst.Error = err.Error()
+			inst.Error = fmt.Sprintf("doneWhen path %q: %v", probe.Path, rerr)
+		} else {
+			timeout := probeTimeout(prep.tool, loaded.Job)
+			inst.State = StateSubmitted
+			inst.DoneWhen = probe
+			inst.DoneWhenHost = host
+			inst.DoneWhenDeadline = time.Now().Add(timeout)
+			// The process is over, but the unit is not done. Persisting the
+			// intermediate state is what lets a restarted gateway keep waiting
+			// instead of mistaking exit 0 for success (ADR-006).
+			inst.EndedAt = time.Time{}
+			inst.Duration = ""
+			if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+				return nil, err
+			}
+			err := r.waitForProbe(ctx, probe, host, timeout, prep.paths.RecordPath)
+			if errors.Is(err, errProbeStopped) {
+				if persisted, lerr := LoadInstance(prep.paths.RecordPath); lerr == nil {
+					return persisted, nil
+				}
+				return inst, nil
+			}
+			finished = time.Now().UTC()
+			if err != nil {
+				inst.State = StateFailed
+				inst.Error = err.Error()
+			} else {
+				inst.State = StateSucceeded
+				inst.Error = ""
+			}
 		}
 	}
 
-	inst.Outputs = r.reportOutputs(prep.spec, loaded.Job.Outputs)
+	inst.EndedAt = finished
+	inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
+
+	// The probe can run for hours. A stop may have landed after our last poll
+	// but before this save; the record is the authority, so do not overwrite it.
+	if persisted, err := LoadInstance(prep.paths.RecordPath); err == nil && persisted.State == StateStopped {
+		return persisted, nil
+	}
+
+	inst.Outputs = r.reportOutputs(prep.spec, loaded.Job.Outputs, prep.view.Degraded)
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		return nil, err
 	}
@@ -443,34 +509,60 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 	return inst, nil
 }
 
-// waitForProbe polls a doneWhen probe until it is satisfied.
+// errProbeStopped is the sentinel waitForProbe returns when the instance record
+// says the user (or the reaper) stopped it while the probe was still polling.
+var errProbeStopped = errors.New("instance stopped while waiting for the completion probe")
+
+// probeTimeout is how long an unsatisfied probe may hold the instance.
 //
-// The timeout is the job's doneWhenTimeout, falling back to the tool's
-// walltime: a probe that never fires must not hold a slot forever.
-func (r *Runner) waitForProbe(ctx context.Context, dw *tool.DoneWhen, prep *prepared, inst *Instance) error {
-	if dw.Type == tool.DoneWhenExitCode || dw.Path == "" {
-		return nil
-	}
-	timeout := 12 * time.Hour
-	if prep.tool.Completion != nil && prep.tool.Completion.DoneWhenTimeout != "" {
-		if secs, err := tool.ParseWalltime(prep.tool.Completion.DoneWhenTimeout); err == nil && secs > 0 {
-			timeout = time.Duration(secs) * time.Second
+// doneWhenTimeout is the tool author's explicit answer; the tool's walltime is
+// the natural upper bound when it is absent. The 12h fallback exists only for a
+// manifest that declares neither (legacy packages).
+func probeTimeout(t *tool.Tool, j *job.Job) time.Duration {
+	if t != nil && t.Completion != nil {
+		if d := durationOr(t.Completion.DoneWhenTimeout, 0); d > 0 {
+			return d
 		}
 	}
-
-	host, _, err := prep.spec.Resolve(dw.Path)
-	if err != nil {
-		return fmt.Errorf("doneWhen path %q: %w", dw.Path, err)
+	if t != nil {
+		res := t.Resources
+		if j != nil {
+			res = job.EffectiveResources(j, t)
+		}
+		if secs, err := tool.ParseWalltimeOrZero(res.Walltime); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
 	}
+	return 12 * time.Hour
+}
 
+// waitForProbe polls a doneWhen probe until it is satisfied.
+//
+// The instance record is checked on every tick: the waiter's context is the
+// queue's (background), so a deliberate stop in another process/goroutine is
+// signalled through the record, not through cancellation.
+// probePollEvery is how often a doneWhen probe is re-evaluated. A variable so
+// tests can shrink it.
+var probePollEvery = 2 * time.Second
+
+func (r *Runner) waitForProbe(ctx context.Context, dw *tool.DoneWhen, host string, timeout time.Duration, recordPath string) error {
+	if dw == nil || dw.Type == tool.DoneWhenExitCode || host == "" {
+		return nil
+	}
 	deadline := time.Now().Add(timeout)
-	t := time.NewTicker(2 * time.Second)
+	t := time.NewTicker(probePollEvery)
 	defer t.Stop()
 	for {
+		if persisted, err := LoadInstance(recordPath); err == nil {
+			switch persisted.State {
+			case StateStopped, StateStopping:
+				return errProbeStopped
+			}
+		}
 		if probeSatisfied(dw.Type, host) {
 			return nil
 		}
-		if time.Now().After(deadline) {
+		if !time.Now().Before(deadline) {
 			return fmt.Errorf("doneWhen probe %s(%s) not satisfied within %s", dw.Type, dw.Path, timeout)
 		}
 		select {
@@ -493,7 +585,9 @@ func probeSatisfied(kind tool.DoneWhenType, host string) bool {
 		entries, err := os.ReadDir(host)
 		return err == nil && len(entries) > 0
 	default:
-		return err == nil
+		// Registration rejects unknown types; this is defence in depth, not a
+		// fallback that can turn a typo into success.
+		return false
 	}
 }
 
@@ -533,10 +627,14 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 	}
 
 	inst := newServiceInstance(t, prep, j)
+	minted := false
 	fail := func(format string, a ...any) *Instance {
 		inst.State = StateFailed
 		inst.Error = fmt.Sprintf(format, a...)
 		inst.EndedAt = time.Now().UTC()
+		if minted {
+			r.revokeInstanceCredential(inst)
+		}
 		_ = SaveInstance(prep.paths.RecordPath, inst)
 		return inst
 	}
@@ -545,6 +643,29 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 	// no credential and no ownership (design §3).
 	if t.Backend == tool.BackendExternal {
 		return r.startExternal(ctx, t, j, prep, onStarted)
+	}
+
+	// Mint the credential before the unit starts. It has to be mounted into the
+	// instance's namespace, so it must exist before bwrap/apptainer is invoked.
+	// The host file lives outside every shared mount; only this instance sees it.
+	if t.Agent != nil {
+		if err := r.issueAgentToken(t, inst); err != nil {
+			return fail("agent credential: %v", err), nil
+		}
+		minted = true
+		tokenPath := config.InstanceTokenPath(r.opts.ConfigDir, inst.ID)
+		if prep.view.Degraded {
+			// No namespace to bind into; the file's host path is the only option.
+			prep.env = append(prep.env, "SRCOS_AGENT_TOKEN_FILE="+tokenPath)
+		} else {
+			if err := prep.spec.Add(sandbox.Mount{
+				HostPath: tokenPath, SandboxPath: sandbox.PathAgentToken,
+				Mode: sandbox.ReadOnly, Origin: "credential",
+			}); err != nil {
+				return fail("agent credential mount: %v", err), nil
+			}
+			prep.env = append(prep.env, "SRCOS_AGENT_TOKEN_FILE="+sandbox.PathAgentToken)
+		}
 	}
 
 	backend, err := r.backendFor(t)
@@ -591,6 +712,20 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 		WantEndpoint: true,
 	}
 
+	// Local units get a persisted name before Start, for the same crash window
+	// as a task. Only backends that can probe by name are pre-recorded; the
+	// degraded pid path is not known yet.
+	if canProbeByName(backend) {
+		inst.UnitName = req.UnitName
+		inst.BackendRef = req.UnitName
+		inst.State = StateStarting
+		if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+			if minted {
+				r.revokeInstanceCredential(inst)
+			}
+			return nil, err
+		}
+	}
 	h, err := backend.Start(ctx, req)
 	if err != nil {
 		return fail("%v", err), nil
@@ -629,6 +764,9 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 	inst.State = StateStarting
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		_ = h.Stop(context.Background())
+		if minted {
+			r.revokeInstanceCredential(inst)
+		}
 		return nil, err
 	}
 	if onStarted != nil {
@@ -642,14 +780,11 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 
 	inst.State = StateRunning
 	inst.Healthcheck = "ok"
-	// The agent's credential, before the route is published: a hosted agent that
-	// cannot be given one must not be reported as a running service (A1).
-	if err := r.issueAgentToken(t, inst); err != nil {
-		_ = h.Stop(context.Background())
-		return fail("agent credential: %v", err), nil
-	}
 	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
 		_ = h.Stop(context.Background())
+		if minted {
+			r.revokeInstanceCredential(inst)
+		}
 		return nil, err
 	}
 
@@ -740,7 +875,10 @@ func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, pr
 		onStarted()
 	}
 
-	path, timeout := healthcheckSpec(t)
+	path, timeout, grace := healthcheckSpec(t)
+	if grace > timeout {
+		timeout = grace
+	}
 	if err := probeHTTP(ctx, target, path, timeout, h); err != nil {
 		return fail("healthcheck: %v", err), nil
 	}
@@ -775,13 +913,12 @@ func (r *Runner) publishRoute(t *tool.Tool, inst *Instance, target route.Target)
 	})
 }
 
-// issueAgentToken mints the credential a hosted agent uses (A1) and hands it to
-// the sandbox as a file in the virtual home.
+// issueAgentToken mints the credential a hosted agent uses (A1).
 //
-// Not an environment variable: every instance runs as the same OS user, so a
-// token in /proc/<pid>/environ is readable from anywhere in that uid's view,
-// while a 0600 file is exactly the instance's own. The agent reads
-// $HOME/.srcos/instances/<instance-id>/agent-token.
+// The plaintext is written to a host path outside every shared mount; the
+// caller bind-mounts it read-only at sandbox.PathAgentToken for this instance
+// only. The path is handed to the tool as SRCOS_AGENT_TOKEN_FILE, never as a
+// secret environment value.
 func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance) error {
 	if t.Agent == nil {
 		return nil
@@ -793,12 +930,14 @@ func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance) error {
 	if err != nil {
 		return err
 	}
-	path := config.InstanceTokenPath(r.opts.ConfigDir, inst.User, inst.ID)
+	path := config.InstanceTokenPath(r.opts.ConfigDir, inst.ID)
 	root := config.DataDir(r.opts.ConfigDir)
 	if err := safefs.MkdirAllBeneath(root, filepath.Dir(path), 0o700); err != nil {
+		_, _ = r.opts.AgentTokens.RevokeInstance(inst.ID)
 		return err
 	}
 	if err := safefs.WriteFileBeneath(root, path, []byte(plaintext+"\n"), 0o600); err != nil {
+		_, _ = r.opts.AgentTokens.RevokeInstance(inst.ID)
 		return err
 	}
 	r.auditInstance(inst, "agenttoken.mint", map[string]any{
@@ -811,7 +950,10 @@ func (r *Runner) issueAgentToken(t *tool.Tool, inst *Instance) error {
 // healthcheck polls the instance's ingress until it answers, because a process
 // that has started is not a service that is ready (Jupyter needs 5-15s).
 func (r *Runner) healthcheck(ctx context.Context, t *tool.Tool, h Handle, port int, prep *prepared) error {
-	path, timeout := healthcheckSpec(t)
+	path, timeout, grace := healthcheckSpec(t)
+	if grace > timeout {
+		timeout = grace
+	}
 
 	// A backend that publishes its own endpoint (SGE, over a rendezvous file)
 	// is authoritative: the local port pool's guess does not apply on a
@@ -826,22 +968,43 @@ func (r *Runner) healthcheck(ctx context.Context, t *tool.Tool, h Handle, port i
 	return probeHTTP(ctx, route.Target{Host: "127.0.0.1", Port: port}, path, timeout, h)
 }
 
-// healthcheckSpec is the probe path and deadline a tool declares, with the
-// defaults an app server needs (it can take a minute to load its libraries).
-func healthcheckSpec(t *tool.Tool) (string, time.Duration) {
+// healthcheckSpec is the probe path, deadline and startup grace a tool
+// declares. A grace larger than the timeout extends the total wait: a Shiny app
+// that loads R packages for three minutes should declare timeout: 60s plus
+// startup_grace: 180s, not pretend its first probe can succeed in 60s.
+func healthcheckSpec(t *tool.Tool) (string, time.Duration, time.Duration) {
 	path := "/"
 	timeout := 120 * time.Second
-	if hc := t.Ingress.Healthcheck; hc != nil {
+	var grace time.Duration
+	if t != nil && t.Ingress != nil {
+		hc := t.Ingress.Healthcheck
+		if hc == nil {
+			return path, timeout, grace
+		}
 		if hc.Path != "" {
 			path = hc.Path
 		}
-		if hc.Timeout != "" {
-			if secs, err := tool.ParseWalltime(hc.Timeout); err == nil && secs > 0 {
-				timeout = time.Duration(secs) * time.Second
-			}
-		}
+		timeout = durationOr(hc.Timeout, timeout)
+		grace = durationOr(hc.StartupGrace, 0)
 	}
-	return path, timeout
+	return path, timeout, grace
+}
+
+// durationOr parses either a Go duration ("60s", "3m") or the H:MM:SS
+// walltime spelling. Tool examples use both, and silently falling back on one
+// spelling is how a declared 180s grace used to become the 120s default.
+func durationOr(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	if secs, err := tool.ParseWalltime(raw); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return fallback
 }
 
 func probeHTTP(ctx context.Context, target route.Target, path string, timeout time.Duration, h Handle) error {
@@ -893,11 +1056,7 @@ func (r *Runner) StopService(ctx context.Context, inst *Instance) error {
 			err = stopper.StopUnit(ctx, inst)
 		}
 	}
-	if r.ports != nil {
-		if _, port, splitErr := splitEndpoint(inst.Endpoint); splitErr == nil {
-			r.ports.Release(port)
-		}
-	}
+	r.releaseInstancePort(inst)
 
 	inst.State = StateStopped
 	inst.EndedAt = time.Now().UTC()
@@ -927,7 +1086,7 @@ func (r *Runner) revokeInstanceCredential(inst *Instance) {
 		log.Printf("[srcos] revoke instance credential %s: %v", inst.ID, err)
 		return
 	}
-	tokenPath := config.InstanceTokenPath(r.opts.ConfigDir, inst.User, inst.ID)
+	tokenPath := config.InstanceTokenPath(r.opts.ConfigDir, inst.ID)
 	_ = os.Remove(tokenPath)
 	_ = os.Remove(filepath.Dir(tokenPath)) // only succeeds when empty; best effort
 	r.auditInstance(inst, "agenttoken.revoke", nil)
@@ -1185,9 +1344,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 					inst.EndedAt = time.Now().UTC()
 					inst.Error = "found unreachable during startup reconcile: " + rerr.Error()
 					_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
-					if r.ports != nil {
-						r.ports.Release(port)
-					}
+					r.releaseInstancePort(inst)
 					if r.opts.Routes != nil {
 						r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
 					}
@@ -1225,9 +1382,7 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 			inst.EndedAt = time.Now().UTC()
 			inst.Error = "found stopped during startup reconcile"
 			_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
-			if r.ports != nil {
-				r.ports.Release(port)
-			}
+			r.releaseInstancePort(inst)
 			if r.opts.Routes != nil {
 				r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
 			}
@@ -1299,10 +1454,7 @@ func (r *Runner) ReconcileServices(ctx context.Context, insts []*Instance) (orph
 			continue
 		}
 
-		_, port, perr := splitEndpoint(inst.Endpoint)
-		if perr == nil && r.ports != nil {
-			r.ports.Release(port)
-		}
+		r.releaseInstancePort(inst)
 		if r.opts.Routes != nil {
 			r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
 		}
@@ -1463,6 +1615,20 @@ func (r *Runner) ReconcileTasks(ctx context.Context, insts []*Instance) (adopted
 			continue
 		}
 
+		// A submitted task has already exited; what is still pending is the
+		// completion probe. Its verdict must never come from the exit status.
+		if inst.State == StateSubmitted {
+			settledNow, serr := r.reconcileSubmittedTask(inst)
+			if serr != nil {
+				err = serr
+				continue
+			}
+			if settledNow {
+				settled = append(settled, inst.ID)
+			}
+			continue
+		}
+
 		alive := false
 		if b, ok := r.opts.Backends[inst.Backend]; ok {
 			if prober, ok := b.(UnitProber); ok {
@@ -1511,6 +1677,48 @@ func (r *Runner) ReconcileTasks(ctx context.Context, insts []*Instance) (adopted
 	sort.Strings(adopted)
 	sort.Strings(settled)
 	return adopted, settled, err
+}
+
+// reconcileSubmittedTask advances a task that is waiting on a doneWhen probe.
+//
+// The wait normally lives in RunTask, but that waiter dies with the process. A
+// record in `submitted` therefore has to be advanced by the scan tick: success
+// only when the probe is actually satisfied, failure at the persisted deadline,
+// and never "exit 0 means success".
+func (r *Runner) reconcileSubmittedTask(inst *Instance) (bool, error) {
+	now := time.Now().UTC()
+	settled := false
+	switch {
+	case inst.DoneWhen == nil || inst.DoneWhenHost == "":
+		inst.State = StateFailed
+		inst.Error = "submitted task has no usable completion probe (re-run with `srcos job run --force` after fixing the declaration)"
+		settled = true
+	case probeSatisfied(inst.DoneWhen.Type, inst.DoneWhenHost):
+		inst.State = StateSucceeded
+		inst.Error = ""
+		settled = true
+	case inst.DoneWhenDeadline.IsZero():
+		inst.State = StateFailed
+		inst.Error = "submitted task has no probe deadline (re-run with `srcos job run --force`)"
+		settled = true
+	case now.After(inst.DoneWhenDeadline):
+		inst.State = StateFailed
+		inst.Error = fmt.Sprintf("doneWhen probe %s(%s) not satisfied before %s",
+			inst.DoneWhen.Type, inst.DoneWhen.Path, inst.DoneWhenDeadline.Format(time.RFC3339))
+		settled = true
+	}
+	if !settled {
+		return false, nil // still waiting: leave the quota held and the record honest
+	}
+	inst.EndedAt = now
+	if !inst.StartedAt.IsZero() {
+		inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
+	}
+	if err := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); err != nil {
+		return false, err
+	}
+	r.auditInstance(inst, "instance.settled", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
+	return true, nil
 }
 
 // applyExitStatus writes how a run ended onto its record.
@@ -1613,6 +1821,32 @@ func sanitizeUnitName(s string) string {
 	return out
 }
 
+// releaseInstancePort returns a port only when the pool says this instance
+// owns it. An external/forwarded backend never acquired one, and blindly
+// releasing its endpoint could hand a live service's port to someone else.
+func (r *Runner) releaseInstancePort(inst *Instance) {
+	if r.ports == nil || inst == nil {
+		return
+	}
+	_, port, err := splitEndpoint(inst.Endpoint)
+	if err != nil {
+		return
+	}
+	if po, ok := r.ports.(interface{ Owner(int) (string, bool) }); ok {
+		owner, held := po.Owner(port)
+		if !held {
+			return
+		}
+		// A tunnel-owned port is released by the backend when it stops the
+		// tunnel, not here: releasing it while ssh still listens would let the
+		// pool hand the same port to a second service.
+		if owner != inst.ID {
+			return
+		}
+	}
+	r.ports.Release(port)
+}
+
 func splitEndpoint(endpoint string) (string, int, error) {
 	if endpoint == "" {
 		return "", 0, errors.New("empty endpoint")
@@ -1653,17 +1887,7 @@ func isReapable(inst *Instance) bool {
 }
 
 func parseDurationOr(s string, fallback time.Duration) time.Duration {
-	if strings.TrimSpace(s) == "" {
-		return fallback
-	}
-	if d, err := time.ParseDuration(s); err == nil {
-		return d
-	}
-	// Accept the H:MM:SS spelling used by walltime.
-	if secs, err := tool.ParseWalltime(s); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	return fallback
+	return durationOr(s, fallback)
 }
 
 func findTool(toolsDir, id string) (*tool.Tool, error) {
@@ -1700,13 +1924,36 @@ func renderMounts(spec *sandbox.Spec) []string {
 	return out
 }
 
+// ResolveOutput resolves a declared output path in the form the unit uses.
+//
+// A sandboxed unit declares sandbox paths (/workspace/out). A degraded unit
+// (sandbox: none, including a flow planned for it) declares host paths, because
+// that is what the tool actually sees. Both are legitimate; resolving only the
+// sandbox form made every degraded flow artifact show up as "unresolvable".
+func ResolveOutput(spec *sandbox.Spec, declared string, degraded bool) (string, sandbox.Mount, bool) {
+	if spec == nil {
+		return "", sandbox.Mount{}, false
+	}
+	if host, mount, err := spec.Resolve(declared); err == nil {
+		return host, mount, true
+	}
+	if degraded {
+		for _, m := range spec.Mounts() {
+			if hostPathUnder(declared, m.HostPath) {
+				return filepath.Clean(declared), m, true
+			}
+		}
+	}
+	return "", sandbox.Mount{}, false
+}
+
 // reportOutputs resolves declared output paths and annotates which exist,
 // keeping "declared" and "produced" distinct in the user surface.
-func (r *Runner) reportOutputs(spec *sandbox.Spec, declared []string) []string {
+func (r *Runner) reportOutputs(spec *sandbox.Spec, declared []string, degraded bool) []string {
 	out := make([]string, 0, len(declared))
 	for _, d := range declared {
-		host, _, err := spec.Resolve(d)
-		if err != nil {
+		host, _, ok := ResolveOutput(spec, d, degraded)
+		if !ok {
 			out = append(out, d+" (unresolvable)")
 			continue
 		}

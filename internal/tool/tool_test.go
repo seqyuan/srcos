@@ -604,9 +604,9 @@ lifecycle: {restart: never, max_lifetime: "1h"}
 		}
 	}
 
-	// A service may reference its port and workspace; the program is the first
-	// element.
-	if err := load("command: [\"serve\", \"--port\", \"${SRCOS_PORT}\", \"${SRCOS_WORKSPACE}\"]\n"); err != nil {
+	// A service may reference its port, workspace and the shared package root /
+	// per-instance credential path; the program is the first element.
+	if err := load("command: [\"serve\", \"--port\", \"${SRCOS_PORT}\", \"${SRCOS_WORKSPACE}\", \"${SRCOS_TOOL_DIR}\", \"${SRCOS_AGENT_TOKEN_FILE}\"]\n"); err != nil {
 		t.Fatalf("a valid command must be accepted: %v", err)
 	}
 }
@@ -884,5 +884,82 @@ resources: {cpu: 1, memory: "1Gi", walltime: "0:10:00"}
 	}
 	if got := tl.Interface.Inputs[0].Select; got != "directory" {
 		t.Fatalf("path select = %q, want the documented default directory", got)
+	}
+}
+
+func TestValidateDoneWhen(t *testing.T) {
+	cases := []struct {
+		name string
+		dw   *DoneWhen
+		ok   bool
+	}{
+		{"nil", nil, true},
+		{"file", &DoneWhen{Type: DoneWhenFileExists, Path: "/workspace/out/_SUCCESS"}, true},
+		{"dir", &DoneWhen{Type: DoneWhenDirNonEmpty, Path: "/workspace/out"}, true},
+		{"exit", &DoneWhen{Type: DoneWhenExitCode}, true},
+		{"unknown type", &DoneWhen{Type: "file_exist", Path: "/x"}, false},
+		{"missing path", &DoneWhen{Type: DoneWhenFileExists}, false},
+		{"relative path", &DoneWhen{Type: DoneWhenFileExists, Path: "out/_SUCCESS"}, false},
+		{"exit with path", &DoneWhen{Type: DoneWhenExitCode, Path: "/x"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateDoneWhen(c.dw)
+			if c.ok && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !c.ok && err == nil {
+				t.Fatal("expected a validation error")
+			}
+		})
+	}
+}
+
+func TestCompletionAndLifecycleAreValidated(t *testing.T) {
+	base := func(extra string) string {
+		return minimalTask + extra
+	}
+	cases := map[string]string{
+		"bad probe type":        base("\ncompletion:\n  doneWhen: {type: file_exist, path: /workspace/out/.done}\n"),
+		"bad probe timeout":     base("\ncompletion:\n  doneWhen: {type: file_exists, path: /workspace/out/.done}\n  doneWhenTimeout: soon\n"),
+		"bad lifecycle restart": minimalTask + "\nlifecycle:\n  restart: sometimes\n",
+		"bad idle ttl":          minimalTask + "\nlifecycle:\n  idle_ttl: forever\n",
+	}
+	for name, manifest := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeTool(t, map[string]string{"tool.yaml": manifest, "work.sh": "#!/bin/sh\n"})); err == nil {
+				t.Fatal("expected registration to reject the manifest")
+			}
+		})
+	}
+}
+
+func TestInitFromCannotEscapeTheManifestDirectory(t *testing.T) {
+	dir := writeTool(t, map[string]string{
+		"tool.yaml": minimalTask + "\nworkspace:\n  init_from: ../outside\n",
+		"work.sh":   "#!/bin/sh\n",
+	})
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "inside the manifest directory") {
+		t.Fatalf("Load error = %v, want an init_from escape", err)
+	}
+}
+
+func TestEntrySymlinkCannotEscapeThePackage(t *testing.T) {
+	dir := writeTool(t, map[string]string{
+		"tool.yaml": minimalTask,
+		"work.sh":   "#!/bin/sh\n",
+	})
+	outside := filepath.Join(t.TempDir(), "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "work.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "work.sh")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "outside the package root") {
+		t.Fatalf("Load error = %v, want an entry escape", err)
 	}
 }

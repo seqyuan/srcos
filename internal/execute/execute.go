@@ -528,7 +528,13 @@ func (c *Controller) StartService(ctx context.Context, ident agenttoken.Identity
 	// written the running/failed record, the record itself is the authority.
 	defer reservation.Release()
 
-	inst, err := runner.StartServiceWithStarted(ctx, t, j, reservation.Release)
+	// The unit's lifetime is not the HTTP request's. A client timeout or a
+	// closed browser tab must not healthcheck-cancel a service systemd has
+	// already started; the request context governs only the response. Keep a
+	// bounded detached context so a genuinely stuck start still ends.
+	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+	inst, err := runner.StartServiceWithStarted(startCtx, t, j, reservation.Release)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
@@ -888,7 +894,16 @@ func (c *Controller) AdmitFor(user string, t *tool.Tool, j *job.Job, instanceID 
 // runnerFor builds the runner that starts a unit for one user. Tasks do not
 // need the port pool or the routing table (the port pool's absence is even
 // asserted by prepare), so a bare local runner is complete for them.
+//
+// When the gateway passed its own supervisor, reuse it through ForUser: the
+// supervisor already carries the deployment's storages, named environments,
+// scheduler backends and audit recorder. Building a second runner from this
+// package's options would silently drop any seam the caller did not repeat
+// here (the environment provider was exactly that bug).
 func (c *Controller) runnerFor(user string) (*runtime.Runner, error) {
+	if c.opts.Supervisor != nil {
+		return c.opts.Supervisor.ForUser(user), nil
+	}
 	if c.opts.NewRunner != nil {
 		return c.opts.NewRunner(user)
 	}

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -151,9 +152,24 @@ type Tool struct {
 	// one authorization policy, one audit stream and one catalogue.
 	External *ExternalSpec `yaml:"external,omitempty"`
 
+	// Root is the package root, relative to this manifest's directory. Empty
+	// means the manifest directory itself. A tool whose UI and heavy-compute
+	// scripts live in sibling subdirectories (ui/ and task/) sets root: .. so
+	// SRCOS mounts the shared package root at /tool and relative paths in both
+	// components resolve the same way. SRCOS does not version or snapshot it;
+	// root is only a reference for the mount.
+	Root string `yaml:"root,omitempty"`
+
 	// Dir is the tool package directory this manifest was loaded from. It is
 	// not part of tool.yaml.
 	Dir string `yaml:"-"`
+	// PackageRoot is the resolved absolute root mounted at /tool. It is Root
+	// resolved against Dir; empty Root means Dir.
+	PackageRoot string `yaml:"-"`
+	// EntryRel is Entry resolved relative to PackageRoot. It lets a component
+	// manifest keep writing `entry: work.sh` while the mounted root is its
+	// parent (the sandbox path becomes /tool/task/work.sh).
+	EntryRel string `yaml:"-"`
 	// Digest is a content hash of the package (see Digest), computed at load.
 	// Like Dir it is not part of tool.yaml: it describes the files, not the
 	// declaration.
@@ -245,7 +261,9 @@ type Resources struct {
 	Walltime string `yaml:"walltime,omitempty" json:"walltime,omitempty"`
 	Queue    string `yaml:"queue,omitempty" json:"queue,omitempty"`
 	GPU      int    `yaml:"gpu,omitempty" json:"gpu,omitempty"`
-	// HMem and VMem are SGE-specific aliases kept for annopi compatibility.
+	// HMem and VMem are legacy annopi spellings. They are rejected at
+	// registration rather than silently ignored; resources.memory is the one
+	// applied value.
 	HMem string `yaml:"h_vmem,omitempty" json:"h_vmem,omitempty"`
 	VMem string `yaml:"v_mem,omitempty" json:"v_mem,omitempty"`
 }
@@ -333,6 +351,33 @@ const (
 type DoneWhen struct {
 	Type DoneWhenType `yaml:"type"`
 	Path string       `yaml:"path,omitempty"`
+}
+
+// ValidateDoneWhen is the registration-time check for a completion probe.
+//
+// An unknown type used to fall through probeSatisfied's default branch, where
+// any existing path counted as success. That turned a typo (`file_exist`) into
+// a silent "task finished" instead of a manifest error.
+func ValidateDoneWhen(dw *DoneWhen) error {
+	if dw == nil {
+		return nil
+	}
+	switch dw.Type {
+	case DoneWhenFileExists, DoneWhenDirNonEmpty:
+		if strings.TrimSpace(dw.Path) == "" {
+			return fmt.Errorf("doneWhen type %s requires path", dw.Type)
+		}
+		if !pathIsAbs(dw.Path) {
+			return fmt.Errorf("doneWhen path %q must be an absolute sandbox path", dw.Path)
+		}
+	case DoneWhenExitCode:
+		if strings.TrimSpace(dw.Path) != "" {
+			return fmt.Errorf("doneWhen type exit_code does not take a path (got %q)", dw.Path)
+		}
+	default:
+		return fmt.Errorf("doneWhen type must be one of file_exists|dir_nonempty|exit_code, got %q", dw.Type)
+	}
+	return nil
 }
 
 type InitTemplate struct {
@@ -444,15 +489,83 @@ func Load(dir string) (*Tool, error) {
 		}
 	}
 	t.Dir = dir
+	if err := t.resolvePackageRoot(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	if err := t.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	digest, err := Digest(dir)
+	digest, err := Digest(t.PackageRootDir())
 	if err != nil {
 		return nil, fmt.Errorf("%s: digest: %w", path, err)
 	}
 	t.Digest = digest
 	return &t, nil
+}
+
+// PackageRootDir is the directory mounted at /tool. It falls back to Dir for
+// tools constructed by hand (tests) or for a manifest without a root.
+func (t *Tool) PackageRootDir() string {
+	if t.PackageRoot != "" {
+		return t.PackageRoot
+	}
+	return t.Dir
+}
+
+// EntryPath is the entry script relative to the package root.
+func (t *Tool) EntryPath() string {
+	if t.EntryRel != "" {
+		return t.EntryRel
+	}
+	return t.Entry
+}
+
+// resolvePackageRoot resolves `root` against the manifest directory and checks
+// that `entry` stays inside it. It is the registration-time half of the shared
+// package root: a component in ui/ or task/ can say `root: ..` and still use
+// `entry: work.sh`, without the runtime ever seeing a `..` path.
+func (t *Tool) resolvePackageRoot() error {
+	root := strings.TrimSpace(t.Root)
+	if root == "" {
+		root = "."
+	}
+	if filepath.IsAbs(root) {
+		return fmt.Errorf("root %q must be relative to the manifest directory", t.Root)
+	}
+	absDir, err := filepath.Abs(t.Dir)
+	if err != nil {
+		return fmt.Errorf("resolve manifest directory %q: %w", t.Dir, err)
+	}
+	absRoot := filepath.Clean(filepath.Join(absDir, filepath.FromSlash(root)))
+	// The root is a shared package root, not an arbitrary mount source: it must
+	// be the manifest directory itself or one of its ancestors. A sibling
+	// package is not a shared root.
+	relDir, err := filepath.Rel(absRoot, absDir)
+	if err != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) || filepath.IsAbs(relDir) {
+		return fmt.Errorf("root %q must be the manifest directory or an ancestor of it", root)
+	}
+	fi, err := os.Stat(absRoot)
+	if err != nil {
+		return fmt.Errorf("root %q: %w", root, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("root %q is not a directory", root)
+	}
+	t.PackageRoot = absRoot
+
+	if t.Entry == "" {
+		return nil
+	}
+	if filepath.IsAbs(t.Entry) {
+		return fmt.Errorf("entry %q must be relative to the manifest directory", t.Entry)
+	}
+	entryAbs := filepath.Clean(filepath.Join(absDir, filepath.FromSlash(t.Entry)))
+	rel, err := filepath.Rel(absRoot, entryAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("entry %q escapes the package root %q", t.Entry, absRoot)
+	}
+	t.EntryRel = filepath.ToSlash(rel)
+	return nil
 }
 
 // unknownFieldHint turns the one mistake that has actually happened — writing
@@ -465,33 +578,134 @@ func unknownFieldHint(err error) string {
 	return ""
 }
 
-// Discover scans a tools directory for <id>/tool.yaml packages.
+// discoveryTTL is how long a catalogue scan is reused. Tool packages are
+// administrator-managed assets; a list/detail request does not need to re-parse
+// every YAML and stat every file. A short TTL keeps a newly installed tool
+// visible within seconds without turning every request into a directory walk.
+var discoveryTTL = 2 * time.Second
+
+var discoveryCache struct {
+	mu    sync.Mutex
+	root  string
+	at    time.Time
+	tools []*Tool
+}
+
+// ResetDiscoveryCache makes the next Discover read the filesystem. Tests that
+// rewrite a tool package in place call it; production relies on the TTL.
+func ResetDiscoveryCache() {
+	discoveryCache.mu.Lock()
+	discoveryCache.root = ""
+	discoveryCache.tools = nil
+	discoveryCache.mu.Unlock()
+}
+
+// Discover scans a tools directory for tool manifests.
+//
+// Two layouts are supported:
+//
+//	<root>/<tool>/tool.yaml                 a single-tool package
+//	<root>/<pkg>/<component>/tool.yaml      a shared package with components
+//
+// A component manifest that wants the shared root mounted at /tool sets
+// `root: ..` (see Tool.Root). Discovery is deliberately one level deep below a
+// package: components live in direct subdirectories, not in arbitrary trees.
 func Discover(root string) ([]*Tool, error) {
-	entries, err := os.ReadDir(root)
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	discoveryCache.mu.Lock()
+	if discoveryCache.root == absRoot && time.Since(discoveryCache.at) < discoveryTTL {
+		cached := append([]*Tool(nil), discoveryCache.tools...)
+		discoveryCache.mu.Unlock()
+		return cached, nil
+	}
+	discoveryCache.mu.Unlock()
+
+	tools, err := discover(absRoot)
+	if err != nil {
+		return nil, err
+	}
+	discoveryCache.mu.Lock()
+	discoveryCache.root = absRoot
+	discoveryCache.at = time.Now()
+	discoveryCache.tools = append([]*Tool(nil), tools...)
+	discoveryCache.mu.Unlock()
+	return tools, nil
+}
+
+func discover(absRoot string) ([]*Tool, error) {
+	entries, err := os.ReadDir(absRoot)
 	if err != nil {
 		return nil, err
 	}
 	var tools []*Tool
 	seen := map[string]string{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	add := func(dir string, nested bool) error {
+		manifest := filepath.Join(dir, "tool.yaml")
+		if _, err := os.Stat(manifest); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
 		}
-		dir := filepath.Join(root, e.Name())
-		if _, err := os.Stat(filepath.Join(dir, "tool.yaml")); err != nil {
-			continue
-		}
-		t, err := Load(dir)
+		t, err := loadRegistered(absRoot, dir)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		if nested && strings.TrimSpace(t.Root) == "" {
+			// A subdirectory is only a component when it declares the shared
+			// package root. Without this rule, a testdata/vendor/example manifest
+			// hidden one level down would become a registered tool by accident.
+			return nil
 		}
 		if prev, dup := seen[t.ID]; dup {
-			return nil, fmt.Errorf("duplicate tool id %q: %s and %s", t.ID, prev, dir)
+			return fmt.Errorf("duplicate tool id %q: %s and %s", t.ID, prev, dir)
 		}
 		seen[t.ID] = dir
 		tools = append(tools, t)
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() || digestSkip[e.Name()] || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		pkg := filepath.Join(absRoot, e.Name())
+		if err := add(pkg, false); err != nil {
+			return nil, err
+		}
+		subs, err := os.ReadDir(pkg)
+		if err != nil {
+			continue
+		}
+		for _, se := range subs {
+			if !se.IsDir() || digestSkip[se.Name()] || strings.HasPrefix(se.Name(), ".") {
+				continue
+			}
+			if err := add(filepath.Join(pkg, se.Name()), true); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return tools, nil
+}
+
+// loadRegistered loads a manifest and applies the one rule that needs the tools
+// directory: the package root must not escape it. A component may point at its
+// parent package (root: ..), but a manifest must not turn /tool into the whole
+// tools tree or an arbitrary host directory.
+func loadRegistered(absRoot, dir string) (*Tool, error) {
+	t, err := Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	root := t.PackageRootDir()
+	rel, err := filepath.Rel(absRoot, root)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("tool %s: root %q must be below the tools directory %q", t.ID, root, absRoot)
+	}
+	return t, nil
 }
 
 // Find returns the tool with the given id under root.
@@ -500,11 +714,33 @@ func Discover(root string) ([]*Tool, error) {
 // URL, an agent token's allowlist, or a workspace directory name). Validate it
 // against the same grammar registration uses, so a value like `../other` can
 // never turn the lookup into a directory traversal outside root.
+//
+// The fast path is the single-tool layout <root>/<id>/tool.yaml. A shared
+// package's components live one level deeper, so a miss falls back to a full
+// Discover; that is the price of allowing `ui/tool.yaml` + `task/tool.yaml`
+// without an index file.
 func Find(root, id string) (*Tool, error) {
 	if !idRe.MatchString(id) {
 		return nil, fmt.Errorf("invalid tool id %q", id)
 	}
-	return Load(filepath.Join(root, id))
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(absRoot, id)
+	if _, err := os.Stat(filepath.Join(dir, "tool.yaml")); err == nil {
+		return loadRegistered(absRoot, dir)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	tools, err := Discover(absRoot)
+	if err != nil {
+		return nil, err
+	}
+	if t := FindIn(tools, id); t != nil {
+		return t, nil
+	}
+	return nil, fmt.Errorf("tool %q not found under %s", id, root)
 }
 
 // FindIn is Find over an already-discovered set (avoids re-reading the disk).
@@ -528,11 +764,26 @@ func (t *Tool) Validate() error {
 	if !idRe.MatchString(t.ID) {
 		bad("id %q must match %s", t.ID, idRe)
 	}
-	if t.Version == "" {
-		bad("version is required")
+	if t.Root != "" && filepath.IsAbs(t.Root) {
+		bad("root %q must be relative to the manifest directory", t.Root)
+	}
+	if t.Entry != "" && filepath.IsAbs(t.Entry) {
+		bad("entry %q must be relative to the manifest directory", t.Entry)
 	}
 	if t.Name == "" {
 		bad("name is required")
+	}
+	if t.Completion != nil {
+		if err := ValidateDoneWhen(t.Completion.DoneWhen); err != nil {
+			bad("completion.%v", err)
+		}
+		if t.Completion.DoneWhenTimeout != "" {
+			if secs, err := ParseWalltime(t.Completion.DoneWhenTimeout); err != nil {
+				bad("completion.doneWhenTimeout: %v", err)
+			} else if secs <= 0 {
+				bad("completion.doneWhenTimeout must be greater than zero")
+			}
+		}
 	}
 	// resources describe what SRCOS runs. An external backend runs nothing, so
 	// declaring them there would be dead configuration.
@@ -546,6 +797,12 @@ func (t *Tool) Validate() error {
 		}
 		if t.Resources.CPU < 1 {
 			bad("resources.cpu must be >= 1, got %d", t.Resources.CPU)
+		}
+		if t.Resources.GPU < 0 {
+			bad("resources.gpu must not be negative, got %d", t.Resources.GPU)
+		}
+		if t.Resources.HMem != "" || t.Resources.VMem != "" {
+			bad("resources.h_vmem/v_mem are legacy aliases and are not applied; use resources.memory")
 		}
 	}
 
@@ -685,6 +942,11 @@ func (t *Tool) Validate() error {
 		if len(t.Agent.Tools) > 0 && !submit {
 			bad("agent.tools narrows submit, so agent.mcp must include submit")
 		}
+		for _, id := range t.Agent.Tools {
+			if !idRe.MatchString(id) {
+				bad("agent.tools entry %q must match %s", id, idRe)
+			}
+		}
 	}
 
 	// ── executor × backend cross-check (ADR-007) ────────────────────────
@@ -723,8 +985,18 @@ func (t *Tool) Validate() error {
 		}
 	}
 	if t.Entry != "" && t.Dir != "" {
-		if _, err := os.Stat(filepath.Join(t.Dir, t.Entry)); err != nil {
+		entryPath := filepath.Join(t.PackageRootDir(), filepath.FromSlash(t.EntryPath()))
+		info, err := os.Stat(entryPath)
+		if err != nil {
 			bad("entry %q not found in tool directory", t.Entry)
+		} else if !info.Mode().IsRegular() {
+			bad("entry %q is not a regular file", t.Entry)
+		} else if realEntry, rerr := filepath.EvalSymlinks(entryPath); rerr != nil {
+			bad("entry %q: %v", t.Entry, rerr)
+		} else if realRoot, rerr := filepath.EvalSymlinks(t.PackageRootDir()); rerr != nil {
+			bad("package root %q: %v", t.PackageRootDir(), rerr)
+		} else if !pathWithin(realEntry, realRoot) {
+			bad("entry %q resolves outside the package root %q", t.Entry, t.PackageRootDir())
 		}
 	}
 
@@ -856,6 +1128,66 @@ func (t *Tool) Validate() error {
 		}
 	}
 
+	// ── lifecycle / healthcheck ──────────────────────────────────────────
+	if t.Lifecycle != nil {
+		switch t.Lifecycle.Restart {
+		case "", "never", "no", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-abort", "always":
+		default:
+			bad("lifecycle.restart %q is not a systemd Restart= value", t.Lifecycle.Restart)
+		}
+		for name, raw := range map[string]string{
+			"max_lifetime": t.Lifecycle.MaxLifetime,
+			"idle_ttl":     t.Lifecycle.IdleTTL,
+		} {
+			if raw != "" && !validDuration(raw) {
+				bad("lifecycle.%s %q must be a duration (e.g. 30m, 2h) or walltime", name, raw)
+			}
+		}
+	}
+	if t.Ingress != nil && t.Ingress.Healthcheck != nil {
+		hc := t.Ingress.Healthcheck
+		if hc.Path != "" && !pathIsAbs(hc.Path) {
+			bad("ingress.healthcheck.path %q must be absolute", hc.Path)
+		}
+		if hc.Timeout != "" && !validDuration(hc.Timeout) {
+			bad("ingress.healthcheck.timeout %q must be a positive duration", hc.Timeout)
+		}
+		if hc.StartupGrace != "" && !validDuration(hc.StartupGrace) {
+			bad("ingress.healthcheck.startup_grace %q must be a positive duration", hc.StartupGrace)
+		}
+	}
+
+	// ── templates ────────────────────────────────────────────────────────
+	for name, tpl := range map[string]*InitTemplate{"workspace": t.Workspace, "home": t.Home} {
+		if tpl == nil || tpl.InitFrom == "" {
+			continue
+		}
+		if filepath.IsAbs(tpl.InitFrom) {
+			bad("%s.init_from %q must be relative to the manifest directory", name, tpl.InitFrom)
+			continue
+		}
+		clean := filepath.Clean(filepath.FromSlash(tpl.InitFrom))
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			bad("%s.init_from %q must stay inside the manifest directory", name, tpl.InitFrom)
+			continue
+		}
+		if t.Dir != "" {
+			src := filepath.Join(t.Dir, clean)
+			info, err := os.Stat(src)
+			if err != nil {
+				bad("%s.init_from %q does not exist", name, tpl.InitFrom)
+			} else if !info.IsDir() {
+				bad("%s.init_from %q is not a directory", name, tpl.InitFrom)
+			} else if realSrc, rerr := filepath.EvalSymlinks(src); rerr != nil {
+				bad("%s.init_from %q: %v", name, tpl.InitFrom, rerr)
+			} else if realDir, rerr := filepath.EvalSymlinks(t.Dir); rerr != nil {
+				bad("%s.init_from: manifest directory: %v", name, rerr)
+			} else if !pathWithin(realSrc, realDir) {
+				bad("%s.init_from %q resolves outside the manifest directory", name, tpl.InitFrom)
+			}
+		}
+	}
+
 	// ── ro_mounts ───────────────────────────────────────────────────────
 	for i, m := range t.ROMounts {
 		where := fmt.Sprintf("ro_mounts[%d]", i)
@@ -877,6 +1209,26 @@ func (t *Tool) Validate() error {
 		return nil
 	}
 	return fmt.Errorf("tool %s: %d problem(s):\n  - %s", t.ID, len(problems), strings.Join(problems, "\n  - "))
+}
+
+// validDuration accepts both Go duration strings ("30m", "2h") and the H:MM:SS
+// walltime used by resources.
+func validDuration(raw string) bool {
+	if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil {
+		return d > 0
+	}
+	secs, err := ParseWalltime(raw)
+	return err == nil && secs > 0
+}
+
+// pathWithin reports whether child is at or below parent, after both have been
+// canonicalized by the caller.
+func pathWithin(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func splitFrom(from string) []string {
@@ -1008,7 +1360,8 @@ func commandVarAllowed(kind Kind, name string) bool {
 	}
 	switch name {
 	case "SRCOS_WORKSPACE", "SRCOS_HOME", "HOME", "SRCOS_JOB_DIR",
-		"SRCOS_USER", "SRCOS_TOOL", "SRCOS_TOOL_VERSION", "SRCOS_API":
+		"SRCOS_USER", "SRCOS_TOOL", "SRCOS_TOOL_VERSION", "SRCOS_TOOL_DIR",
+		"SRCOS_API", "SRCOS_AGENT_TOKEN_FILE":
 		return true
 	case "SRCOS_PORT", "SRCOS_INSTANCE_ID":
 		return kind == KindService
@@ -1098,7 +1451,7 @@ func ExpandCommand(cmd, env []string) ([]string, error) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 内容摘要（工具源码管理）
+// 内容摘要（审计线索，不是版本控制）
 // ─────────────────────────────────────────────────────────────────────────
 
 // digestSkip are names that are not part of a tool's source: version-control
@@ -1111,10 +1464,11 @@ var digestSkip = map[string]bool{
 // Digest is a content hash of the tool package: manifest, scripts and templates,
 // in a stable order (path + mode + content).
 //
-// `version` is a string a human writes, and it does not have to change when the
-// files do. The digest is what makes "which code ran" answerable: it is recorded
-// on every instance and every audit event, so a mutated package is visible even
-// when the version string stayed the same.
+// It is an **audit clue**, not a version-control mechanism. SRCOS registers and
+// references a tool directory; it does not pin, snapshot, roll back or keep
+// multiple versions. The digest is recorded on instances and audit events so a
+// human can see what the referenced directory contained at that moment, even
+// though the bytes may change afterwards.
 //
 // It is deliberately **not** a signature: it proves the content matches the
 // record, not that the content is trustworthy. That is the audit's external

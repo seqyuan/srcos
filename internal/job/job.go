@@ -175,6 +175,22 @@ func Validate(j *Job, t *tool.Tool) error {
 				bad("resources.walltime %s exceeds the tool ceiling %s", j.Resources.Walltime, t.Resources.Walltime)
 			}
 		}
+		// GPU is a real scheduler resource on SGE (`-l gpu=N`), so the
+		// lower-only rule applies to it exactly as it does to CPU and memory.
+		if j.Resources.GPU < 0 {
+			bad("resources.gpu must not be negative")
+		} else if j.Resources.GPU > t.Resources.GPU {
+			bad("resources.gpu %d exceeds the tool ceiling %d", j.Resources.GPU, t.Resources.GPU)
+		}
+		if j.Resources.HMem != "" || j.Resources.VMem != "" {
+			bad("resources.h_vmem/v_mem are not supported; use resources.memory")
+		}
+	}
+
+	// A job may override the tool's completion probe, but it must still be a
+	// valid probe: an unknown type used to count any existing path as success.
+	if err := tool.ValidateDoneWhen(j.DoneWhen); err != nil {
+		bad("doneWhen: %v", err)
 	}
 
 	// ── outputs ─────────────────────────────────────────────────────────
@@ -285,7 +301,7 @@ func EffectiveResources(j *Job, t *tool.Tool) tool.Resources {
 			}
 		}
 	}
-	if j.Resources.GPU > 0 {
+	if j.Resources.GPU > 0 && j.Resources.GPU <= out.GPU {
 		out.GPU = j.Resources.GPU
 	}
 	return out
@@ -418,6 +434,46 @@ func Submit(configDir, user, toolID string, j *Job) (string, string, error) {
 // A non-empty id that already holds a job.json is reported as ErrJobExists
 // rather than overwritten: a caller-chosen id is an idempotency key, so finding
 // one there means this submission already happened.
+// SubmitScript files a job whose run script comes from the caller, without a
+// window in which the queue can see half a submission.
+//
+// The ordinary path writes job.json first (that is what makes a directory a
+// submission), so writing work.sh afterwards leaves a race: the gateway can
+// claim the job before the script exists. Here the script is written first and
+// job.json last, which is the publication step. job.json.cmd is set as well so
+// the submission remains self-describing even if the script is later removed.
+func SubmitScript(configDir, user, toolID string, j *Job, script []byte) (string, string, error) {
+	jobsDir := config.JobsDir(configDir, user, toolID)
+	if err := safefs.MkdirAllBeneath(config.DataDir(configDir), jobsDir, 0o755); err != nil {
+		return "", "", err
+	}
+	id := NewID(jobsDir, j.Name)
+	dir := filepath.Join(jobsDir, id)
+	if err := safefs.MkdirAllBeneath(config.DataDir(configDir), dir, 0o755); err != nil {
+		return "", "", err
+	}
+	if j.Command == nil {
+		j.Command = []string{"bash", "work.sh"}
+	}
+	if err := safefs.WriteFileBeneath(config.DataDir(configDir), filepath.Join(dir, "work.sh"), script, 0o755); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	if j.SchemaVersion == 0 {
+		j.SchemaVersion = 1
+	}
+	data, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	if err := safefs.WriteFileBeneath(config.DataDir(configDir), filepath.Join(dir, "job.json"), append(data, '\n'), 0o644); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", err
+	}
+	return id, dir, nil
+}
+
 func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string, error) {
 	jobsDir := config.JobsDir(configDir, user, toolID)
 	if err := safefs.MkdirAllBeneath(config.DataDir(configDir), jobsDir, 0o755); err != nil {

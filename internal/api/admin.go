@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/seqyuan/srcos/internal/agenttoken"
 	"github.com/seqyuan/srcos/internal/audit"
@@ -294,7 +296,9 @@ func (h *Handler) adminStartInstance(w http.ResponseWriter, r *http.Request, use
 	if reservation != nil {
 		onStarted = reservation.Release
 	}
-	inst, err := runner.StartServiceWithStarted(r.Context(), t, nil, onStarted)
+	startCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Minute)
+	defer cancel()
+	inst, err := runner.StartServiceWithStarted(startCtx, t, nil, onStarted)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

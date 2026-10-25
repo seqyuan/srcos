@@ -147,6 +147,40 @@ func TestValidateRejectsResourceEscalation(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsGPUEscalation(t *testing.T) {
+	tl := demoTool()
+	tl.Resources.GPU = 2
+	dir := writeJob(t, "j", `{"schemaVersion":1,"name":"x","resources":{"gpu":4}}`)
+	j, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(j, tl); err == nil || !strings.Contains(err.Error(), "gpu") {
+		t.Fatalf("GPU escalation = %v, want a ceiling error", err)
+	}
+	dir = writeJob(t, "j2", `{"schemaVersion":1,"name":"x","resources":{"gpu":1}}`)
+	j, _ = Load(dir)
+	if err := Validate(j, tl); err != nil {
+		t.Fatalf("lowering GPU must be allowed: %v", err)
+	}
+}
+
+func TestValidateRejectsAnInvalidDoneWhen(t *testing.T) {
+	for _, body := range []string{
+		`{"schemaVersion":1,"name":"x","doneWhen":{"type":"file_exist","path":"/workspace/out"}}`,
+		`{"schemaVersion":1,"name":"x","doneWhen":{"type":"file_exists"}}`,
+	} {
+		dir := writeJob(t, "j", body)
+		j, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(j, demoTool()); err == nil || !strings.Contains(err.Error(), "doneWhen") {
+			t.Fatalf("invalid doneWhen %s = %v", body, err)
+		}
+	}
+}
+
 func TestValidateAllowsLowering(t *testing.T) {
 	dir := writeJob(t, "j", `{"schemaVersion":1,"name":"x","resources":{"cpu":2,"memory":"1Gi","walltime":"0:05:00"}}`)
 	j, _ := Load(dir)
@@ -272,5 +306,40 @@ func writeJobAt(t *testing.T, root, id, body string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "job.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A submission with a caller-provided script must produce exactly one job
+// directory, and job.json (the queue's publication marker) must appear after
+// work.sh, not before it.
+func TestSubmitScriptWritesOneSelfConsistentJob(t *testing.T) {
+	configDir := t.TempDir()
+	id, dir, err := SubmitScript(configDir, "alice", "demo", &Job{Name: "scripted"}, []byte("#!/bin/sh\necho hi\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" || dir == "" {
+		t.Fatal("empty id/dir")
+	}
+	entries, err := os.ReadDir(filepath.Dir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("submissions = %d, want exactly 1", len(entries))
+	}
+	j, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(j.Command) != 2 || j.Command[0] != "bash" || j.Command[1] != "work.sh" {
+		t.Fatalf("command = %v, want [bash work.sh]", j.Command)
+	}
+	script, err := os.ReadFile(filepath.Join(dir, "work.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(script) != "#!/bin/sh\necho hi\n" {
+		t.Fatalf("work.sh = %q", script)
 	}
 }

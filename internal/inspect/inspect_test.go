@@ -617,6 +617,17 @@ func TestInstanceViewKeepsTheWireContract(t *testing.T) {
 	}
 }
 
+// The fast path turns a full id into a file name; a path separator must not
+// turn it into a read outside data/instances.
+func TestInstanceLookupDoesNotUseAPathAsAnID(t *testing.T) {
+	f := newFixture(t, nil)
+	for _, needle := range []string{"../alice-demo-run-1", "..", "."} {
+		if _, _, err := f.Instance("alice", needle); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrBadRequest) {
+			t.Fatalf("%q = %v, want not found/bad request", needle, err)
+		}
+	}
+}
+
 func TestToolViewHidesHostPaths(t *testing.T) {
 	f := newFixture(t, nil)
 	v, err := f.Tool("alice", "demo")

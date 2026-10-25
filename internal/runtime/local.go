@@ -144,7 +144,7 @@ func ResolveArgv(t *tool.Tool, view PathView, jobDir string, env []string) ([]st
 	if t.Entry == "" {
 		return nil, errors.New("no work.sh in the job directory and the tool declares neither command nor entry")
 	}
-	return []string{"bash", view.ToolDir(t) + "/" + t.Entry}, nil
+	return []string{"bash", view.ToolDir(t) + "/" + t.EntryPath()}, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -195,6 +195,12 @@ func (l *Local) useSystemd() bool {
 	})
 	return systemdProbe.ok
 }
+
+// CanProbeByName reports whether a persisted unit name is enough to ask "is
+// this still running?" without a live Handle. A user-manager unit has a stable
+// name; the degraded (plain-child) path has only a pid, which is not known
+// before Start returns.
+func (l *Local) CanProbeByName() bool { return l.useSystemd() }
 
 // Start launches the unit.
 func (l *Local) Start(ctx context.Context, req StartRequest) (Handle, error) {

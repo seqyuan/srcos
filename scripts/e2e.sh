@@ -28,6 +28,9 @@ TOOL=e2e-ticker
 SVC=e2e-web
 ASK=e2e-ask
 EXT=e2e-ext
+SCRIPT_TOOL=e2e-script
+ENV_TOOL=e2e-env
+ENV_ID=e2e-env
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
 TIMEOUT="${SRCOS_E2E_TIMEOUT:-60}"
 
@@ -138,6 +141,20 @@ fi
 
 info "SRCOS e2e  temp=$TMP  port=$PORT  sandbox=$SANDBOX  collector=${COLLECTOR_PORT:-none}"
 
+# A named environment for A3. Its root only has to exist here: with
+# sandbox: none the environment's env: entries are still injected, which is
+# exactly what proves the gateway resolved the provider.
+ENV_ROOT="$TMP/envs/$ENV_ID"
+mkdir -p "$ENV_ROOT/bin" "$CFG"
+cat > "$CFG/environments.yaml" <<YAML
+environments:
+  - id: $ENV_ID
+    name: "E2E environment"
+    root: $ENV_ROOT
+    env:
+      - "E2E_ENV_MARK=from-env"
+YAML
+
 # ── 1. 工具包（临时，不进 srcos-tools/）────────────────────────────────
 step 1 "写入临时工具 $TOOL（sandbox=$SANDBOX）"
 mkdir -p "$TOOLS/$TOOL"
@@ -246,6 +263,60 @@ YAML
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TOOLS/$ASK/work.sh"
 chmod +x "$TOOLS/$ASK/work.sh"
 
+# A2: submitted with an explicit work.sh. The tool's own entry stays trivial; the
+# point is that the submission dir must contain exactly one job.json.
+mkdir -p "$TOOLS/$SCRIPT_TOOL"
+cat > "$TOOLS/$SCRIPT_TOOL/tool.yaml" <<YAML
+schemaVersion: 1
+id: $SCRIPT_TOOL
+version: 0.0.1
+name: "E2E Script"
+description: "用 --script 提交的任务只产生一个 job"
+kind: task
+backend: local
+sandbox: none
+entry: work.sh
+interface:
+  outputs:
+    - name: outs
+      type: directory
+requires_storages: []
+resources:
+  cpu: 1
+  memory: "256Mi"
+  walltime: "0:05:00"
+YAML
+printf '#!/usr/bin/env bash\necho "tool entry should not run" >&2\nexit 9\n' > "$TOOLS/$SCRIPT_TOOL/work.sh"
+chmod +x "$TOOLS/$SCRIPT_TOOL/work.sh"
+
+# A3: a task that resolves a named environment. Its work.sh fails loudly when
+# the provider was not wired, so success proves the env vars were applied.
+mkdir -p "$TOOLS/$ENV_TOOL"
+cat > "$TOOLS/$ENV_TOOL/tool.yaml" <<YAML
+schemaVersion: 1
+id: $ENV_TOOL
+version: 0.0.1
+name: "E2E Environment"
+description: "网关提交的 task 必须能解析 environment"
+kind: task
+backend: local
+sandbox: none
+environment: $ENV_ID
+entry: work.sh
+requires_storages: []
+resources:
+  cpu: 1
+  memory: "256Mi"
+  walltime: "0:05:00"
+YAML
+cat > "$TOOLS/$ENV_TOOL/work.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${E2E_ENV_MARK:?E2E_ENV_MARK missing — the environment provider was not wired}"
+echo "env-mark=${E2E_ENV_MARK}"
+SH
+chmod +x "$TOOLS/$ENV_TOOL/work.sh"
+
 if [ -n "$UPSTREAM_PORT" ]; then
   mkdir -p "$TOOLS/$EXT"
   cat > "$TOOLS/$EXT/tool.yaml" <<YAML
@@ -290,12 +361,18 @@ grants:
   - tool: $ASK
     users: [$ADMIN_USER]
     requestable: true
+  - tool: $SCRIPT_TOOL
+    users: [$USER_NAME]
+  - tool: $ENV_TOOL
+    users: [$USER_NAME]
 YAML
 pass "users + grants ready (default-deny lifted for $TOOL; $ADMIN_USER is admin)"
 
 # ── 3. 启动网关（队列消费者默认开启）────────────────────────────────────
-step 3 "启动网关（$BASE）"
-"$BIN" serve -d "$CFG" --tools-dir "$TOOLS" --host 127.0.0.1 --port "$PORT" \
+step 3 "启动网关（$BASE，只用 SRCOS_TOOLS_DIR、不传 --tools-dir）"
+# A1: the documented default (env var / beside the binary) must enable the task
+# queue. Passing --tools-dir here would hide exactly the regression this covers.
+SRCOS_TOOLS_DIR="$TOOLS" "$BIN" serve -d "$CFG" --host 127.0.0.1 --port "$PORT" \
   --title "srcos-e2e" > "$TMP/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
@@ -307,7 +384,9 @@ for _ in $(seq 1 100); do
   sleep 0.2
 done
 [ "$ready" = "1" ] || fail "gateway did not become ready in 20s"
-pass "gateway ready (pid $GATEWAY_PID)"
+grep -q "task queue: 4 worker(s), tools dir $TOOLS" "$TMP/gateway.log" \
+  || fail "gateway did not enable the task queue from SRCOS_TOOLS_DIR"
+pass "gateway ready (pid $GATEWAY_PID), task queue wired from the resolved tools dir"
 
 # ── 4. 提交（写投递目录 = 入队）─────────────────────────────────────────
 step 4 "提交任务（job submit）"
@@ -444,14 +523,15 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" "$BASE/proxy/$USER_NAME/
 [ "$code" = "200" ] || fail "proxied service = $code, want 200"
 pass "service running and reachable at /proxy/$USER_NAME/$SVC/"
 
-# A hosted agent (A1): the credential is minted into the instance's home, it
-# authenticates, and stopping the instance revokes it.
-AGENT_TOK_FILE="$DATA/homes/$USER_NAME/.srcos/instances/$USER_NAME-$SVC-svc/agent-token"
-[ -f "$AGENT_TOK_FILE" ] || fail "no agent credential was minted into the home"
+# A hosted agent (A1): the credential is minted outside the shared home and
+# bind-mounted into this instance only, it authenticates, and stopping the
+# instance revokes it.
+AGENT_TOK_FILE="$DATA/instance-credentials/$USER_NAME-$SVC-svc/agent-token"
+[ -f "$AGENT_TOK_FILE" ] || fail "no agent credential was minted"
 AGENT_TOK="$(tr -d '\n' < "$AGENT_TOK_FILE")"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGENT_TOK" "$BASE/api/tools")"
 [ "$code" = "200" ] || fail "instance credential rejected: $code"
-pass "实例凭证已签发到 home 且可用"
+pass "实例凭证已签发（per-instance，不在 home）且可用"
 
 grep -rq '"action":"instance.started"' "$AUDDIR" 2>/dev/null || fail "admin service start not audited"
 
@@ -603,5 +683,87 @@ else
   info "  （无 python3，跳过自助启动与存活对账）"
 fi
 
+# ── 17. script 提交只产生一个 job（A2）──────────────────────────
+step 17 "job submit <script> 只产生一个 job"
+PROVIDED="$TMP/provided-work.sh"
+cat > "$PROVIDED" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${SRCOS_WORKSPACE:?}"
+OUT="${SRCOS_WORKSPACE}/out"
+mkdir -p "$OUT"
+echo "script-submit-ok"
+echo "from-provided-script" > "$OUT/result.txt"
+SH
+chmod +x "$PROVIDED"
+
+SUBMIT_OUT="$("$BIN" job submit -d "$CFG" --tools-dir "$TOOLS" --user "$USER_NAME" \
+  -n "script $(date +%H:%M:%S)" --tool "$SCRIPT_TOOL" --output /workspace/out "$PROVIDED")" \
+  || fail "script job submit failed"
+SJOB="$(printf '%s\n' "$SUBMIT_OUT" | awk '/^submitted /{print $2; exit}')"
+[ -n "$SJOB" ] || fail "could not read the script job id"
+SINST="$USER_NAME-$SCRIPT_TOOL-$SJOB"
+JOBCOUNT="$(find "$DATA/ws/$USER_NAME/$SCRIPT_TOOL/jobs" -name job.json 2>/dev/null | wc -l | tr -d ' ')"
+[ "$JOBCOUNT" = "1" ] || fail "script submit created $JOBCOUNT job.json files, want exactly 1"
+for _ in $(seq 1 $((TIMEOUT * 2))); do
+  if grep -q '^state: succeeded' "$DATA/instances/$SINST.yaml" 2>/dev/null; then break; fi
+  if grep -qE '^state: (failed|stopped)' "$DATA/instances/$SINST.yaml" 2>/dev/null; then
+    fail "script job ended as $(grep '^state:' "$DATA/instances/$SINST.yaml")"
+  fi
+  sleep 0.5
+done
+grep -q '^state: succeeded' "$DATA/instances/$SINST.yaml" 2>/dev/null \
+  || fail "script job did not succeed"
+grep -q 'script-submit-ok' "$DATA/logs/$USER_NAME/$SCRIPT_TOOL/$SJOB.log" \
+  || fail "the provided script did not run (tool entry should not have been used)"
+pass "one job.json, provided script ran, succeeded ($SINST)"
+
+# ── 18. Task UI 交接：状态 JSON + 产物清单（B1/B2）─────────────
+step 18 "GET /api/jobs/<id> 与 /artifacts"
+STATUS_JSON="$(curl -fsS -b "$CJ" "$BASE/api/jobs/$SINST")" \
+  || fail "status endpoint failed"
+printf '%s' "$STATUS_JSON" | grep -q '"state":"succeeded"' \
+  || fail "status is not succeeded: $STATUS_JSON"
+printf '%s' "$STATUS_JSON" | grep -q '"exitCode":0' \
+  || fail "status has no exitCode 0: $STATUS_JSON"
+printf '%s' "$STATUS_JSON" | grep -q "\"artifacts\":\"/api/jobs/$SINST/artifacts\"" \
+  || fail "status links are missing the artifacts endpoint: $STATUS_JSON"
+pass "status JSON answers state/exitCode/links"
+
+ARTS_JSON="$(curl -fsS -b "$CJ" "$BASE/api/jobs/$SINST/artifacts")" \
+  || fail "artifacts endpoint failed"
+printf '%s' "$ARTS_JSON" | grep -q '"path":"/workspace/out"' \
+  || fail "artifacts missing /workspace/out: $ARTS_JSON"
+printf '%s' "$ARTS_JSON" | grep -q '"exists":true' \
+  || fail "artifact is not reported as existing: $ARTS_JSON"
+printf '%s' "$ARTS_JSON" | grep -q "srcos://file/workspace/out?tool=$SCRIPT_TOOL" \
+  || fail "artifact has no viewer address: $ARTS_JSON"
+# The old log endpoint keeps working alongside the new ones.
+curl -fsS -b "$CJ" "$BASE/api/jobs/$SINST/logs" | grep -q 'script-submit-ok' \
+  || fail "log endpoint stopped working"
+pass "artifacts carry exists + srcos:// addr; /logs unchanged"
+
+# ── 19. 网关提交的 task 解析 environment（A3）────────────────────
+step 19 "网关提交带 environment 的 task"
+RESP="$(curl -s -w '\n%{http_code}' -b "$CJ" -X POST "$BASE/api/jobs" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' \
+  -d "{\"tool\":\"$ENV_TOOL\"}")"
+code="$(printf '%s' "$RESP" | tail -1)"
+[ "$code" = "201" ] || fail "environment task submit = $code: $(printf '%s' "$RESP" | head -1)"
+EINST="$(printf '%s' "$RESP" | head -1 | grep -o '"instanceId":"[^"]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$EINST" ] || fail "could not read the environment task instance id"
+for _ in $(seq 1 $((TIMEOUT * 2))); do
+  if grep -q '^state: succeeded' "$DATA/instances/$EINST.yaml" 2>/dev/null; then break; fi
+  if grep -qE '^state: (failed|stopped)' "$DATA/instances/$EINST.yaml" 2>/dev/null; then
+    fail "environment task ended as $(grep '^state:' "$DATA/instances/$EINST.yaml") — $(grep '^error:' "$DATA/instances/$EINST.yaml" || true)"
+  fi
+  sleep 0.5
+done
+grep -q '^state: succeeded' "$DATA/instances/$EINST.yaml" 2>/dev/null \
+  || fail "environment task did not succeed"
+grep -rq 'env-mark=from-env' "$DATA/logs/$USER_NAME/$ENV_TOOL/" 2>/dev/null \
+  || fail "the environment's variables were not applied"
+pass "gateway-submitted task resolved $ENV_ID and succeeded ($EINST)"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment\n'

@@ -29,6 +29,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -226,7 +227,9 @@ func (s *Server) dispatch(ctx context.Context, identity agenttoken.Identity, met
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
-		if err := json.Unmarshal(params, &call); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(params))
+		dec.UseNumber()
+		if err := dec.Decode(&call); err != nil {
 			return nil, &rpcError{Code: codeInvalidParams, Message: "invalid tools/call params: " + err.Error()}
 		}
 		t, known := s.byName[call.Name]

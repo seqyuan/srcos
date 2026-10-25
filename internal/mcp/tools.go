@@ -534,16 +534,29 @@ func optString(args map[string]any, key string) string {
 	return ""
 }
 
-// optInt reads an optional integer argument. JSON numbers arrive as float64, and
-// a numeric string is accepted too — that coercion is unambiguous, unlike the
-// reverse one.
+// optInt reads an optional integer argument. JSON numbers arrive as
+// json.Number (the decoder uses UseNumber to keep large ids exact), and a
+// numeric string is accepted too — that coercion is unambiguous.
 func optInt(args map[string]any, key string) int {
 	raw, ok := args[key]
 	if !ok || raw == nil {
 		return 0
 	}
 	switch v := raw.(type) {
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n)
+		}
+		if f, err := v.Float64(); err == nil {
+			return int(f)
+		}
 	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	case int:
+		return v
+	case int64:
 		return int(v)
 	case string:
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {

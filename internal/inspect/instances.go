@@ -48,6 +48,7 @@ type InstanceView struct {
 	Limiter   string            `json:"limiter,omitempty"`
 	Duration  string            `json:"duration,omitempty"`
 	StartedAt string            `json:"startedAt,omitempty"`
+	EndedAt   string            `json:"endedAt,omitempty"`
 	Outputs   []string          `json:"outputs,omitempty"`
 	Tags      map[string]string `json:"tags,omitempty"`
 }
@@ -72,6 +73,9 @@ func viewFromInstance(i *runtime.Instance) InstanceView {
 	}
 	if !i.StartedAt.IsZero() {
 		v.StartedAt = i.StartedAt.Format(time.RFC3339)
+	}
+	if !i.EndedAt.IsZero() {
+		v.EndedAt = i.EndedAt.Format(time.RFC3339)
 	}
 	return v
 }
@@ -115,6 +119,19 @@ func (r *Reader) record(username, needle string) (*runtime.Instance, []string, e
 	needle = strings.TrimSpace(needle)
 	if needle == "" {
 		return nil, nil, fmt.Errorf("%w: an instance id is required", ErrBadRequest)
+	}
+	// Fast path: a full instance id names one file. Detail requests (task page,
+	// logs, artifacts, MCP status) are common; scanning every record first made
+	// each of them O(all instances). The needle is user-controlled, so only an
+	// id-shaped value may become a path; a separator or ".." goes through the
+	// list/suffix path instead.
+	if !strings.ContainsAny(needle, `/\`) && needle != "." && needle != ".." {
+		if rec, err := runtime.LoadInstance(runtime.InstancePath(r.ConfigDir, needle)); err == nil {
+			if rec.User != username {
+				return nil, nil, fmt.Errorf("%w: no instance matching %q", ErrNotFound, needle)
+			}
+			return rec, nil, nil
+		}
 	}
 	records, err := r.records(username)
 	if err != nil {
@@ -247,8 +264,8 @@ func (r *Reader) Artifacts(username, needle string) ([]Artifact, error) {
 			out = append(out, a)
 			continue
 		}
-		host, mount, err := spec.Resolve(path)
-		if err != nil {
+		host, mount, ok := runtime.ResolveOutput(spec, path, rec.Sandbox == string(tool.SandboxNone))
+		if !ok {
 			a.Note = firstNote(recorded, "unresolvable")
 			out = append(out, a)
 			continue

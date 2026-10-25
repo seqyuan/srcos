@@ -487,6 +487,9 @@ func TestQuotaGatesStartsNotSubmissions(t *testing.T) {
 	// Let the first finish; the ceiling frees and the second starts.
 	f.backend.finishAll()
 	waitInstance(t, f.configDir, first.InstanceID, runtime.StateSucceeded)
+	// The record is terminal before the worker's deferred slot release runs;
+	// wait for the queue's own view so this assertion is not a race.
+	waitQueueIdle(t, f)
 	if n := f.drain(t); n != 1 {
 		t.Fatalf("queue started %d after the ceiling freed, want 1", n)
 	}
@@ -726,6 +729,18 @@ func TestRunFlowNeedsSamples(t *testing.T) {
 // ── helpers ──────────────────────────────────────────────────────────────
 
 // waitInstance polls until the instance record reaches want.
+func waitQueueIdle(t *testing.T, f *fixture) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.queue.InFlight() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("queue still has %d run(s) in flight", f.queue.InFlight())
+}
+
 func waitInstance(t *testing.T, configDir, id string, want runtime.State) *runtime.Instance {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

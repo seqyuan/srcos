@@ -938,12 +938,33 @@ func writeFile(path string, tokens []Token) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte(headerComment), data...), 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".agent-tokens-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) }
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if _, err := f.Write(append([]byte(headerComment), data...)); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		cleanup()
 		return err
 	}
 	return nil

@@ -177,8 +177,8 @@ func TestFlowRunsAndWiresOutputs(t *testing.T) {
 	if record.State != flow.RunSucceeded {
 		t.Fatalf("run state = %s (%v)", record.State, record.Nodes)
 	}
-	if record.Samples != 4 {
-		t.Fatalf("units = %d, want 4", record.Samples)
+	if record.Samples != 2 {
+		t.Fatalf("samples = %d, want 2 (nodes are not samples)", record.Samples)
 	}
 
 	dataDir := config.DataDir(f.configDir)
