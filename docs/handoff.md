@@ -11,6 +11,8 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
+> 2026-10-25（**实例 CAS / flow 重启对账 / 运维面**）：`runtime.UpdateInstance`（flock 串行化 read-modify-write）接管 task 的 starting/running/submitted/final 写入、service 的 start/stop、以及 reconcile 的终态写入；故意 stop 不再被迟到的 verdict 覆盖，`job run --force` / 失败重试会先删掉旧终态记录（否则会被 stopped guard 当成“当前取消”）；service 用 `StartedAt` 区分“上一代已停止”和“本次启动被取消”。C3：flow run 记录 `owner_pid/owner_start`，网关启动时把 owner 已死的 `running` 标记为 **`interrupted`** 并给 `flow resume` 提示（不自动重跑）；e2e 用一条 owner_pid=999999 的假记录验证。Phase D（部分）：新增无需认证的 `/-/healthz`、`/-/readyz`（config/tools/按需 bwrap/storages/environments/runner/queue）与 `/-/metrics`（up/build/实例状态/队列 in-flight）。**已实测**：`go vet`、`go test ./...`、`go test -race`（runtime/execute/flowrun/job/safefs）、`make e2e`（bwrap 22 步）与 `SRCOS_E2E_SANDBOX=none make e2e`（path 步骤按设计跳过，其它全绿）、`go test ./internal/execute -count=20`。**仍未做**：Phase D 的 `X-Request-ID`/slog JSON/`srcos doctor`；flow 自动 resume（当前是 interrupted + 显式 resume）；claim 文件移出 workspace。
+>
 > 2026-10-25（**未完成细节：B6 + 写入/认领可靠性**）：示例共享包新增 `scrna-demo-path`（`type: path` + `requires_storages: [data]`），UI 用 `<srcos-path-picker>` 选目录并提交；Playwright 实测 picker → `/data/ref` → `succeeded`，日志 `input_dir = /data/ref`。`safefs` 新增原子写 helper（唯一 temp + rename；exclusive 用 hard link，文件系统不支持时回退 O_EXCL），`job.SubmitAs`/`flow.SaveFlow`/`flow.SaveLayout`/`grant.Save`/`activity.Flush` 全部改用它。`job.Claim` 从“永久 marker”改成 **flock 租约**：`Claim` 返回 `*Lease`，进程死亡自动释放，不再有 TTL/时钟问题；`job run` 与 `flowrun.runJob` 持有租约，CLI 没拿到且非 `--force` 就跳过，`starting/stopping` 加入跳过表。`TestQueueStopsAtTheWorkerCap` 的清理竞态已定位并修复（`prepare` 在记录之前创建 `data/` 子目录，测试现在等 `Queue.InFlight()==0`）。**已实测**：`go vet`、`go test ./...`、`go test -race`（job/safefs/execute/flow/flowrun/grant/activity）、`make e2e`（20 步，新增 path 闭包）、`go test ./internal/execute -count=20`、`tool validate` 三个 demo 组件同根、Playwright 路径选择器全链路。**仍未做**：`runtime.UpdateInstance`/状态机 CAS、claim 文件移出 workspace、C3 flow 重启恢复、C4 故障注入、Phase D。
 >
 > 2026-10-25（**Phase A/B：默认路径 + Task UI 交接协议**）：默认 `srcos serve`（只设 `SRCOS_TOOLS_DIR`、不传 `--tools-dir`）现在真的启用任务队列，并在启动日志打印 worker 数与 tools dir；`srcos job submit <script>` 走新的 `job.SubmitScript`，先写 `work.sh` 再原子写 `job.json`，只产生一个 job；`server.Options` 新增 `Environments`，`NewWithOptions` 加载 `config/environments.yaml` 并传进写路径，`execute.runnerFor` 在 `Supervisor != nil` 时改用 `Supervisor.ForUser`（不再自建一个丢掉 environment/storages/audit 的 runner）。新增 `GET /api/jobs/<id>`（状态 JSON + links）、`GET /api/jobs/<id>/artifacts`（只列声明产物，带 `srcos://` 地址），`/logs` 行为不变；新增 [`tool-ui-spec.md`](tool-ui-spec.md) 与可运行的共享包示例 [`../srcos-tools/scrna-demo/`](../srcos-tools/scrna-demo/README.md)（`ui/tool.yaml` + `task/tool.yaml` 共用 `root: ..`）。**已实测**：`go vet ./...`、`go test ./...`、`make e2e`（bwrap，19 步含 A1/A2/A3/B1/B2）、`./srcos tool validate --tools-dir srcos-tools`、Playwright 打开 `/proxy/alice/scrna-demo-ui/` 点「运行」→ `succeeded`、日志出现 `tool dir = /tool`、产物链接 `/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fout...` 返 200。Phase B6 已在下一轮完成；Phase C3/C4/D 未做。
@@ -137,6 +139,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ Task UI 交接：GET /api/jobs/<id>（状态＋links）· /artifacts      │
 │    · docs/tool-ui-spec.md · srcos-tools/scrna-demo（UI＋task 同包）  │
 │ ✅ 路径选择器示例：scrna-demo-path（type: path + data storage）       │
+│ ✅ 运维面：/-/healthz · /-/readyz · /-/metrics（无需认证）            │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
@@ -220,8 +223,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | **13** | ~~Phase 6 SGE：在真登录节点上跑 `probe-env.sh`，再接真集群~~ ✅ **已在 `annuo` 真集群跑通**（2026-09-28，见 §2.3） | 此前是唯一一个「架构在、从未真跑」的部分，现已验证 | — |
 | 14 | 托管 agent 的首个真实用例（A1 已就绪，见 ADR-025）；SGE（缺集群） | 把「agent 用实例身份调 MCP」跑一次真实场景 | — |
 | 15 | ~~Phase B6：示例 UI 接 `srcos-path-picker`~~ ✅ 已完成（`scrna-demo-path`，Playwright 全链路） | — | — |
-| 16 | Phase C1/C2 剩余：`runtime.UpdateInstance` 状态机 CAS（本轮只做了写入原子化 + flock 认领） | 终态前回读只是缩小、没有关闭取消覆盖窗口 | — |
-| 17 | Phase C3/C4：flow 重启恢复、故障注入 | 独立子系统；C4 依赖 C1 的 CAS | — |
+| 16 | Phase C1/C2 剩余：claim 文件移出 workspace（CAS 已做） | flock 租约已不依赖 marker 内容；移动它是锦上添花 | — |
+| 17 | ~~Phase C3/C4：flow 重启恢复、故障注入~~ ✅ 已完成（interrupted + 显式 resume；CAS/claim/job.json 故障测试） | — | — |
+| 18 | Phase D 剩余：`X-Request-ID` + slog JSON、`srcos doctor` | healthz/readyz/metrics 已完成；日志/诊断是下一层运维体验 | — |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -282,6 +286,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | 坑 | 结论 |
 |---|---|
 | **claim 是 flock 租约，不是永久 marker**（2026-10-25） | `job.Claim` 返回 `*Lease`；**必须持有到运行结束**（`defer Release`，进程退出也会自动释放）。只 `OpenFile` 不持有锁等于没认领。`job run` 没拿到且非 `--force` 跳过；flow 节点在 `runJob` 里认领（不是 `submit`），否则租约会随 submit 返回而丢失 |
+| **重新运行一个终态实例前要删掉旧记录**（2026-10-25，CAS 落地时踩到） | `RunTask` 的 stopped guard 把“当前记录是 stopped”视为“本次启动已被取消”。`job run --force` / 失败重试必须先用 `runtime.DeleteInstance` 重置旧终态，否则会把历史当成现在的取消。service 的重新启动不同：用 `StartedAt` 区分「上一代已经停止」和「本次启动被取消」，所以同一个 id 可以安全重启 |
+| **flow run 的 owner 是进程，不是记录**（2026-10-25，C3） | 记录 `owner_pid/owner_start`；网关启动时 owner 已死就标 `interrupted`（节点 `running` 回 `pending`），不自动重跑。`flow resume` 是显式恢复动作；不要在 gateway 里偷偷重启调度器 |
+| **readyz 的 bwrap 检查是按需的**（2026-10-25，degraded e2e） | 只有注册工具里出现 `sandbox: bwrap` 才要求 bwrap；全 `sandbox: none` 的部署/CI 仍然 ready。e2e 在 `SRCOS_E2E_SANDBOX=none` 下跳过 `type: path` 步骤（storage 必须 bwrap），这是设计边界，不是漏测 |
 | **`storages.yaml` 只在网关启动时加载**（2026-10-25，B6 验证） | 先写 `config/storages.yaml` 再 `serve`；运行中新增 storage 要重启网关，否则 `requires_storages: [data]` 的工具会报 storage 未声明。示例里的 `host_root` 必须换成自己的目录 |
 | **`safefs.WriteFileAtomic` 的 rename 会替换最终 symlink**（2026-10-25） | 它要求目录已经过 `MkdirAllBeneath`；与 `WriteFileBeneath` 的 `O_NOFOLLOW` 拒绝语义不同。exclusive 版本优先 `os.Link`，文件系统不支持硬链接时回退 `O_EXCL` 直写（独占但不原子，队列容忍一个 tick 的 `Broken`） |
 | **「目录即队列」的另一半是消费者**（2026-09-24，ADR-022） | 投递目录一直是队列，但**唯一消费者是人手敲 `srcos job run`** —— agent 与表单提交等于石沉大海。补上守护进程时暴露出三个必须一起定的规则：① **`pending` 不能算配额占用**（否则一条提交过不了它自己排队位置蕴含的那道检查：队列里排 10 个 ≠ 占 10 份资源）；② **认领必须是原子的**（O_EXCL 文件），否则网关队列与另一个进程的 `job run` 会把同一任务跑两遍；③ **流程节点不能被队列当普通项偷走**（`flowrun` 自己按依赖顺序调度并认领；队列还额外按 `Tags["run"]` 跳过，那个判断写在提交里、无窗口期）。教训：**一个「队列」如果没有消费者，它只是目录** |
