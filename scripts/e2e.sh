@@ -142,6 +142,23 @@ fi
 
 info "SRCOS e2e  temp=$TMP  port=$PORT  sandbox=$SANDBOX  collector=${COLLECTOR_PORT:-none}"
 
+# A flow run whose owner process is gone, written before the gateway starts:
+# the startup pass must mark it interrupted instead of leaving "running" forever.
+mkdir -p "$DATA/flows/$USER_NAME/runs/e2e-run-interrupted"
+cat > "$DATA/flows/$USER_NAME/runs/e2e-run-interrupted/flowrun.yaml" <<YAML
+flow_id: e2e-flow
+user: $USER_NAME
+id: e2e-run-interrupted
+samples: 1
+state: running
+started_at: 2026-10-25T00:00:00Z
+owner_pid: 999999
+owner_start: 1
+nodes:
+  - id: count
+    state: running
+YAML
+
 # A named environment for A3. Its root only has to exist here: with
 # sandbox: none the environment's env: entries are still injected, which is
 # exactly what proves the gateway resolved the provider.
@@ -333,6 +350,7 @@ echo "env-mark=${E2E_ENV_MARK}"
 SH
 chmod +x "$TOOLS/$ENV_TOOL/work.sh"
 
+if [ "$SANDBOX" = "bwrap" ]; then
 # Path input: the browsable range must come from this task tool's storage
 # closure, and the value must survive into the sandbox as /data/...
 mkdir -p "$TOOLS/$PATH_TOOL"
@@ -365,6 +383,9 @@ echo "input-dir=${SRCOS_PARAM_INPUT_DIR}"
 ls -1A "${SRCOS_PARAM_INPUT_DIR}" | head -5
 SH
 chmod +x "$TOOLS/$PATH_TOOL/work.sh"
+else
+  info "  (sandbox=$SANDBOX: skipping the path/storage tool — storage requires bwrap)"
+fi
 
 if [ -n "$UPSTREAM_PORT" ]; then
   mkdir -p "$TOOLS/$EXT"
@@ -728,7 +749,14 @@ if [ -n "$UPSTREAM_PORT" ]; then
     sleep 0.5
   done
   [ "$settled" = "1" ] || fail "the periodic reconcile did not settle a dead service in 30s"
-  grep -rq '"action":"instance.orphaned"' "$AUDDIR" 2>/dev/null || fail "service orphan not audited"
+  # The record is written before the audit line; give the auditor a moment so a
+  # fast settle cannot make this assertion flaky.
+  orphan_audited=0
+  for _ in $(seq 1 20); do
+    if grep -rq '"action":"instance.orphaned"' "$AUDDIR" 2>/dev/null; then orphan_audited=1; break; fi
+    sleep 0.1
+  done
+  [ "$orphan_audited" = "1" ] || fail "service orphan not audited"
   pass "服务死后被周期对账结算为 stopped（无需重启网关）"
 else
   info "  （无 python3，跳过自助启动与存活对账）"
@@ -817,6 +845,7 @@ grep -rq 'env-mark=from-env' "$DATA/logs/$USER_NAME/$ENV_TOOL/" 2>/dev/null \
 pass "gateway-submitted task resolved $ENV_ID and succeeded ($EINST)"
 
 
+if [ "$SANDBOX" = "bwrap" ]; then
 # ── 20. type: path / /api/paths 的 storage 闭包（B6）────────────
 step 20 "type: path + /api/paths 的 storage 闭包"
 PATHS_JSON="$(curl -fsS -b "$CJ" "$BASE/api/paths?tool=$PATH_TOOL&input=input_dir")" \
@@ -854,5 +883,32 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" -X POST "$BASE/api/jobs"
 [ "$code" = "400" ] || fail "out-of-storage path = $code, want 400"
 pass "picker range is /data, /data/ref runs, /workspace/out is refused ($PINST)"
 
+else
+  info "  (sandbox=$SANDBOX: skipped — type: path requires a storage mount, which needs bwrap)"
+fi
+
+# ── 21. flow run 重启对账（C3）────────────────────────────────
+step 21 "flow run 的 owner 已死 → interrupted"
+grep -q '^state: interrupted' "$DATA/flows/$USER_NAME/runs/e2e-run-interrupted/flowrun.yaml" \
+  || fail "the orphaned flow run was not marked interrupted"
+grep -q 'flow resume' "$DATA/flows/$USER_NAME/runs/e2e-run-interrupted/flowrun.yaml" \
+  || fail "the interrupted flow run has no recovery hint"
+"$BIN" flow status -d "$CFG" --tools-dir "$TOOLS" --user "$USER_NAME" | grep -q 'interrupted' \
+  || fail "flow status does not show the interrupted run"
+pass "orphaned flow run marked interrupted with a resume hint"
+
+# ── 22. 运维面：healthz / readyz / metrics ─────────────────────
+step 22 "healthz / readyz / metrics（无需认证）"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")" = "200" ] \
+  || fail "/-/healthz is not 200"
+curl -fsS "$BASE/-/healthz" | grep -q '^ok' || fail "/-/healthz body"
+READY_JSON="$(curl -fsS "$BASE/-/readyz")" || fail "/-/readyz is not 200"
+printf '%s' "$READY_JSON" | grep -q '"ready":true' || fail "readyz is not ready: $READY_JSON"
+METRICS="$(curl -fsS "$BASE/-/metrics")" || fail "/-/metrics is not 200"
+printf '%s' "$METRICS" | grep -q 'srcos_up 1' || fail "metrics has no srcos_up"
+printf '%s' "$METRICS" | grep -q 'srcos_build_info' || fail "metrics has no build info"
+printf '%s' "$METRICS" | grep -q 'srcos_instances{state="succeeded"}' || fail "metrics has no instance states"
+pass "healthz/readyz/metrics answer without a session"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment → path 闭包\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment → path 闭包 → flow 重启对账 → healthz/readyz/metrics\n'

@@ -31,6 +31,23 @@ func processAlive(pid int) bool {
 // process. The second return value is false when the process is gone or /proc
 // cannot be read (a non-Linux host), and callers must treat "unknown" as "do
 // not signal".
+// ProcessStartTime is the exported form of pidStartTime, for packages that
+// track a process across restarts (flow runs record their owner).
+func ProcessStartTime(pid int) (uint64, bool) { return pidStartTime(pid) }
+
+// ProcessAlive reports whether pid is still the same process incarnation.
+// start == 0 accepts any live process with that pid (legacy records).
+func ProcessAlive(pid int, start uint64) bool {
+	if pid <= 0 {
+		return false
+	}
+	cur, ok := pidStartTime(pid)
+	if !ok {
+		return false
+	}
+	return start == 0 || cur == start
+}
+
 func pidStartTime(pid int) (uint64, bool) {
 	if pid <= 0 {
 		return 0, false

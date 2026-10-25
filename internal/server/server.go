@@ -40,6 +40,7 @@ type Server struct {
 	siteTitle     string
 	toolsDir      string
 	storages      storage.Provider
+	environments  environment.Provider
 	grants        api.GrantChecker
 	loginLimiter  *rate.Limiter
 	totpLimiter   *rate.Limiter
@@ -344,6 +345,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 		toolsDir:      toolsDir,
 		flowsDir:      flowsDir,
 		storages:      storages,
+		environments:  environments,
 		grants:        grants,
 		agentTokens:   agentTokens,
 		runtimeTokens: runtimeTokens,
@@ -411,6 +413,7 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 	// the CLI, in another process), mark the dead ones stopped, and publish the
 	// survivors so a gateway restart does not take every service offline.
 	srv.reconcile()
+	srv.reconcileFlowRuns()
 	if insts, ok := srv.listInstances(); ok {
 		srv.reconcileTasks(insts)
 	}
@@ -420,6 +423,13 @@ func NewWithOptions(state *config.StateConfig, configDir string, opts Options) *
 // Handler returns the HTTP handler for the server.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Operations surface (unauthenticated): liveness, readiness and a small
+	// metrics scrape. Exact paths, so a backend's own /-/… tree keeps working
+	// under /proxy/<user>/<tool>/.
+	mux.HandleFunc("/-/healthz", s.handleHealth)
+	mux.HandleFunc("/-/readyz", s.handleReady)
+	mux.HandleFunc("/-/metrics", s.handleMetrics)
 
 	// The MCP endpoint (ADR-019). It is a gateway route, like /api/*: a backend
 	// service that happened to use /mcp keeps working under its own prefix

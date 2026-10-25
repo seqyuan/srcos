@@ -304,8 +304,14 @@ func (r *Runner) Run(ctx context.Context, f *flow.Flow, plan []flow.Unit, record
 	if samples != nil {
 		record.Samples = len(samples.Rows)
 	}
-	if record.State == "" || record.State == flow.RunRunning {
+	if record.State == "" || record.State == flow.RunRunning || record.State == flow.RunInterrupted {
 		record.State = flow.RunRunning
+		record.Error = ""
+		record.EndedAt = time.Time{}
+	}
+	record.OwnerPID = os.Getpid()
+	if start, ok := runtime.ProcessStartTime(record.OwnerPID); ok {
+		record.OwnerStart = start
 	}
 	cancelPath := flow.CancelPath(r.Opts.DataDir, r.Opts.User, record.ID)
 	if err := r.save(record); err != nil {
@@ -982,6 +988,50 @@ func nodeOf(f *flow.Flow, id string) *flow.Node {
 		}
 	}
 	return nil
+}
+
+// ReconcileInterrupted marks running runs whose owner process is gone.
+//
+// The scheduler goroutine dies with the process that started it, while the
+// record on disk keeps saying `running` forever. A gateway restart therefore
+// scans each user's runs: a live owner is left alone (a CLI flow run in another
+// process), a dead one becomes `interrupted` with an explanation, and the
+// running nodes go back to pending so `flow resume` can continue them. No job is
+// killed or re-run here; resuming is the explicit human/CLI action.
+func ReconcileInterrupted(dataDir, user string) ([]string, error) {
+	runs, err := ListRunRecords(dataDir, user)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	var interrupted []string
+	for _, rec := range runs {
+		if rec.State != flow.RunRunning {
+			continue
+		}
+		if runtime.ProcessAlive(rec.OwnerPID, rec.OwnerStart) {
+			continue
+		}
+		why := "the process that owned this run is gone"
+		if rec.OwnerPID > 0 {
+			why += fmt.Sprintf(" (pid %d)", rec.OwnerPID)
+		}
+		why += "; use `srcos flow resume " + rec.ID + "` to continue"
+		rec.State = flow.RunInterrupted
+		rec.Error = why
+		rec.EndedAt = now
+		for i := range rec.Nodes {
+			if rec.Nodes[i].State == flow.NodeRunning {
+				rec.Nodes[i].State = flow.NodePending
+				rec.Nodes[i].Error = "interrupted by a restart"
+			}
+		}
+		if err := flow.SaveRun(dataDir, flow.RecordPath(dataDir, user, rec.ID), rec); err != nil {
+			return interrupted, err
+		}
+		interrupted = append(interrupted, rec.ID)
+	}
+	return interrupted, nil
 }
 
 // LoadRunRecord reads a run by id (for `flow resume` and `flow status`).

@@ -511,6 +511,9 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/admin` | **管理控制台**（仅管理员：实例总览 / 强制停止 / 授权管理） |
 | `/api/admin`、`/api/admin/*` | 管理 API（仅管理员、**仅浏览器 session**；agent token 无 admin scope，不能调用。含 `/api/admin/audit`、`/api/admin/requests/<id>/approve|deny`、`POST /api/admin/instances` 启动服务） |
 | `/assets/*` | 平台提供的原语控件（如 `srcos-path-picker.js`） |
+| `/-/healthz` | **存活探针**（无需认证，纯文本 `ok`） |
+| `/-/readyz` | **就绪探针**（无需认证；JSON checks，失败返回 503） |
+| `/-/metrics` | **Prometheus 文本**（无需认证；`srcos_up` / build info / 实例状态 / 队列 in-flight） |
 | `/tools`、`/tools/*` | 工具目录页与自动生成的参数表单（含「可申请的工具」区） |
 | `/requests` | **我的申请**（B3：自己提交的访问申请与结果） |
 | `/proxy/*` | 服务代理前缀（静态卡片与服务实例路由共用；见「服务实例的动态路由」） |

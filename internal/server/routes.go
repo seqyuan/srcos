@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/seqyuan/srcos/internal/config"
+	"github.com/seqyuan/srcos/internal/flowrun"
 	"github.com/seqyuan/srcos/internal/grant"
 	"github.com/seqyuan/srcos/internal/route"
 	"github.com/seqyuan/srcos/internal/runtime"
@@ -37,6 +38,29 @@ import (
 // Reconcile can tell the two apart. Without a supervisor runner there is
 // nothing to probe with, so this degrades to publishing what the records claim
 // (which is what a read-only deployment can honestly do).
+// reconcileFlowRuns marks flow runs whose owner process died as interrupted.
+//
+// A flow scheduler is a goroutine in the process that ran it. If that process
+// is gone, the record on disk still says `running` while nothing will ever
+// advance it. The gateway owns the restart boundary, so it settles those
+// records; `flow resume` is the explicit way to continue the work.
+func (s *Server) reconcileFlowRuns() {
+	if s.registry == nil {
+		return
+	}
+	dataDir := config.DataDir(config.DirOf(s.registry))
+	for _, u := range s.registry.ListUsers() {
+		ids, err := flowrun.ReconcileInterrupted(dataDir, u.Username)
+		if err != nil {
+			log.Printf("[srcos] flow run reconcile for %s: %v", u.Username, err)
+			continue
+		}
+		for _, id := range ids {
+			log.Printf("[srcos] flow run %s: its owner is gone; marked interrupted", id)
+		}
+	}
+}
+
 func (s *Server) reconcile() {
 	if s.runner != nil {
 		adopted, orphaned, err := s.runner.Reconcile(context.Background())

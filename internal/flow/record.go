@@ -36,10 +36,11 @@ const (
 
 // Run states.
 const (
-	RunRunning   = "running"
-	RunSucceeded = "succeeded"
-	RunFailed    = "failed"
-	RunCancelled = "cancelled"
+	RunRunning     = "running"
+	RunInterrupted = "interrupted" // owner process is gone; `flow resume` continues it
+	RunSucceeded   = "succeeded"
+	RunFailed      = "failed"
+	RunCancelled   = "cancelled"
 )
 
 // CancelName is the flag file that asks a running flow to stop scheduling.
@@ -96,11 +97,18 @@ type Run struct {
 	Samples int `yaml:"samples"`
 	// Params are the user-supplied values, kept so a resume does not need them
 	// again (and so the run is reproducible from its own directory).
-	Params    map[string]string `yaml:"params,omitempty"`
-	State     string            `yaml:"state"`
-	StartedAt time.Time         `yaml:"started_at"`
-	EndedAt   time.Time         `yaml:"ended_at,omitempty"`
-	Nodes     []NodeState       `yaml:"nodes"`
+	Params map[string]string `yaml:"params,omitempty"`
+	State  string            `yaml:"state"`
+	// Error explains a non-success run state (notably `interrupted`).
+	Error string `yaml:"error,omitempty"`
+	// OwnerPID/OwnerStart identify the process scheduling this run. A restart
+	// (or a CLI flow run that died) leaves a `running` record with a dead owner;
+	// the gateway marks it interrupted instead of pretending it still runs.
+	OwnerPID   int         `yaml:"owner_pid,omitempty"`
+	OwnerStart uint64      `yaml:"owner_start,omitempty"`
+	StartedAt  time.Time   `yaml:"started_at"`
+	EndedAt    time.Time   `yaml:"ended_at,omitempty"`
+	Nodes      []NodeState `yaml:"nodes"`
 }
 
 // Node returns a node's state, creating it as pending when it is missing (a run
@@ -227,6 +235,9 @@ func Sign(root, signPath string) error {
 func (r *Run) Summary() string {
 	out := fmt.Sprintf("run %s · flow %s@%s · user %s · %d sample(s) · %s",
 		r.ID, r.FlowID, r.FlowVersion, r.User, r.Samples, r.State)
+	if r.Error != "" {
+		out += " — " + r.Error
+	}
 	for _, n := range r.Nodes {
 		detail := ""
 		if len(n.JobIDs) > 0 {
