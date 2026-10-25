@@ -7,6 +7,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/seqyuan/srcos/internal/safefs"
 )
 
 // Save writes the policy atomically.
@@ -35,11 +37,7 @@ func Save(path string, p *Policy) error {
 		"# 只表达「允许」，没有 deny —— 所以「为什么 alice 能用」永远能指到某一行。\n" +
 		"#\n" +
 		"# 由 `srcos grant ...` 维护；手工编辑后重启网关生效。\n\n"
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte(header), data...), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefs.WriteFileAtomicSynced(path, append([]byte(header), data...), 0o600)
 }
 
 // SetGrant inserts or replaces the grant for a tool.

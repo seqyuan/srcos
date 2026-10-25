@@ -140,3 +140,140 @@ func OpenFile(path string, flags int, perm os.FileMode) (*os.File, error) {
 // ErrEscapes is returned when an opened descriptor points outside the mount it
 // was resolved from.
 var ErrEscapes = errors.New("opened path escapes its mount")
+
+// linkFile is os.Link, behind a variable so a test can exercise the
+// filesystem-does-not-support-hardlinks fallback.
+var linkFile = os.Link
+
+// WriteFileAtomic publishes a file by writing a unique sibling temp file and
+// renaming it into place. A reader sees either the old file or the new one,
+// never a half-written body.
+//
+// It does not fsync: callers that need crash durability use
+// WriteFileAtomicSynced. The directory must already be trusted/validated
+// (MkdirAllBeneath); the rename replaces a symlink at the final component
+// rather than following it, which is the intended difference from
+// WriteFileBeneath's O_NOFOLLOW refusal.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm, false)
+}
+
+// WriteFileAtomicSynced is WriteFileAtomic plus a file and directory fsync, for
+// state that must survive a crash (a submission's publication marker, the
+// authorization policy).
+func WriteFileAtomicSynced(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm, true)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode, synced bool) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if synced {
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if synced {
+		if d, err := os.Open(dir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
+	}
+	return nil
+}
+
+// WriteFileAtomicExclusive publishes a file only if the target does not already
+// exist. It returns os.ErrExist (errors.Is) when it lost that race.
+//
+// It writes a unique temp file first, then hard-links it into place. Hard links
+// are not universal (CIFS without unix extensions, some FUSE mounts, FAT), so an
+// unsupported link falls back to O_CREATE|O_EXCL on the final path: exclusive
+// but not atomic. The drop-box tolerates that: job.Scan reports a transient
+// unparsable job.json as Broken and the next tick retries.
+func WriteFileAtomicExclusive(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	if err := linkFile(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return os.ErrExist
+		}
+		if linkUnsupported(err) {
+			return writeExclusiveDirect(path, data, perm)
+		}
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+func writeExclusiveDirect(path string, data []byte, perm os.FileMode) error {
+	f, err := OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return os.ErrExist
+		}
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// linkUnsupported reports whether err means "this filesystem has no hard
+// links", as opposed to a real failure.
+func linkUnsupported(err error) bool {
+	return errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOSYS) ||
+		errors.Is(err, syscall.ENOTSUP)
+}

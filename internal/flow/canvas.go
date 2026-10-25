@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"github.com/seqyuan/srcos/internal/safefs"
 	"math"
 	"os"
 	"path/filepath"
@@ -103,11 +104,7 @@ func SaveLayout(flowsDir, id string, l Layout, known []string) error {
 	// Atomic, like every other record here: a half-written file would make the
 	// canvas fall back to the derived layout, which looks like "my positions
 	// disappeared" and is impossible to debug.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefs.WriteFileAtomic(path, data, 0o644)
 }
 
 // MissingExpose names the required inputs of a flow's nodes that nothing feeds

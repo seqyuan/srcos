@@ -260,9 +260,5 @@ func SaveFlow(path string, f *Flow) error {
 		"# 流程里没有 shell、没有模板、不声明 backend —— 那些属于工具。\n" +
 		"#\n" +
 		"# 由 `srcos flow` 或管理端画布维护；保存前会跑同一套注册期校验。\n\n"
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte(header), data...), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefs.WriteFileAtomicSynced(path, append([]byte(header), data...), 0o644)
 }

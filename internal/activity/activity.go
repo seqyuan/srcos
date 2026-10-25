@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/seqyuan/srcos/internal/safefs"
 )
 
 // flushEvery throttles writes per id. The first use of an id is written
@@ -129,13 +131,10 @@ func (j *Journal) Flush() error {
 	if err := os.MkdirAll(filepath.Dir(j.path), 0o755); err != nil {
 		return err
 	}
-	tmp := j.path + ".tmp"
 	body := append([]byte(j.header), data...)
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, j.path); err != nil {
-		os.Remove(tmp)
+	// Atomic visibility without fsync: this is a hint that drives a
+	// minutes-scale decision, and Touch() runs on the first proxied request.
+	if err := safefs.WriteFileAtomic(j.path, body, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", j.path, err)
 	}
 	j.dirty = false
