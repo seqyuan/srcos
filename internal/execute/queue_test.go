@@ -109,6 +109,9 @@ func TestQueueStopsAtTheWorkerCap(t *testing.T) {
 	if n := q.Tick(context.Background()); n != 1 {
 		t.Fatalf("queue started %d after the first finished, want 1", n)
 	}
+	// This test uses a local queue, not f.queue: wait on the one that actually
+	// started the run before letting t.TempDir remove data/.
+	waitQueueIdleFor(t, q)
 	f.releaseAndSettle(t)
 }
 

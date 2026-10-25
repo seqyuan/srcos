@@ -658,11 +658,13 @@ func (f *fixture) releaseAndSettle(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		f.backend.finishAll()
-		if f.backend.live() == 0 && f.instancesSettled() {
+		queueIdle := f.queue == nil || f.queue.InFlight() == 0
+		if queueIdle && f.backend.live() == 0 && f.instancesSettled() {
 			// One more beat: a run whose prepare was still in flight may only
 			// now reach the backend, and it self-finishes because auto is on.
 			time.Sleep(10 * time.Millisecond)
-			if f.backend.live() == 0 && f.instancesSettled() {
+			queueIdle = f.queue == nil || f.queue.InFlight() == 0
+			if queueIdle && f.backend.live() == 0 && f.instancesSettled() {
 				return
 			}
 		}
@@ -731,14 +733,23 @@ func TestRunFlowNeedsSamples(t *testing.T) {
 // waitInstance polls until the instance record reaches want.
 func waitQueueIdle(t *testing.T, f *fixture) {
 	t.Helper()
+	waitQueueIdleFor(t, f.queue)
+}
+
+// waitQueueIdleFor waits for one queue's goroutines to leave. InFlight drops in
+// the run goroutine's last defer, after the record is written, so this is the
+// barrier that keeps t.TempDir's RemoveAll from racing with prepare's directory
+// creation (EnsureDirs runs before any instance record exists).
+func waitQueueIdleFor(t *testing.T, q *Queue) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if f.queue.InFlight() == 0 {
+		if q == nil || q.InFlight() == 0 {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("queue still has %d run(s) in flight", f.queue.InFlight())
+	t.Fatalf("queue still has %d run(s) in flight", q.InFlight())
 }
 
 func waitInstance(t *testing.T, configDir, id string, want runtime.State) *runtime.Instance {
