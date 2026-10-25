@@ -358,7 +358,19 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 		inst.State = StateFailed
 		inst.Error = fmt.Sprintf(format, a...)
 		inst.EndedAt = time.Now().UTC()
-		_ = SaveInstance(prep.paths.RecordPath, inst)
+		latest, applied, uerr := UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+			if cur.State == StateStopped {
+				return ErrInstanceChanged
+			}
+			*cur = *inst
+			return nil
+		})
+		if uerr == nil {
+			if !applied {
+				return latest
+			}
+			inst = latest
+		}
 		return inst
 	}
 
@@ -393,9 +405,20 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 		inst.UnitName = req.UnitName
 		inst.BackendRef = req.UnitName
 		inst.State = StateStarting
-		if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
-			return nil, err
+		latest, applied, uerr := UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+			if cur.State == StateStopped {
+				return ErrInstanceChanged
+			}
+			*cur = *inst
+			return nil
+		})
+		if uerr != nil {
+			return nil, uerr
 		}
+		if !applied {
+			return latest, nil
+		}
+		inst = latest
 	}
 	h, err := backend.Start(ctx, req)
 	if err != nil {
@@ -415,9 +438,24 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 	inst.RequestedCPU, inst.RequestedMemory = requestedResources(t, loaded.Job)
 	inst.State = StateRunning
 	inst.LastActiveAt = inst.StartedAt
-	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
-		return nil, err
+	latest, applied, uerr := UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+		if cur.State == StateStopped {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+	if uerr != nil {
+		_ = h.Stop(ctx)
+		return nil, uerr
 	}
+	if !applied {
+		// A stop landed while the backend was starting; do not resurrect the
+		// record, and make sure the unit does not outlive it.
+		_ = h.Stop(ctx)
+		return latest, nil
+	}
+	inst = latest
 	if onStarted != nil {
 		onStarted()
 	}
@@ -471,9 +509,20 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 			// instead of mistaking exit 0 for success (ADR-006).
 			inst.EndedAt = time.Time{}
 			inst.Duration = ""
-			if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
-				return nil, err
+			latest, applied, uerr := UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+				if cur.State == StateStopped {
+					return ErrInstanceChanged
+				}
+				*cur = *inst
+				return nil
+			})
+			if uerr != nil {
+				return nil, uerr
 			}
+			if !applied {
+				return latest, nil
+			}
+			inst = latest
 			err := r.waitForProbe(ctx, probe, host, timeout, prep.paths.RecordPath)
 			if errors.Is(err, errProbeStopped) {
 				if persisted, lerr := LoadInstance(prep.paths.RecordPath); lerr == nil {
@@ -502,9 +551,20 @@ func (r *Runner) RunTaskWithStarted(ctx context.Context, t *tool.Tool, loaded *j
 	}
 
 	inst.Outputs = r.reportOutputs(prep.spec, loaded.Job.Outputs, prep.view.Degraded)
-	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
-		return nil, err
+	latest, applied, uerr = UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+		if cur.State == StateStopped {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+	if uerr != nil {
+		return nil, uerr
 	}
+	if !applied {
+		return latest, nil
+	}
+	inst = latest
 	r.auditInstance(inst, "instance.done", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
 	return inst, nil
 }
@@ -609,6 +669,33 @@ func (r *Runner) StartService(ctx context.Context, t *tool.Tool, j *job.Job) (*I
 // StartServiceWithStarted is StartService with a callback invoked once the
 // record says `starting` (the first state that consumes resources). The
 // admission layer uses it to release its reservation before the healthcheck.
+// saveUnlessStopped writes inst unless a deliberate stop has already won. The
+// returned record is the on-disk truth; applied=false means the caller must not
+// resurrect the unit or its other side effects.
+func (r *Runner) saveUnlessStopped(path string, inst *Instance) (*Instance, bool, error) {
+	return UpdateInstance(path, func(cur *Instance) error {
+		if cur.State == StateStopped {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+}
+
+// saveUnlessStoppedGeneration is the service variant: a service may replace a
+// record left by a previous, already-stopped generation (same instance id), but
+// must not resurrect the current generation after a cancel. StartedAt tells the
+// two apart: a stop of this start has the same (or later) start time.
+func (r *Runner) saveUnlessStoppedGeneration(path string, inst *Instance) (*Instance, bool, error) {
+	return UpdateInstance(path, func(cur *Instance) error {
+		if cur.State == StateStopped && !cur.StartedAt.Before(inst.StartedAt) {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+}
+
 func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *job.Job, onStarted func()) (*Instance, error) {
 	if t.Kind != tool.KindService {
 		return nil, fmt.Errorf("tool %s is kind %s; StartService only handles %s", t.ID, t.Kind, tool.KindService)
@@ -635,7 +722,13 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 		if minted {
 			r.revokeInstanceCredential(inst)
 		}
-		_ = SaveInstance(prep.paths.RecordPath, inst)
+		latest, applied, uerr := r.saveUnlessStoppedGeneration(prep.paths.RecordPath, inst)
+		if uerr == nil {
+			if !applied {
+				return latest
+			}
+			inst = latest
+		}
 		return inst
 	}
 
@@ -719,12 +812,20 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 		inst.UnitName = req.UnitName
 		inst.BackendRef = req.UnitName
 		inst.State = StateStarting
-		if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+		latest, applied, uerr := r.saveUnlessStoppedGeneration(prep.paths.RecordPath, inst)
+		if uerr != nil {
 			if minted {
 				r.revokeInstanceCredential(inst)
 			}
-			return nil, err
+			return nil, uerr
 		}
+		if !applied {
+			if minted {
+				r.revokeInstanceCredential(inst)
+			}
+			return latest, nil
+		}
+		inst = latest
 	}
 	h, err := backend.Start(ctx, req)
 	if err != nil {
@@ -762,13 +863,22 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 		inst.LeaseExpiresAt = inst.StartedAt.Add(time.Duration(secs) * time.Second)
 	}
 	inst.State = StateStarting
-	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+	latest, applied, uerr := r.saveUnlessStoppedGeneration(prep.paths.RecordPath, inst)
+	if uerr != nil {
 		_ = h.Stop(context.Background())
 		if minted {
 			r.revokeInstanceCredential(inst)
 		}
-		return nil, err
+		return nil, uerr
 	}
+	if !applied {
+		_ = h.Stop(context.Background())
+		if minted {
+			r.revokeInstanceCredential(inst)
+		}
+		return latest, nil
+	}
+	inst = latest
 	if onStarted != nil {
 		onStarted()
 	}
@@ -780,13 +890,22 @@ func (r *Runner) StartServiceWithStarted(ctx context.Context, t *tool.Tool, j *j
 
 	inst.State = StateRunning
 	inst.Healthcheck = "ok"
-	if err := SaveInstance(prep.paths.RecordPath, inst); err != nil {
+	latest, applied, uerr = r.saveUnlessStoppedGeneration(prep.paths.RecordPath, inst)
+	if uerr != nil {
 		_ = h.Stop(context.Background())
 		if minted {
 			r.revokeInstanceCredential(inst)
 		}
-		return nil, err
+		return nil, uerr
 	}
+	if !applied {
+		_ = h.Stop(context.Background())
+		if minted {
+			r.revokeInstanceCredential(inst)
+		}
+		return latest, nil
+	}
+	inst = latest
 
 	target, err := route.ParseTarget(inst.Endpoint)
 	if err != nil {
@@ -840,7 +959,19 @@ func (r *Runner) startExternal(ctx context.Context, t *tool.Tool, j *job.Job, pr
 		inst.State = StateFailed
 		inst.Error = fmt.Sprintf(format, a...)
 		inst.EndedAt = time.Now().UTC()
-		_ = SaveInstance(prep.paths.RecordPath, inst)
+		latest, applied, uerr := UpdateInstance(prep.paths.RecordPath, func(cur *Instance) error {
+			if cur.State == StateStopped {
+				return ErrInstanceChanged
+			}
+			*cur = *inst
+			return nil
+		})
+		if uerr == nil {
+			if !applied {
+				return latest
+			}
+			inst = latest
+		}
 		return inst
 	}
 
@@ -1039,9 +1170,20 @@ func probeHTTP(ctx context.Context, target route.Target, path string, timeout ti
 
 // StopService stops a service instance and withdraws its route.
 func (r *Runner) StopService(ctx context.Context, inst *Instance) error {
+	original := inst
+	path := InstancePath(r.opts.ConfigDir, inst.ID)
 	if !inst.State.Terminal() {
 		inst.State = StateStopping
-		_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+		latest, _, uerr := UpdateInstance(path, func(cur *Instance) error {
+			if cur.State.Terminal() {
+				return ErrInstanceChanged
+			}
+			cur.State = StateStopping
+			return nil
+		})
+		if uerr == nil {
+			inst = latest
+		}
 	}
 
 	// Withdraw the route first: a request arriving mid-stop should get a
@@ -1068,7 +1210,23 @@ func (r *Runner) StopService(ctx context.Context, inst *Instance) error {
 	// whichever way the instance is leaving (explicit stop, the reaper, an admin
 	// stopping someone else's service).
 	r.revokeInstanceCredential(inst)
-	return SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+	// Do not turn a run that finished while we were stopping it into "stopped":
+	// the waiter's terminal verdict is the authority, and this write must lose.
+	latest, _, uerr := UpdateInstance(path, func(cur *Instance) error {
+		if cur.State.Terminal() {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+	if uerr != nil {
+		return uerr
+	}
+	// UpdateInstance returns the record it read/wrote; the caller still holds
+	// the original pointer and uses it for the response, so copy the outcome
+	// back (a deliberate stop must report "stopped", not "stopping").
+	*original = *latest
+	return nil
 }
 
 // revokeInstanceCredential ends the credential minted for one instance (A1).
@@ -1343,7 +1501,14 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 					inst.State = StateStopped
 					inst.EndedAt = time.Now().UTC()
 					inst.Error = "found unreachable during startup reconcile: " + rerr.Error()
-					_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+					latest, _, _ := UpdateInstance(InstancePath(r.opts.ConfigDir, inst.ID), func(cur *Instance) error {
+						if cur.State.Terminal() {
+							return ErrInstanceChanged
+						}
+						*cur = *inst
+						return nil
+					})
+					inst = latest
 					r.releaseInstancePort(inst)
 					if r.opts.Routes != nil {
 						r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
@@ -1381,7 +1546,14 @@ func (r *Runner) Reconcile(ctx context.Context) (adopted, orphaned []string, err
 			inst.State = StateStopped
 			inst.EndedAt = time.Now().UTC()
 			inst.Error = "found stopped during startup reconcile"
-			_ = SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst)
+			latest, _, _ := UpdateInstance(InstancePath(r.opts.ConfigDir, inst.ID), func(cur *Instance) error {
+				if cur.State.Terminal() {
+					return ErrInstanceChanged
+				}
+				*cur = *inst
+				return nil
+			})
+			inst = latest
 			r.releaseInstancePort(inst)
 			if r.opts.Routes != nil {
 				r.opts.Routes.DeleteInstance(inst.User, inst.Tool, inst.ID)
@@ -1667,9 +1839,20 @@ func (r *Runner) ReconcileTasks(ctx context.Context, insts []*Instance) (adopted
 					"`srcos job run --force` if you need a fresh verdict."
 			}
 		}
-		if serr := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); serr != nil {
+		latest, applied, serr := UpdateInstance(InstancePath(r.opts.ConfigDir, inst.ID), func(cur *Instance) error {
+			if cur.State.Terminal() {
+				return ErrInstanceChanged
+			}
+			*cur = *inst
+			return nil
+		})
+		if serr != nil {
 			err = serr
 			continue
+		}
+		inst = latest
+		if !applied {
+			continue // a deliberate stop won the race
 		}
 		settled = append(settled, inst.ID)
 		r.auditInstance(inst, "instance.settled", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
@@ -1714,9 +1897,20 @@ func (r *Runner) reconcileSubmittedTask(inst *Instance) (bool, error) {
 	if !inst.StartedAt.IsZero() {
 		inst.Duration = inst.EndedAt.Sub(inst.StartedAt).Round(time.Millisecond).String()
 	}
-	if err := SaveInstance(InstancePath(r.opts.ConfigDir, inst.ID), inst); err != nil {
+	latest, applied, err := UpdateInstance(InstancePath(r.opts.ConfigDir, inst.ID), func(cur *Instance) error {
+		if cur.State.Terminal() {
+			return ErrInstanceChanged
+		}
+		*cur = *inst
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
+	if !applied {
+		return false, nil
+	}
+	inst = latest
 	r.auditInstance(inst, "instance.settled", map[string]any{"state": string(inst.State), "exit": inst.ExitCode})
 	return true, nil
 }

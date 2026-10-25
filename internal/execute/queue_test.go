@@ -226,3 +226,49 @@ func writeRecord(t *testing.T, configDir, id string, state runtime.State) {
 		t.Fatal(err)
 	}
 }
+
+// A crashed runner releases its flock when the process exits. The submission
+// must then be startable without any TTL or manual cleanup.
+func TestQueueReclaimsAJobAfterACrashedClaim(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	id, dir := submitRaw(t, f, "alice", "demo", "crashed")
+	lease, err := job.Claim(dir)
+	if err != nil || lease == nil {
+		t.Fatalf("claim = %v %v", lease, err)
+	}
+	// Simulate the process dying after the claim: close the descriptor (the
+	// kernel drops the flock) without running the job.
+	lease.Release()
+	if n := f.drain(t); n != 1 {
+		t.Fatalf("queue started %d after a released claim, want 1", n)
+	}
+	waitInstance(t, f.configDir, runtime.InstanceID("alice", "demo", id), runtime.StateRunning)
+	f.releaseAndSettle(t)
+}
+
+// The queue's publication marker is job.json. A half-written file (the O_EXCL
+// fallback path on filesystems without hard links) must not start anything; the
+// next tick, once the writer finished, must see the complete file.
+func TestQueueWaitsForACompleteJobFile(t *testing.T) {
+	f := newFixture(t, allowAll(t))
+	id, dir := submitRaw(t, f, "alice", "demo", "half")
+	path := filepath.Join(dir, "job.json")
+	complete, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.drain(t); n != 0 {
+		t.Fatalf("queue started %d from a half-written job.json", n)
+	}
+	if err := os.WriteFile(path, complete, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.drain(t); n != 1 {
+		t.Fatalf("queue started %d after the job.json was completed, want 1", n)
+	}
+	waitInstance(t, f.configDir, runtime.InstanceID("alice", "demo", id), runtime.StateRunning)
+	f.releaseAndSettle(t)
+}

@@ -401,6 +401,15 @@ func runJobRun(args []string) {
 				continue
 			}
 		}
+		// A re-run of a terminal instance (failed/stopped, or succeeded with
+		// --force) is a new generation: remove the old record so the start guard
+		// in RunTask does not mistake its stopped state for a live cancel.
+		if prevErr == nil && prev.State.Terminal() {
+			if derr := runtime.DeleteInstance(recordPath); derr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not reset %s: %v\n", loaded.ID, derr)
+			}
+		}
+
 		// Take the lease, so the gateway's task loop does not start it too. A
 		// crash releases it automatically (flock is freed when the process
 		// exits), which is what keeps a submission from parking forever.

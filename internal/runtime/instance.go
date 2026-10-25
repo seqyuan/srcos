@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -579,4 +580,48 @@ func (v PathView) pathValue() string {
 		return os.Getenv("PATH")
 	}
 	return sandbox.DefaultPath
+}
+
+// ErrInstanceChanged tells UpdateInstance not to save: the record is no longer
+// in a state the caller may modify (typically a deliberate stop won the race).
+var ErrInstanceChanged = errors.New("instance changed since the caller last looked")
+
+// UpdateInstance is the serialized read-modify-write primitive for instance
+// records.
+//
+// It takes a per-record flock (a sibling .lock file, because rename replaces
+// the record's inode), reloads the latest record, lets fn mutate it, and saves
+// it atomically. If fn returns ErrInstanceChanged the record is left untouched
+// and applied=false is returned with the current value. A missing record is
+// passed to fn as an empty Instance (the first start creates it).
+//
+// Callers must not call UpdateInstance recursively for the same path: flock is
+// held on a descriptor and a second open would block.
+func UpdateInstance(path string, fn func(*Instance) error) (*Instance, bool, error) {
+	lock, err := lockInstance(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer lock.release()
+
+	cur, err := LoadInstance(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, false, err
+		}
+		cur = &Instance{}
+	}
+	before := *cur
+	if err := fn(cur); err != nil {
+		if errors.Is(err, ErrInstanceChanged) {
+			// Return what is on disk, not the caller's half-applied mutation:
+			// callers use this value as the winning record.
+			return &before, false, nil
+		}
+		return nil, false, err
+	}
+	if err := SaveInstance(path, cur); err != nil {
+		return nil, false, err
+	}
+	return cur, true, nil
 }
