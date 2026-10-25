@@ -11,7 +11,9 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
-> 2026-10-25（**Phase A/B：默认路径 + Task UI 交接协议**）：默认 `srcos serve`（只设 `SRCOS_TOOLS_DIR`、不传 `--tools-dir`）现在真的启用任务队列，并在启动日志打印 worker 数与 tools dir；`srcos job submit <script>` 走新的 `job.SubmitScript`，先写 `work.sh` 再原子写 `job.json`，只产生一个 job；`server.Options` 新增 `Environments`，`NewWithOptions` 加载 `config/environments.yaml` 并传进写路径，`execute.runnerFor` 在 `Supervisor != nil` 时改用 `Supervisor.ForUser`（不再自建一个丢掉 environment/storages/audit 的 runner）。新增 `GET /api/jobs/<id>`（状态 JSON + links）、`GET /api/jobs/<id>/artifacts`（只列声明产物，带 `srcos://` 地址），`/logs` 行为不变；新增 [`tool-ui-spec.md`](tool-ui-spec.md) 与可运行的共享包示例 [`../srcos-tools/scrna-demo/`](../srcos-tools/scrna-demo/README.md)（`ui/tool.yaml` + `task/tool.yaml` 共用 `root: ..`）。**已实测**：`go vet ./...`、`go test ./...`、`make e2e`（bwrap，19 步含 A1/A2/A3/B1/B2）、`./srcos tool validate --tools-dir srcos-tools`、Playwright 打开 `/proxy/alice/scrna-demo-ui/` 点「运行」→ `succeeded`、日志出现 `tool dir = /tool`、产物链接 `/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fout...` 返 200。Phase B6（示例接路径选择器）与 Phase C/D 未做。
+> 2026-10-25（**未完成细节：B6 + 写入/认领可靠性**）：示例共享包新增 `scrna-demo-path`（`type: path` + `requires_storages: [data]`），UI 用 `<srcos-path-picker>` 选目录并提交；Playwright 实测 picker → `/data/ref` → `succeeded`，日志 `input_dir = /data/ref`。`safefs` 新增原子写 helper（唯一 temp + rename；exclusive 用 hard link，文件系统不支持时回退 O_EXCL），`job.SubmitAs`/`flow.SaveFlow`/`flow.SaveLayout`/`grant.Save`/`activity.Flush` 全部改用它。`job.Claim` 从“永久 marker”改成 **flock 租约**：`Claim` 返回 `*Lease`，进程死亡自动释放，不再有 TTL/时钟问题；`job run` 与 `flowrun.runJob` 持有租约，CLI 没拿到且非 `--force` 就跳过，`starting/stopping` 加入跳过表。`TestQueueStopsAtTheWorkerCap` 的清理竞态已定位并修复（`prepare` 在记录之前创建 `data/` 子目录，测试现在等 `Queue.InFlight()==0`）。**已实测**：`go vet`、`go test ./...`、`go test -race`（job/safefs/execute/flow/flowrun/grant/activity）、`make e2e`（20 步，新增 path 闭包）、`go test ./internal/execute -count=20`、`tool validate` 三个 demo 组件同根、Playwright 路径选择器全链路。**仍未做**：`runtime.UpdateInstance`/状态机 CAS、claim 文件移出 workspace、C3 flow 重启恢复、C4 故障注入、Phase D。
+>
+> 2026-10-25（**Phase A/B：默认路径 + Task UI 交接协议**）：默认 `srcos serve`（只设 `SRCOS_TOOLS_DIR`、不传 `--tools-dir`）现在真的启用任务队列，并在启动日志打印 worker 数与 tools dir；`srcos job submit <script>` 走新的 `job.SubmitScript`，先写 `work.sh` 再原子写 `job.json`，只产生一个 job；`server.Options` 新增 `Environments`，`NewWithOptions` 加载 `config/environments.yaml` 并传进写路径，`execute.runnerFor` 在 `Supervisor != nil` 时改用 `Supervisor.ForUser`（不再自建一个丢掉 environment/storages/audit 的 runner）。新增 `GET /api/jobs/<id>`（状态 JSON + links）、`GET /api/jobs/<id>/artifacts`（只列声明产物，带 `srcos://` 地址），`/logs` 行为不变；新增 [`tool-ui-spec.md`](tool-ui-spec.md) 与可运行的共享包示例 [`../srcos-tools/scrna-demo/`](../srcos-tools/scrna-demo/README.md)（`ui/tool.yaml` + `task/tool.yaml` 共用 `root: ..`）。**已实测**：`go vet ./...`、`go test ./...`、`make e2e`（bwrap，19 步含 A1/A2/A3/B1/B2）、`./srcos tool validate --tools-dir srcos-tools`、Playwright 打开 `/proxy/alice/scrna-demo-ui/` 点「运行」→ `succeeded`、日志出现 `tool dir = /tool`、产物链接 `/view?src=srcos%3A%2F%2Ffile%2Fworkspace%2Fout...` 返 200。Phase B6 已在下一轮完成；Phase C3/C4/D 未做。
 >
 > 2026-10-25（**执行链路收口**：工具级 `completion.doneWhen` 现在真正生效；`submitted` 中间态落盘、重启后继续探测而不是把 exit 0 当成功；探针期间取消不再被覆盖；`doneWhen`/`lifecycle`/`healthcheck`/`init_from`/`entry` 注册期校验；`--tools-dir` 默认值下任务队列不再被静默关闭；`srcos job submit <script>` 只产生一个 job；实例凭据改为共享 home 之外 + 只读 bind；`SaveInstance` 唯一 temp + fsync；symlink 挂载根可正常解析；GPU 不能绕过工具上限；degraded flow 产物可解析；REST/MCP 数字保留精确；工具发现短 TTL 缓存 + 实例详情直查。`go vet` + `go test ./...` + `go test -race`（关键包）+ `make e2e`（degraded）全绿）。
 >
@@ -134,6 +136,7 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ 任务/日志：/tasks ＋ /tasks/<id> ＋ /api/jobs/<id>/logs（SSE）    │
 │ ✅ Task UI 交接：GET /api/jobs/<id>（状态＋links）· /artifacts      │
 │    · docs/tool-ui-spec.md · srcos-tools/scrna-demo（UI＋task 同包）  │
+│ ✅ 路径选择器示例：scrna-demo-path（type: path + data storage）       │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
@@ -216,8 +219,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 |---|---|---|---|
 | **13** | ~~Phase 6 SGE：在真登录节点上跑 `probe-env.sh`，再接真集群~~ ✅ **已在 `annuo` 真集群跑通**（2026-09-28，见 §2.3） | 此前是唯一一个「架构在、从未真跑」的部分，现已验证 | — |
 | 14 | 托管 agent 的首个真实用例（A1 已就绪，见 ADR-025）；SGE（缺集群） | 把「agent 用实例身份调 MCP」跑一次真实场景 | — |
-| 15 | Phase B6：示例 UI 接 `srcos-path-picker`（`/api/paths?tool=<task>&input=...`） | 协议已通，但示例还没演示可挂载路径控件 | — |
-| 16 | Phase C1/C2：实例记录 CAS / claim 不永久搁置（见计划文档 §4） | A/B 已完成；这些是崩溃窗口下的可靠性问题 | — |
+| 15 | ~~Phase B6：示例 UI 接 `srcos-path-picker`~~ ✅ 已完成（`scrna-demo-path`，Playwright 全链路） | — | — |
+| 16 | Phase C1/C2 剩余：`runtime.UpdateInstance` 状态机 CAS（本轮只做了写入原子化 + flock 认领） | 终态前回读只是缩小、没有关闭取消覆盖窗口 | — |
+| 17 | Phase C3/C4：flow 重启恢复、故障注入 | 独立子系统；C4 依赖 C1 的 CAS | — |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -277,6 +281,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 
 | 坑 | 结论 |
 |---|---|
+| **claim 是 flock 租约，不是永久 marker**（2026-10-25） | `job.Claim` 返回 `*Lease`；**必须持有到运行结束**（`defer Release`，进程退出也会自动释放）。只 `OpenFile` 不持有锁等于没认领。`job run` 没拿到且非 `--force` 跳过；flow 节点在 `runJob` 里认领（不是 `submit`），否则租约会随 submit 返回而丢失 |
+| **`storages.yaml` 只在网关启动时加载**（2026-10-25，B6 验证） | 先写 `config/storages.yaml` 再 `serve`；运行中新增 storage 要重启网关，否则 `requires_storages: [data]` 的工具会报 storage 未声明。示例里的 `host_root` 必须换成自己的目录 |
+| **`safefs.WriteFileAtomic` 的 rename 会替换最终 symlink**（2026-10-25） | 它要求目录已经过 `MkdirAllBeneath`；与 `WriteFileBeneath` 的 `O_NOFOLLOW` 拒绝语义不同。exclusive 版本优先 `os.Link`，文件系统不支持硬链接时回退 `O_EXCL` 直写（独占但不原子，队列容忍一个 tick 的 `Broken`） |
 | **「目录即队列」的另一半是消费者**（2026-09-24，ADR-022） | 投递目录一直是队列，但**唯一消费者是人手敲 `srcos job run`** —— agent 与表单提交等于石沉大海。补上守护进程时暴露出三个必须一起定的规则：① **`pending` 不能算配额占用**（否则一条提交过不了它自己排队位置蕴含的那道检查：队列里排 10 个 ≠ 占 10 份资源）；② **认领必须是原子的**（O_EXCL 文件），否则网关队列与另一个进程的 `job run` 会把同一任务跑两遍；③ **流程节点不能被队列当普通项偷走**（`flowrun` 自己按依赖顺序调度并认领；队列还额外按 `Tags["run"]` 跳过，那个判断写在提交里、无窗口期）。教训：**一个「队列」如果没有消费者，它只是目录** |
 | **`.sign` 放工具级 → 不同参数的任务互相误判为"已完成"** | **幂等的单位是「一次任务」不是「一个工具」**，必须用 `$SRCOS_TASK_ID` 分派产物目录与标记 |
 | **`xargs -I{} bash -c '{}'` 会二次处理反斜杠** | 把生成好的命令再破坏一层（`hi S001` 变成 `hinS001n`）。正解：`xargs -n 1 bash -c 'script' _` + `$1` + 环境变量 |
