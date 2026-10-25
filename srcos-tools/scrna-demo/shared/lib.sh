@@ -22,3 +22,19 @@ demo_write_report() {
   } > "${file}"
   echo "[write] ${file}"
 }
+
+# demo_write_listing writes a small report for the path-input component. It
+# deliberately uses only shell builtins + ls: the value is already validated by
+# the platform, and the demo should not depend on extra tools.
+demo_write_listing() {
+  local file="$1" prefix="$2" dir="$3"
+  {
+    printf '# %s / %s\n' "${prefix}" "${dir}"
+    printf 'workspace=%s\n' "${SRCOS_WORKSPACE:-}"
+    printf 'task=%s\n' "${SRCOS_TASK_ID:-manual}"
+    printf 'tool_dir=%s\n' "${SRCOS_TOOL_DIR:-}"
+    printf '\n'
+    ls -1A "${dir}" | head -50
+  } > "${file}"
+  echo "[write] ${file}"
+}

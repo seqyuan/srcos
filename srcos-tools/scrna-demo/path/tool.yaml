@@ -1,0 +1,42 @@
+schemaVersion: 1
+id: scrna-demo-path
+version: 0.1.0
+name: "scRNA demo: path input"
+description: "演示 type: path + /api/paths + srcos-path-picker；需要部署声明 id 为 data 的 storage"
+root: ..
+
+kind: task
+backend: local
+# Storage is a bind mount, so it only exists inside a mount namespace.
+sandbox: bwrap
+network: none
+
+entry: work.sh
+
+# The closed loop from ADR-020: the browsable range is derived from this
+# component's storage closure, not from the UI service.
+requires_storages: [data]
+
+interface:
+  inputs:
+    - name: input_dir
+      type: path
+      from: data
+      select: directory
+      required: true
+      label: "数据目录"
+      description: "从已声明的 data storage 里选一个已存在的目录"
+    - name: prefix
+      type: string
+      label: "前缀"
+      default: "path"
+  outputs:
+    - name: outs
+      type: directory
+      label: "输出目录（父目录）"
+      description: "提交时把 outputs 声明为 /workspace/out"
+
+resources:
+  cpu: 1
+  memory: "512Mi"
+  walltime: "0:05:00"

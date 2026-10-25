@@ -14,7 +14,7 @@
   .card { border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px; }
   .card h2 { font-size: 14px; margin: 0 0 12px; letter-spacing: .02em; }
   label { display: block; margin: 10px 0 4px; font-size: 12px; opacity: .75; }
-  input[type=text], input[type=number] {
+  input[type=text], input[type=number], select {
     width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 6px;
     border: 1px solid rgba(127,127,127,.45); background: transparent; color: inherit;
     font: inherit;
@@ -53,14 +53,25 @@
 <div class="grid">
   <section class="card">
     <h2>参数</h2>
-    <label for="task-tool">任务工具 ID</label>
-    <input id="task-tool" type="text" value="scrna-demo-task" autocomplete="off">
+    <label for="task-tool">任务工具</label>
+    <select id="task-tool">
+      <option value="scrna-demo-task">scrna-demo-task（普通参数）</option>
+      <option value="scrna-demo-path">scrna-demo-path（type: path）</option>
+    </select>
 
-    <label for="sample-id">样本 ID</label>
-    <input id="sample-id" type="text" value="S001" autocomplete="off">
+    <div id="plain-fields">
+      <label for="sample-id">样本 ID</label>
+      <input id="sample-id" type="text" value="S001" autocomplete="off">
 
-    <label for="copies">重复行数（1–20）</label>
-    <input id="copies" type="number" value="3" min="1" max="20">
+      <label for="copies">重复行数（1–20）</label>
+      <input id="copies" type="number" value="3" min="1" max="20">
+    </div>
+
+    <div id="path-field" hidden>
+      <label>数据目录（storage: data）</label>
+      <srcos-path-picker tool="scrna-demo-path" input="input_dir" select="directory"></srcos-path-picker>
+      <p class="muted">可浏览范围由 <code>scrna-demo-path</code> 的 interface 决定；需要部署声明 id 为 <code>data</code> 的 storage。</p>
+    </div>
 
     <label for="prefix">前缀</label>
     <input id="prefix" type="text" value="scrna" autocomplete="off">
@@ -92,6 +103,7 @@
   </section>
 </div>
 
+<script src="/assets/srcos-path-picker.js" defer></script>
 <script src="app.js" defer></script>
 </body>
 </html>

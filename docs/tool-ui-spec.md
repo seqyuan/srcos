@@ -256,6 +256,9 @@ GET /api/paths?tool=<task-tool>&input=<path-input>&path=<sandbox-path>&select=<d
   `<srcos-path-picker tool="…" input="…" name="…">`。
 - 需要「新建输出目录」时不要用 `path`（它要求路径已存在）；用普通 `string` 或
   `type: directory` 的原始沙箱路径。
+- 完整示例：[`../srcos-tools/scrna-demo/path/`](../srcos-tools/scrna-demo/path/tool.yaml)
+  （`requires_storages: [data]`，UI 里按工具切换显示 picker）。**别忘了给这个 task 工具授权**；
+  `/api/paths` 与 `POST /api/jobs` 都走 Grant，少给一个就是 403/404。
 
 ---
 
@@ -301,7 +304,8 @@ GET /api/paths?tool=<task-tool>&input=<path-input>&path=<sandbox-path>&select=<d
 
 ## 10. 最小检查清单
 
-- [ ] 任务工具是 `kind: task`，UI 是 `kind: service`（或静态托管），两者都有 Grant。
+- [ ] 任务工具是 `kind: task`，UI 是 `kind: service`（或静态托管），**所有**被引用的 task 工具都有 Grant。
+- [ ] `type: path` 的 `from` storage 已在部署的 `storages.yaml` 声明，且 task 工具是 `sandbox: bwrap`。
 - [ ] 提交用 `instanceId` 追踪；每次点击新的 `idempotencyKey`，重试复用同一个。
 - [ ] 轮询 `GET /api/jobs/<id>` 到 `succeeded|failed|stopped` 即停。
 - [ ] 日志用 `?follow=1`，收到 `end` 关闭 `EventSource`。

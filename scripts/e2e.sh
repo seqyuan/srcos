@@ -31,6 +31,7 @@ EXT=e2e-ext
 SCRIPT_TOOL=e2e-script
 ENV_TOOL=e2e-env
 ENV_ID=e2e-env
+PATH_TOOL=e2e-path
 SANDBOX="${SRCOS_E2E_SANDBOX:-bwrap}"
 TIMEOUT="${SRCOS_E2E_TIMEOUT:-60}"
 
@@ -153,6 +154,21 @@ environments:
     root: $ENV_ROOT
     env:
       - "E2E_ENV_MARK=from-env"
+YAML
+
+# A shared-data root for the path-input tool. It must be declared before the
+# gateway starts: the storage provider is loaded once at startup.
+STORAGE_ROOT="$TMP/shared"
+mkdir -p "$STORAGE_ROOT/ref/nested"
+echo "reference" > "$STORAGE_ROOT/ref/genes.tsv"
+cat > "$CFG/storages.yaml" <<YAML
+storages:
+  - id: data
+    name: "E2E shared data"
+    type: posix
+    host_root: $STORAGE_ROOT
+    sandbox_path: /data
+    mode: ro
 YAML
 
 # ── 1. 工具包（临时，不进 srcos-tools/）────────────────────────────────
@@ -317,6 +333,39 @@ echo "env-mark=${E2E_ENV_MARK}"
 SH
 chmod +x "$TOOLS/$ENV_TOOL/work.sh"
 
+# Path input: the browsable range must come from this task tool's storage
+# closure, and the value must survive into the sandbox as /data/...
+mkdir -p "$TOOLS/$PATH_TOOL"
+cat > "$TOOLS/$PATH_TOOL/tool.yaml" <<YAML
+schemaVersion: 1
+id: $PATH_TOOL
+version: 0.0.1
+name: "E2E Path"
+description: "type: path + requires_storages: [data]"
+kind: task
+backend: local
+sandbox: bwrap
+network: none
+entry: work.sh
+requires_storages: [data]
+interface:
+  inputs:
+    - {name: input_dir, type: path, from: data, select: directory, required: true}
+resources:
+  cpu: 1
+  memory: "256Mi"
+  walltime: "0:05:00"
+YAML
+cat > "$TOOLS/$PATH_TOOL/work.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${SRCOS_PARAM_INPUT_DIR:?input_dir is required}"
+[ -d "${SRCOS_PARAM_INPUT_DIR}" ] || { echo "not a directory: ${SRCOS_PARAM_INPUT_DIR}" >&2; exit 2; }
+echo "input-dir=${SRCOS_PARAM_INPUT_DIR}"
+ls -1A "${SRCOS_PARAM_INPUT_DIR}" | head -5
+SH
+chmod +x "$TOOLS/$PATH_TOOL/work.sh"
+
 if [ -n "$UPSTREAM_PORT" ]; then
   mkdir -p "$TOOLS/$EXT"
   cat > "$TOOLS/$EXT/tool.yaml" <<YAML
@@ -364,6 +413,8 @@ grants:
   - tool: $SCRIPT_TOOL
     users: [$USER_NAME]
   - tool: $ENV_TOOL
+    users: [$USER_NAME]
+  - tool: $PATH_TOOL
     users: [$USER_NAME]
 YAML
 pass "users + grants ready (default-deny lifted for $TOOL; $ADMIN_USER is admin)"
@@ -765,5 +816,43 @@ grep -rq 'env-mark=from-env' "$DATA/logs/$USER_NAME/$ENV_TOOL/" 2>/dev/null \
   || fail "the environment's variables were not applied"
 pass "gateway-submitted task resolved $ENV_ID and succeeded ($EINST)"
 
+
+# ── 20. type: path / /api/paths 的 storage 闭包（B6）────────────
+step 20 "type: path + /api/paths 的 storage 闭包"
+PATHS_JSON="$(curl -fsS -b "$CJ" "$BASE/api/paths?tool=$PATH_TOOL&input=input_dir")" \
+  || fail "/api/paths failed"
+printf '%s' "$PATHS_JSON" | grep -q '"path":"/data"' \
+  || fail "path listing did not start at /data: $PATHS_JSON"
+printf '%s' "$PATHS_JSON" | grep -q '"name":"ref"' \
+  || fail "path listing is missing ref/: $PATHS_JSON"
+
+RESP="$(curl -s -w '\n%{http_code}' -b "$CJ" -X POST "$BASE/api/jobs" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' \
+  -d "{\"tool\":\"$PATH_TOOL\",\"params\":{\"input_dir\":\"/data/ref\"}}")"
+code="$(printf '%s' "$RESP" | tail -1)"
+[ "$code" = "201" ] || fail "path submit = $code: $(printf '%s' "$RESP" | head -1)"
+PINST="$(printf '%s' "$RESP" | head -1 | grep -o '"instanceId":"[^"]*"' | head -1 | cut -d'"' -f4)"
+[ -n "$PINST" ] || fail "could not read the path task instance id"
+for _ in $(seq 1 $((TIMEOUT * 2))); do
+  if grep -q '^state: succeeded' "$DATA/instances/$PINST.yaml" 2>/dev/null; then break; fi
+  if grep -qE '^state: (failed|stopped)' "$DATA/instances/$PINST.yaml" 2>/dev/null; then
+    fail "path task ended as $(grep '^state:' "$DATA/instances/$PINST.yaml") — $(grep '^error:' "$DATA/instances/$PINST.yaml" || true)"
+  fi
+  sleep 0.5
+done
+grep -q '^state: succeeded' "$DATA/instances/$PINST.yaml" 2>/dev/null \
+  || fail "path task did not succeed"
+grep -rq 'input-dir=/data/ref' "$DATA/logs/$USER_NAME/$PATH_TOOL/" 2>/dev/null \
+  || fail "the path value did not reach the sandbox as /data/ref"
+grep -rq 'genes.tsv' "$DATA/logs/$USER_NAME/$PATH_TOOL/" 2>/dev/null \
+  || fail "the tool could not read the mounted storage"
+
+# A path outside the declared storage must be refused at the write path.
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$CJ" -X POST "$BASE/api/jobs" \
+  -H "Origin: $BASE" -H 'Content-Type: application/json' \
+  -d "{\"tool\":\"$PATH_TOOL\",\"params\":{\"input_dir\":\"/workspace/out\"}}")"
+[ "$code" = "400" ] || fail "out-of-storage path = $code, want 400"
+pass "picker range is /data, /data/ref runs, /workspace/out is refused ($PINST)"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment → path 闭包\n'

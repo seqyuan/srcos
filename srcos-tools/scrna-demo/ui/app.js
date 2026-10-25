@@ -13,12 +13,18 @@
 
 const TERMINAL = new Set(["succeeded", "failed", "stopped"]);
 const POLL_MS = 1000;
+// The one component whose input comes from the platform primitive control.
+// The picker derives its browsable range from this *task* tool's interface.
+const PATH_TOOL = "scrna-demo-path";
 
 const el = {
   tool: document.getElementById("task-tool"),
   sample: document.getElementById("sample-id"),
   copies: document.getElementById("copies"),
   prefix: document.getElementById("prefix"),
+  plainFields: document.getElementById("plain-fields"),
+  pathField: document.getElementById("path-field"),
+  picker: document.querySelector("srcos-path-picker"),
   run: document.getElementById("run"),
   retry: document.getElementById("retry"),
   cancel: document.getElementById("cancel"),
@@ -72,19 +78,47 @@ async function api(url, options = {}) {
   return body;
 }
 
+function pickerValue() {
+  if (!el.picker) return "";
+  // The custom element exposes `value` once upgraded; fall back to the
+  // attribute if its script has not run (the page should still be usable).
+  const v = el.picker.value;
+  return String(v == null ? el.picker.getAttribute("value") || "" : v).trim();
+}
+
 function clickParams() {
+  const tool = el.tool.value;
+  const prefix = el.prefix.value.trim() || "scrna";
+  if (tool === PATH_TOOL) {
+    return {
+      tool,
+      name: `path ${pickerValue() || "未选择"}`,
+      params: { input_dir: pickerValue(), prefix },
+      outputs: ["/workspace/out"],
+      tags: { ui: "scrna-demo", input: "path" },
+    };
+  }
   return {
-    tool: el.tool.value.trim(),
+    tool,
     name: `scrna ${el.sample.value.trim() || "S001"}`,
     params: {
       sample_id: el.sample.value.trim(),
       copies: Number(el.copies.value),
-      prefix: el.prefix.value.trim() || "scrna",
+      prefix,
     },
     // The parent directory: each run writes its own child keyed by task id.
     outputs: ["/workspace/out"],
     tags: { ui: "scrna-demo" },
   };
+}
+
+function syncToolFields() {
+  const isPath = el.tool.value === PATH_TOOL;
+  el.plainFields.hidden = isPath;
+  el.pathField.hidden = !isPath;
+  el.note.textContent = isPath
+    ? "选一个已存在的目录；路径范围来自 task 工具的 storage 闭包。"
+    : "每次点击生成一个新的幂等键；重复提交同一次点击不会产生第二个任务。";
 }
 
 async function submit(payload, idempotencyKey) {
@@ -215,10 +249,20 @@ async function loadArtifacts() {
   }
 }
 
+el.tool.addEventListener("change", syncToolFields);
+syncToolFields();
+
 el.run.addEventListener("click", () => {
   const payload = clickParams();
-  if (!payload.tool) { el.error.textContent = "任务工具 ID 不能为空"; return; }
-  if (!payload.params.sample_id) { el.error.textContent = "样本 ID 不能为空"; return; }
+  if (!payload.tool) { el.error.textContent = "任务工具不能为空"; return; }
+  if (payload.tool === PATH_TOOL && !payload.params.input_dir) {
+    el.error.textContent = "请先选择一个数据目录（或确认 data storage 已声明）";
+    return;
+  }
+  if (payload.tool !== PATH_TOOL && !payload.params.sample_id) {
+    el.error.textContent = "样本 ID 不能为空";
+    return;
+  }
   const key = (crypto.randomUUID && crypto.randomUUID()) ||
     `ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   pending = { payload, key };
