@@ -1,0 +1,32 @@
+schemaVersion: 1
+id: scrna-demo-ui
+version: 0.1.0
+name: "scRNA demo: UI"
+description: "共享包示例的 UI 组件：静态页面 + 同源 session cookie 提交任务（kind: service）"
+root: ..
+
+kind: service
+backend: local
+sandbox: bwrap
+
+# The package root is mounted at /tool, so the script is addressed by its
+# sandbox path and does not depend on the working directory.
+command:
+  - "python3"
+  - "/tool/ui/serve.py"
+
+resources:
+  cpu: 1
+  memory: "256Mi"
+
+ingress:
+  healthcheck:
+    path: "/"
+    timeout: "10s"
+    startup_grace: "30s"
+  websocket: false
+
+lifecycle:
+  restart: on-failure
+  max_lifetime: "2h"
+  idle_ttl: "30m"

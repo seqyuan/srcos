@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRCOS · scRNA demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+         margin: 0; padding: 24px; max-width: 1080px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lead { margin: 0 0 20px; opacity: .7; }
+  .grid { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 20px; }
+  .card { border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; letter-spacing: .02em; }
+  label { display: block; margin: 10px 0 4px; font-size: 12px; opacity: .75; }
+  input[type=text], input[type=number] {
+    width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid rgba(127,127,127,.45); background: transparent; color: inherit;
+    font: inherit;
+  }
+  .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  button { font: inherit; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+           border: 1px solid rgba(127,127,127,.45); background: transparent; color: inherit; }
+  button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+  button.danger { border-color: #e11d48; color: #e11d48; }
+  button:disabled { opacity: .45; cursor: default; }
+  .state { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .badge { font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .badge.succeeded { color: #059669; }
+  .badge.failed, .badge.stopped { color: #e11d48; }
+  .badge.running, .badge.starting, .badge.submitted { color: #0284c7; }
+  .muted { opacity: .65; font-size: 12px; }
+  .error { color: #e11d48; white-space: pre-wrap; }
+  pre#log { margin: 10px 0 0; padding: 12px; min-height: 180px; max-height: 420px;
+            overflow: auto; border-radius: 8px; background: rgba(127,127,127,.12);
+            font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  ul#artifacts { list-style: none; margin: 8px 0 0; padding: 0; }
+  ul#artifacts li { padding: 6px 0; border-bottom: 1px solid rgba(127,127,127,.2); }
+  ul#artifacts li:last-child { border-bottom: 0; }
+  a { color: #4f46e5; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>SRCOS · scRNA demo</h1>
+<p class="lead">
+  工具自己的页面：参数在这里收集，执行由 <code>scrna-demo-task</code> 承担。
+  页面只调用平台的提交 / 状态 / 日志 / 产物 / 取消接口。
+</p>
+
+<div class="grid">
+  <section class="card">
+    <h2>参数</h2>
+    <label for="task-tool">任务工具 ID</label>
+    <input id="task-tool" type="text" value="scrna-demo-task" autocomplete="off">
+
+    <label for="sample-id">样本 ID</label>
+    <input id="sample-id" type="text" value="S001" autocomplete="off">
+
+    <label for="copies">重复行数（1–20）</label>
+    <input id="copies" type="number" value="3" min="1" max="20">
+
+    <label for="prefix">前缀</label>
+    <input id="prefix" type="text" value="scrna" autocomplete="off">
+
+    <div class="row">
+      <button id="run" class="primary" type="button">运行</button>
+      <button id="retry" type="button" hidden>重试提交（复用幂等键）</button>
+      <button id="cancel" class="danger" type="button" disabled>取消</button>
+    </div>
+    <p class="muted" id="submit-note">每次点击生成一个新的幂等键；重复提交同一次点击不会产生第二个任务。</p>
+  </section>
+
+  <section class="card">
+    <h2>状态</h2>
+    <div class="state">
+      <span class="badge" id="state">未提交</span>
+      <span class="muted" id="meta"></span>
+    </div>
+    <p class="error" id="error"></p>
+    <p class="muted">
+      状态以 <code id="status-url">/api/jobs/&lt;id&gt;</code> 为准；
+      日志是 <code>/api/jobs/&lt;id&gt;/logs?follow=1</code> 的 SSE 流。
+    </p>
+    <pre id="log"></pre>
+
+    <h2 style="margin-top:18px">产物</h2>
+    <p class="muted" id="artifact-note">任务结束后从 /artifacts 读取。</p>
+    <ul id="artifacts"></ul>
+  </section>
+</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>

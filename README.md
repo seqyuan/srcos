@@ -501,7 +501,7 @@ curl -H 'Authorization: Bearer srcos_...' http://gw:30152/api/tools
 | `/api/services`、`/api/services/*` | 卡片增删改、布局调整的 REST API |
 | `/api/tools`、`/api/tools/*` | 工具目录与机器可读的 `interface`；`POST /api/tools/<id>/start` 启动一个 `kind: service` 工具（自助实例化，需授权） |
 | `/api/paths` | 路径浏览（`type: path` 参数的选择器后台） |
-| `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
+| `/api/jobs`、`/api/jobs/*` | 任务提交、实例列表、**单实例状态**（`/api/jobs/<id>`）、**产物清单**（`/api/jobs/<id>/artifacts`）与**日志**（`/api/jobs/<id>/logs`，加 `?follow=1` 即为 SSE 实时流）；`POST /api/jobs/<id>/cancel` 取消 |
 | `/api/flows/*` | `POST /api/flows/<id>/run` 用 CSV 样本表展开并启动一个流程 |
 | `/api/tokens`、`/api/tokens/*` | **agent token 自助管理**（列表 / 新建 / 撤销；只认浏览器 session，agent token 不能自己造 token） |
 | `/api/requests`、`/api/requests/*` | **工具访问申请**（B3；只认浏览器 session）：`GET` 自己的申请、`POST` 提交一个 |
@@ -766,7 +766,8 @@ services:
 SRCOS 在网关之上还有一层**工具平台**：把工具注册进来，授权给用户，按需实例化，
 每个实例带独立 workspace、CPU/内存限额与生命周期。
 
-> **定位**：SRCOS 是 AI 平台的确定性执行后端。探索用 AI，执行用 SRCOS。
+> **定位**：SRCOS 是面向人的工具运行平台——拥有执行，不拥有呈现。
+> 工具自带页面；平台提供注册、授权、挂载、执行、实例、日志、产物与审计。
 > 设计思想与全部决策见 [`docs/roadmap.md`](docs/roadmap.md)；
 > 工具开发者要遵守的契约见 [`docs/tool-spec.md`](docs/tool-spec.md)；
 > 重开会话或接手项目先读 [`docs/handoff.md`](docs/handoff.md)。
@@ -939,8 +940,8 @@ curl -N -b cj 'http://<gateway>/api/jobs/<id>/logs?follow=1'
 - **半行不当作一行**：没有换行的尾部要等到换行才发出（与 `tail -f` 一致）；
   实例结束时才把最后那段没换行的输出补发出去。
 - **心跳**：静默 15 秒发一个 SSE 注释帧 —— 否则反向代理/隧道会以为没人说话而掉线。
-- **`/api/jobs/<id>/logs` 的形状是固定的**（必须精确到 `<id>/logs`）：`/api/jobs/<id>` 本身不是端点，
-  调用方不需要猜自己读到的是不是日志；带分隔符的 id 直接拒绝。
+- **`/api/jobs/<id>/...` 的形状是固定的**：`<id>` 本身是状态端点，`/logs`、`/artifacts`、`/cancel` 是已知后缀；
+  其它后缀（以及带分隔符的 id）直接 404，调用方不需要猜自己读到的是哪种答案。
 
 ### MCP（给 agent 的只读接口）
 
@@ -998,7 +999,8 @@ agent: { mcp: [read], tools: [scrna_qc] }   # scope 与白名单来自这里
 ```
 
 实例**启动时** SRCOS 签发一枚实例 token（scope/白名单来自工具声明，所以是 owner 权限的
-**子集**），写到虚拟 home 的 **`$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`**（0600）；实例停止时撤销，
+**子集**），写到宿主 `data/instance-credentials/<instance-id>/agent-token`（0600），并只读挂进
+该实例的 mount namespace（工具读 **`$SRCOS_AGENT_TOKEN_FILE`**）；实例停止时撤销，
 网关启动时会清掉「实例已不在」的残留。审计里这类动作的 actor 带 `instance`，
 所以「实例做的」与「人做的」分得清（ADR-025）。
 
@@ -1131,7 +1133,7 @@ SRCOS 因此**不提供本地签名**（密钥在同一个写域里，只是看�
 | **环境挂载** | R 在 miniforge 前缀里（非系统路径），靠 `ro_mounts` 挂进沙箱 + `env:` 把它的 `bin` 放进 `PATH`。注意用**真实路径**：`/pmo` 是指向 `/Volumes/data/pmo` 的符号链接，而 R 的启动脚本引用真实路径 |
 | **工作区即应用** | `workspace.init_from` 把模板 `app.R` 拷进用户工作区；改完重启实例就生效（`shiny::runApp("/workspace")`） |
 | **实例身份对工具可见** | `SRCOS_USER` / `SRCOS_TOOL` / `SRCOS_INSTANCE_ID` 注入沙箱，应用里直接显示（页脚那行） |
-| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read, submit], tools: [hello-fanout]}` → 实例启动时 SRCOS 签发凭据到 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`。app.R 用它（a）读 `$SRCOS_API/tools`，（b）**点按钮提交一个真实任务**并刷新它的状态 |
+| **托管 agent 的实例凭据** | `tool.yaml` 声明 `agent: {mcp: [read, submit], tools: [hello-fanout]}` → 实例启动时 SRCOS 签发凭据到 `$SRCOS_AGENT_TOKEN_FILE`（per-instance，不在共享 home）。app.R 用它（a）读 `$SRCOS_API/tools`，（b）**点按钮提交一个真实任务**并刷新它的状态 |
 | **凭据是子集，且白名单会收窄** | 同一个凭据去提交白名单外的工具 → `403 may not submit to tool shiny-demo (its submit allowlist: hello-fanout)`，且这条拒绝也进审计 |
 
 > 启动服务需要**工具自己声明环境**：SRCOS 不知道 R 装在哪，也不应该知道 —— `tool.yaml` 的
@@ -1262,6 +1264,10 @@ srcos flow cancel <run-id>         # 停止投递新任务，并停掉还在跑�
 SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构。最小示例见
 [`srcos-tools/hello-fanout/`](srcos-tools/hello-fanout)，完整契约见 [`docs/tool-spec.md`](docs/tool-spec.md)。
 
+UI 和重计算脚本同目录时，用两份 `tool.yaml`（`ui/tool.yaml`、`task/tool.yaml`）并各自写 `root: ..`：
+SRCOS 把共享包根只读挂到 `/tool`，并注入 `SRCOS_TOOL_DIR=/tool`，两边的相对路径因此一致。
+SRCOS 只注册和引用这两份 YAML，不做 bundle/版本控制。
+
 **服务类工具**通常只要声明式的一行 `command:`（配 `ingress` + `lifecycle`），不必写脚本：
 
 ```yaml
@@ -1283,9 +1289,9 @@ environment: r-miniforge          # 管理端声明 root / PATH / provides
 它的 `root` 只读挂进沙箱（按宿主路径本身，因为解释器内部用绝对路径），`env` 插在
 平台默认与工具自己的 `env:` 之间。换机器只改 `environments.yaml`，工具包不变。
 
-工具的 `version` 是**人写的声明**，而 SRCOS 还会算一个**内容摘要**（`digest`）：manifest + 脚本 + 模板的 sha256。
-两者都记进实例与审计（`tool demo@0.1.0#a58e88795f2a`），所以“到底跑的哪份代码”是可答的 —— 
-文件改了而版本号没改，摘要把这件事露出来。**摘要是内容一致性，不是签名**（见 `docs/tool-spec.md` §2.4）。
+工具的 `version` 是**可选的人类标签**；SRCOS 只负责注册与引用，不做版本控制（不 pin、不快照、不回滚）。
+SRCOS 仍会算一个**内容摘要**（`digest`）：manifest + 脚本 + 模板的 sha256，记进实例与审计，
+作为“当时引用的目录内容是什么”的审计线索。**摘要不是版本控制，也不是签名**（见 `docs/tool-spec.md` §2.4）。
 
 只交付命令 + `interface` 的工具**立即可用** —— 平台会从签名生成表单；
 想要更好看的界面就自己写（shiny / python / R 皆可），签名不变。

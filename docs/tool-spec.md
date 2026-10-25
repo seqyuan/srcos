@@ -38,7 +38,7 @@ SRCOS 不认识工具的实现，工具也不需要知道 SRCOS 的内部结构�
 > 并执行完整的授权/配额校验）；跨工具共享**数据**要显式走 `requires_storages`（管理端声明），
 > 不要假设 `/workspace` 互通。详见 §3 与 §5.4。
 >
-> 本 spec 按**一个 `tool.yaml` 一个 `kind`** 描述。
+> 本 spec 按**一个 `tool.yaml` 一个 `kind`** 描述；共享包可以在同一目录里放多份 `tool.yaml`（`ui/`、`task/`，见 §1）。
 
 ---
 
@@ -58,6 +58,21 @@ srcos-tools/<tool-id>/
 
 `workspace-template/` 与 `home-template/` 只在**首次**初始化时展开：SRCOS 会在目标目录写下
 `.srcos-initialized` 标记，之后不再覆盖。这样用户有意删掉的种子文件不会被静默恢复。
+模板路径按 manifest 目录解析；共享包里的组件各带各的模板。
+
+共享包（同一个目录里既有 UI 又有重计算）用两个 manifest 指向同一个包根：
+
+```
+srcos-tools/<pkg>/
+├── ui/tool.yaml              # 可选，kind: service；root: ..
+├── task/tool.yaml            # 重计算入口；root: ..
+├── ui/...                    # Shiny / 静态 UI 代码
+├── task/work.sh
+└── scripts/                  # 两边共享的相对路径
+```
+
+`root: ..` 让 SRCOS 把 `<pkg>` 挂到 `/tool`；两个组件都拿到 `SRCOS_TOOL_DIR=/tool`。
+版本由外部 git / 制品库管理，SRCOS 只注册和引用，不做 pin/快照。
 
 **检验标准**：把这个目录单独拷给别人，对方能否在不安装 SRCOS 的情况下理解它在干什么、需要什么环境？
 
@@ -70,8 +85,9 @@ srcos-tools/<tool-id>/
 ```yaml
 schemaVersion: 1                    # 必需，当前为 1
 id: cellranger                      # 必需，[a-z0-9][a-z0-9-]*，全局唯一
-version: 1.2.3                      # 必需，semver
+version: 1.2.3                      # 可选，人类标签；SRCOS 不做版本管理
 name: "Cell Ranger count"           # 必需，展示名（支持中文）
+root: .                             # 可选，包根（相对 manifest 目录，必须是它或它的祖先）；默认 manifest 目录
 description: "10X 单细胞比对计数"     # 可选，≤500 字
 
 kind: task                          # 必需，task | service
@@ -155,8 +171,9 @@ lifecycle:                          # kind=service 必需
 
 # ── 托管 agent 的凭据（仅 kind=service，可选）──────────────
 # 声明后，SRCOS 在实例启动时签发一枚 agent token（scope 与白名单来自这里，
-# 所以它是 owner 权限的子集），放到虚拟 home 的 `$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`
-# （0600），实例停止时撤销。agent 拿它调 /mcp。见 ADR-025。
+# 所以它是 owner 权限的子集），写到 `data/instance-credentials/<instance-id>/agent-token`（0600），并只读挂进
+# 本实例的 mount namespace；工具通过 `$SRCOS_AGENT_TOKEN_FILE` 读取。实例停止时撤销。
+# 见 ADR-025。
 agent:
   mcp: [read]                       # read | submit（至少一个）
   tools: [scrna_qc]                 # 可选：收窄 submit 到这些工具（需含 submit）
@@ -227,25 +244,23 @@ home:
 | `label` / `description` | — | 同上 |
 | `provides` | — | 该输出目录下**保证产出**的文件名列表；仅对 `type: directory` 合法。流程节点成功后 `flowrun` 会检查这些文件，缺失则节点失败 |
 
-### 2.4 版本与内容摘要（`version` 与 `digest`）
+### 2.4 注册与引用（不做版本控制）
+
+SRCOS 只负责把 id 指向一个工具目录 + 启动声明，以及运行时按引用执行。工具的版本/内容
+由外部（git、制品库、镜像）管理；SRCOS 不提供 digest pin、不可变快照、回滚或多版本共存。
 
 | | 是什么 | 谁写 | 记录在哪 |
 |---|---|---|---|
-| `version` | 人写的版本字符串（`0.1.0`） | 工具作者 | 流程可 pin `tool@version` |
-| **`digest`** | 工具包内容的 sha256（manifest + 脚本 + 模板，按路径+权限+内容） | SRCOS 算 | 实例记录、审计事件、`tool list` / `/api/tools` |
+| `version` | 可选的人类标签（`0.1.0`） | 工具作者 | 实例/审计的展示字段；不参与调度 |
+| **`digest`** | 工具包内容的 sha256（manifest + 脚本 + 模板，按路径+权限+内容） | SRCOS 算 | 实例记录、审计事件、`tool list` / `/api/tools`，仅作审计线索 |
 
-**为什么两个都要**：`version` 是人写的声明，**它变了才说明问题**；而包里的文件可以改了而不改版本号。
-`digest` 让「到底跑的哪份代码」变成可答的：审计里 `tool demo@0.1.0#a58e88795f2a` 前半是声称的版本，
-后半是实际的字节。
+**边界**：
 
-**三条边界**：
-
-- **`digest` 不是签名。** 它证明「内容与记录一致」，不证明「内容可信」—— 后者是审计的外部锚（ADR-024），
-  两件事混在一起会把它说大。
+- **`digest` 不是版本控制，也不是签名。** 它只是“这次引用的目录当时是什么内容”的附带线索；
+  SRCOS 不围绕它做 pin/快照/回滚。
 - **包内不要放大文件。** 镜像 / conda 前缀走 `ro_mounts` 或 [`environment`](#541-环境挂载ro_mounts与数据-storage-的区别)；
   大文件让每次加载都要重算摘要。
-- **构建缓存与版本控制元数据不参与摘要**（`__pycache__` / `node_modules` / `.git` / `.DS_Store` / `*.pyc`）——
-  否则摘要在代码没动时也会变。
+- **构建缓存与版本控制元数据不参与摘要**（`__pycache__` / `node_modules` / `.git` / `.DS_Store` / `*.pyc`）。
 
 ---
 
@@ -350,7 +365,7 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 
 **`entry:`（脚本逃生口）**
 
-需要循环、条件、多个进程、或自己决定解释器时用它；SRCOS 以 `bash <工具目录>/<entry>` 运行它。
+需要循环、条件、多个进程、或自己决定解释器时用它；SRCOS 以 `bash <包根>/<entry 相对 manifest 目录解析后的路径>` 运行它（组件里写 `entry: work.sh`、包根是 `..` 时，实际是 `/tool/task/work.sh`）。
 两者**恰好给一个**，都给或都不给都拒绝注册。
 
 **优先级**（谁覆盖谁）：
@@ -390,9 +405,11 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
 | `SRCOS_USER` | 如 `alice` | SRCOS 注册用户名 |
 | `SRCOS_TOOL` | 如 `cellranger` | 工具 id |
 | `SRCOS_TASK_ID` | 如 `t-01J8…` | 本次任务 id |
-| `SRCOS_TOOL_VERSION` | 如 `1.2.3` | 工具版本，便于脚本记录到产物里 |
+| `SRCOS_TOOL_VERSION` | 如 `1.2.3` | 工具版本（可选标签），便于脚本记录到产物里 |
+| `SRCOS_TOOL_DIR` | `/tool`（降级模式为宿主包根） | **工具包根**；UI 与重计算脚本用它解析共享相对路径 |
 | `SRCOS_INSTANCE_ID` | 如 `alice-web-svc` | 服务实例 id（service 注入，task 不注入） |
 | `SRCOS_API` | 如 `http://127.0.0.1:30152/api` | **SRCOS 自己的 REST 基址**，供工具 UI / 托管 agent 回调平台；**本机无已知网关时不注入**（工具应能区分「没网关」与「调用失败」） |
+| `SRCOS_AGENT_TOKEN_FILE` | `/run/srcos/agent-token`（降级模式为宿主路径） | 本实例的托管 agent 凭据文件；仅 `agent:` 服务注入，内容不是秘密本身 |
 | `SRCOS_PARAM_<NAME>` | 参数值 | `name` 大写、`-`→`_`。如 `sample_id` → `SRCOS_PARAM_SAMPLE_ID` |
 | `TMPDIR` | `/tmp` | 沙箱内 tmpfs |
 | `PATH` | 见下 | 含 `/opt/srcos/bin`，供工具自带的二进制 |
@@ -407,7 +424,8 @@ CLI 内部等价于往 `$SRCOS_JOB_DIR/<job-name>/` 写同一份 `job.json`，�
    > 会**追加在最后**，所以同名键以工具的值为准。
 
 2. **托管 agent 的凭据**（ADR-025）：工具声明 `agent: { mcp: [read] }` 后，SRCOS 在实例启动时
-   签发一枚**只读**实例凭据到 **`$HOME/.srcos/instances/<SRCOS_INSTANCE_ID>/agent-token`**（0600），实例停止时撤销。
+   签发一枚**只读**实例凭据到宿主 `data/instance-credentials/<instance-id>/agent-token`（0600），
+   只读 bind 到该实例的 `$SRCOS_AGENT_TOKEN_FILE`，实例停止时撤销。
    用它调 `$SRCOS_API` 的只读端点——这类调用在审计里记为「这个实例做的」。
 2. **工具自带的二进制放在 `/opt/srcos/bin`。** 它是沙箱 `PATH` 的第一项。
    不要挂到 `/usr/local/bin`、`/usr/bin` 之类的位置——那些目录（`/usr` `/bin` `/sbin` `/lib*`）
@@ -603,8 +621,14 @@ SRCOS 内部用 `Jail` 双向映射到宿主真实路径，**工具不需要知�
 | `GET` | `/api/paths?tool=&input=&path=&select=&limit=&storage=` | 列目录（沙箱路径空间） |
 | `POST` | `/api/jobs` | 提交任务（写 `job.json` 到投递目录；网关的任务队列会自动执行一次） |
 | `GET` | `/api/jobs?tool=&kind=` | 本用户的实例列表（含 service 的 endpoint/route） |
+| `GET` | `/api/jobs/<id>` | 一个实例的状态 JSON（UI 轮询的权威来源；`links` 给出日志/产物/取消） |
+| `GET` | `/api/jobs/<id>/logs` | 日志尾部；`?follow=1` 为 SSE |
+| `GET` | `/api/jobs/<id>/artifacts` | 该任务声明的产物清单（含 `srcos://` 地址） |
 | `POST` | `/api/jobs/<id>/cancel` | 停掉一个实例（幂等） |
 | `POST` | `/api/flows/<id>/run` | 用 CSV 样本表展开并启动一个流程 |
+
+> 工具自带页面与这些接口的完整交接协议（身份、幂等键、状态机、错误分类）见
+> [`tool-ui-spec.md`](tool-ui-spec.md)。
 
 **`/api/paths` 的安全约束（ADR-020 在 API 边缘的执行）**：可浏览的 storage 由
 `tool` + `input` **推导**，不接受调用方自由指定。`storage=` 只能在**该 input 声明的**
@@ -745,6 +769,9 @@ SRCOS 保证"每个实例只挂自己的 workspace + 自己声明的 storage，�
 |---|---|
 | `tool.yaml` 出现**未知字段**（含已被移除的 `grants:`）或**拼错键名**（如 `maxLifetime`） | 拒绝注册（严格解码；不静默忽略） |
 | `id` 全局唯一且合法 | 拒绝注册 |
+| `version` 可选；只作为人类标签，不参与调度 | — |
+| `root` 为绝对路径、不是 manifest 目录的祖先，或解析后不在 tools 目录下 | 拒绝注册/发现（包根逃逸） |
+| `entry` 为绝对路径，或解析后逃逸包根 | 拒绝注册 |
 | `command` 与 `entry` **恰好给一个**（都给/都不给都不行） | 拒绝注册 |
 | `command[0]` 非空；`${...}` 只能引用 SRCOS 给这个 `kind` 注入的变量，括号必须闭合 | 拒绝注册（错在注册时，不是运行时） |
 | `environment` 必须是 `config/environments.yaml` 里已声明的 id | 拒绝注册（机器无关，所以 CI 能拦） |

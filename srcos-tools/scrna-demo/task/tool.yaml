@@ -1,0 +1,46 @@
+schemaVersion: 1
+id: scrna-demo-task
+version: 0.1.0
+name: "scRNA demo: task"
+description: "共享包示例的重计算组件：读 SRCOS_PARAM_*，source 包内共享脚本，产物写 /workspace/out/<task id>"
+root: ..
+
+kind: task
+backend: local
+sandbox: bwrap
+network: none
+
+# entry is relative to this manifest's directory; with root: .. SRCOS mounts the
+# package root at /tool and runs /tool/task/work.sh.
+entry: work.sh
+
+interface:
+  inputs:
+    - name: sample_id
+      type: string
+      label: "样本 ID"
+      description: "只用于生成示例报告，不访问外部数据"
+      required: true
+      default: "S001"
+    - name: copies
+      type: int
+      label: "重复行数"
+      default: 3
+      min: 1
+      max: 20
+    - name: prefix
+      type: string
+      label: "前缀"
+      default: "scrna"
+  outputs:
+    - name: outs
+      type: directory
+      label: "输出目录（父目录）"
+      description: "提交时把 outputs 声明为 /workspace/out；每次运行写自己的子目录"
+
+requires_storages: []
+
+resources:
+  cpu: 1
+  memory: "512Mi"
+  walltime: "0:05:00"
