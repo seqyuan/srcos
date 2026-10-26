@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,7 +234,7 @@ func LoadState(path string) (*StateConfig, error) {
 	// A hand-edited user_header must be a valid header name; anything else
 	// would panic http.Header.Set on every proxied request.
 	if s.SSO.UserHeader != "" && !IsValidHeaderName(s.SSO.UserHeader) {
-		fmt.Printf("[srcos] WARNING: ignoring invalid sso.user_header %q (must be a valid HTTP header name)\n", s.SSO.UserHeader)
+		log.Printf("[srcos] WARNING: ignoring invalid sso.user_header %q (must be a valid HTTP header name)\n", s.SSO.UserHeader)
 		s.SSO.UserHeader = ""
 		s.SSO.HMACSecret = ""
 	}
@@ -269,7 +270,7 @@ func LoadState(path string) (*StateConfig, error) {
 		}
 		out, _ := yaml.Marshal(raw)
 		os.WriteFile(path, out, 0600)
-		fmt.Printf("[srcos] persisted generated session_secret to %s\n", path)
+		log.Printf("[srcos] persisted generated session_secret to %s\n", path)
 	}
 
 	return &s, nil

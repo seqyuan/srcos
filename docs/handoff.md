@@ -11,6 +11,8 @@
 > | 这台机器的实测环境事实 | [`environments.md`](environments.md) |
 > | **目标 / 现状 / 下一步 / 已踩的坑** | **本文** |
 >
+> 2026-10-25（**claim 移出 workspace / resume 守卫 / 请求 ID + JSON 日志 + doctor**）：权威认领文件从工具可写的 job 目录移到 `data/claims/<user>/<tool>/<job>.lock`；`Claim`/`Claimed` 用 `ClaimPair` 统一推导，legacy `.srcos-claimed` 只读、`Lstat`、按 **job walltime + 10min** 判定新鲜度（旧 binary 的 marker 没有 flock），`Claimed` 绝不创建它。`flow resume` 现在拒绝 owner 仍活着的 run 和残留 cancel flag 的 run；新增 `interrupted → succeeded` 的 resume 测试（Error 清空、`.sign`、OwnerPID 重写）。运维面补齐：`X-Request-ID`（合法值回写，否则生成）+ 网关路径访问日志、`--log-format text|json`（JSON 用 slog handler 桥接现有 `log.Printf`）、`srcos doctor`（config/data 可写、claims flock、按工具检查 bwrap/apptainer、storages、environments、flows 校验）。顺带修掉 `/-/metrics` 里字面 `\n` 导致**一条指标都没输出**的 bug（测试改为整行断言）。**已实测**：`go vet`、`go test ./...`、`go test -race`（job/execute/flowrun/server/logging/config）、`go test ./internal/execute -count=20`、`make e2e`（23 步）与 `SRCOS_E2E_SANDBOX=none make e2e`、`--log-format json` 手工启动抓 JSON 行、`--log-format bogus` 非零退出。**计划内未完成项已清零**；仍属可选后续：flow 自动 resume（明确不做，重启不静默启动计算）、claim 文件清理策略。
+>
 > 2026-10-25（**实例 CAS / flow 重启对账 / 运维面**）：`runtime.UpdateInstance`（flock 串行化 read-modify-write）接管 task 的 starting/running/submitted/final 写入、service 的 start/stop、以及 reconcile 的终态写入；故意 stop 不再被迟到的 verdict 覆盖，`job run --force` / 失败重试会先删掉旧终态记录（否则会被 stopped guard 当成“当前取消”）；service 用 `StartedAt` 区分“上一代已停止”和“本次启动被取消”。C3：flow run 记录 `owner_pid/owner_start`，网关启动时把 owner 已死的 `running` 标记为 **`interrupted`** 并给 `flow resume` 提示（不自动重跑）；e2e 用一条 owner_pid=999999 的假记录验证。Phase D（部分）：新增无需认证的 `/-/healthz`、`/-/readyz`（config/tools/按需 bwrap/storages/environments/runner/queue）与 `/-/metrics`（up/build/实例状态/队列 in-flight）。**已实测**：`go vet`、`go test ./...`、`go test -race`（runtime/execute/flowrun/job/safefs）、`make e2e`（bwrap 22 步）与 `SRCOS_E2E_SANDBOX=none make e2e`（path 步骤按设计跳过，其它全绿）、`go test ./internal/execute -count=20`。**仍未做**：Phase D 的 `X-Request-ID`/slog JSON/`srcos doctor`；flow 自动 resume（当前是 interrupted + 显式 resume）；claim 文件移出 workspace。
 >
 > 2026-10-25（**未完成细节：B6 + 写入/认领可靠性**）：示例共享包新增 `scrna-demo-path`（`type: path` + `requires_storages: [data]`），UI 用 `<srcos-path-picker>` 选目录并提交；Playwright 实测 picker → `/data/ref` → `succeeded`，日志 `input_dir = /data/ref`。`safefs` 新增原子写 helper（唯一 temp + rename；exclusive 用 hard link，文件系统不支持时回退 O_EXCL），`job.SubmitAs`/`flow.SaveFlow`/`flow.SaveLayout`/`grant.Save`/`activity.Flush` 全部改用它。`job.Claim` 从“永久 marker”改成 **flock 租约**：`Claim` 返回 `*Lease`，进程死亡自动释放，不再有 TTL/时钟问题；`job run` 与 `flowrun.runJob` 持有租约，CLI 没拿到且非 `--force` 就跳过，`starting/stopping` 加入跳过表。`TestQueueStopsAtTheWorkerCap` 的清理竞态已定位并修复（`prepare` 在记录之前创建 `data/` 子目录，测试现在等 `Queue.InFlight()==0`）。**已实测**：`go vet`、`go test ./...`、`go test -race`（job/safefs/execute/flow/flowrun/grant/activity）、`make e2e`（20 步，新增 path 闭包）、`go test ./internal/execute -count=20`、`tool validate` 三个 demo 组件同根、Playwright 路径选择器全链路。**仍未做**：`runtime.UpdateInstance`/状态机 CAS、claim 文件移出 workspace、C3 flow 重启恢复、C4 故障注入、Phase D。
@@ -139,7 +141,8 @@ UI 造起来便宜了 → UI 不再是护城河
 │ ✅ Task UI 交接：GET /api/jobs/<id>（状态＋links）· /artifacts      │
 │    · docs/tool-ui-spec.md · srcos-tools/scrna-demo（UI＋task 同包）  │
 │ ✅ 路径选择器示例：scrna-demo-path（type: path + data storage）       │
-│ ✅ 运维面：/-/healthz · /-/readyz · /-/metrics（无需认证）            │
+│ ✅ 运维面：/-/healthz · /-/readyz · /-/metrics · X-Request-ID        │
+│    · --log-format text|json · srcos doctor（离线自检）               │
 │ ✅ 任务队列：网关消费投递目录（启动/唤醒/tick）· 认领 · 每 tick 结算 │
 │ ✅ 画布：拖拽摆放（layout.yaml 旁挂）· expose 一键补齐            │
 │ ✅ 审计流：structured JSONL（data/audit）· srcos audit tail/list      │
@@ -223,9 +226,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 | **13** | ~~Phase 6 SGE：在真登录节点上跑 `probe-env.sh`，再接真集群~~ ✅ **已在 `annuo` 真集群跑通**（2026-09-28，见 §2.3） | 此前是唯一一个「架构在、从未真跑」的部分，现已验证 | — |
 | 14 | 托管 agent 的首个真实用例（A1 已就绪，见 ADR-025）；SGE（缺集群） | 把「agent 用实例身份调 MCP」跑一次真实场景 | — |
 | 15 | ~~Phase B6：示例 UI 接 `srcos-path-picker`~~ ✅ 已完成（`scrna-demo-path`，Playwright 全链路） | — | — |
-| 16 | Phase C1/C2 剩余：claim 文件移出 workspace（CAS 已做） | flock 租约已不依赖 marker 内容；移动它是锦上添花 | — |
+| 16 | ~~Phase C1/C2 剩余：claim 文件移出 workspace~~ ✅ 已完成（`data/claims` + legacy 兼容窗口） | — | — |
 | 17 | ~~Phase C3/C4：flow 重启恢复、故障注入~~ ✅ 已完成（interrupted + 显式 resume；CAS/claim/job.json 故障测试） | — | — |
-| 18 | Phase D 剩余：`X-Request-ID` + slog JSON、`srcos doctor` | healthz/readyz/metrics 已完成；日志/诊断是下一层运维体验 | — |
+| 18 | ~~Phase D 剩余：`X-Request-ID` + slog JSON、`srcos doctor`~~ ✅ 已完成 | — | — |
 
 ### 3.2 需要用户提供信息才能做的
 
@@ -285,6 +288,8 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 
 | 坑 | 结论 |
 |---|---|
+| **legacy claim marker 的兼容窗口不能拍一个固定 TTL**（2026-10-25） | 旧 binary 的 `.srcos-claimed` 没有 flock、写一次不刷新；固定 10 分钟会让 walltime >10 分钟的旧 runner 被新代码接管。现在按 **job walltime + 10min** 判新鲜度，且 `Claimed` 用 `Lstat` + 只读打开、**绝不创建**旧 marker（否则回滚到旧 binary 会永久 park 所有被探测过的 job） |
+| **resume 前要检查 owner 与 cancel flag**（2026-10-25） | `flow resume` 对 owner 仍活着的 running run 会启动第二个调度器（job claim 只会让节点失败，但记录已被搞坏）；cancel flag 也从不删除，resume 会立刻停。`ResumeBlocked` 两种情况都拒绝并给出原因 |
 | **claim 是 flock 租约，不是永久 marker**（2026-10-25） | `job.Claim` 返回 `*Lease`；**必须持有到运行结束**（`defer Release`，进程退出也会自动释放）。只 `OpenFile` 不持有锁等于没认领。`job run` 没拿到且非 `--force` 跳过；flow 节点在 `runJob` 里认领（不是 `submit`），否则租约会随 submit 返回而丢失 |
 | **重新运行一个终态实例前要删掉旧记录**（2026-10-25，CAS 落地时踩到） | `RunTask` 的 stopped guard 把“当前记录是 stopped”视为“本次启动已被取消”。`job run --force` / 失败重试必须先用 `runtime.DeleteInstance` 重置旧终态，否则会把历史当成现在的取消。service 的重新启动不同：用 `StartedAt` 区分「上一代已经停止」和「本次启动被取消」，所以同一个 id 可以安全重启 |
 | **flow run 的 owner 是进程，不是记录**（2026-10-25，C3） | 记录 `owner_pid/owner_start`；网关启动时 owner 已死就标 `interrupted`（节点 `running` 回 `pending`），不自动重跑。`flow resume` 是显式恢复动作；不要在 gateway 里偷偷重启调度器 |
@@ -321,6 +326,9 @@ Phase 4 收尾 / MCP 第二期 / 画布 / Phase 5 其余前端件 / 任务队列
 |---|---|
 | **`Address.Child` 的语义陷阱：目录导航路径翻倍**（2026-09-23，浏览器 e2e 发现） | 资源条目的 `Rel` 是**相对 scope 根**的，而 `Address.Child(rel)` 是「拼接到当前路径」的。在 `/view?src=…/home/sub` 里用 `Child(entry.Rel)` 得到 `home/sub/sub/x.txt` —— 单测只断言「页面里出现了文件名」所以全绿，Playwright 点一下才发现 404。修法：条目的地址直接 `child.Path = entry.Rel`，**删掉 `Child`**（一个只在一个地方用、语义又容易搞错的便捷方法比没有更危险），并把「子链接必须是 scope 相对的」写成断言。教训：**UI 是检验契约的探针**（与流程画布那次同源）|
 | **Sprintf 模板里的裸 `%` 会吞参数，整页静默损坏**（2026-09-30，渲染截图发现） | `admin.html` 的内嵌 CSS 经 `fmt.Sprintf` 渲染，样式表里的裸 `%`（`width: 100%;`、`translateX(-50%)`、`color-mix(… 35%, …)`）是坏动词：**吞掉下一个实参**，后面的 `%s` 全部错位成 `%!s(MISSING)` —— 管理控制台四张表线上不可见，而 e2e 只断言 200 一直没发现。dashboard.html 用 `%%` 转义所以幸免。修法：转义 + `TestAdminPageNoFmtArtifacts`（输出不得含 `%!`、CSS 必须原样存活、实参必须落位）。教训：**凡「CSS/正文内嵌进 Sprintf 模板」都要过这个断言；HTTP 200 不是渲染正确的证据，要截图或断言内容** |
+| **请求 ID 的 writer 不能吞掉 Flusher/Hijacker**（2026-10-25） | API 的 SSE 直接 `w.(http.Flusher)`，代理直接 `w.(http.Hijacker)`；`Unwrap` 不够，包装器必须实现这两个方法，否则日志中间件会让 SSE/WebSocket 静默失效。header 要在 `ServeHTTP` 之前写；hijack 后不要再记 status |
+| **`slog` 桥接要在 flag 解析之后装**（2026-10-25） | `main` 一开始设置了 `log` 的 flags/prefix；`logging.Install` 必须清掉它们并把 `log.Printf` 桥接到 slog handler，否则 JSON 模式会混入裸文本。JSON 模式里 `log.Fatalf` 也走同一 handler |
+| **Prometheus 文本里的字面 `\n` 会让所有指标消失**（2026-10-25，审核发现） | Go 字符串里写 `\\n` 得到的是反斜杠+n，正文只有一行 `# HELP...`，**一个指标都不输出**；而子串断言仍然通过。测试改为按 `strings.Split(body, "\n")` 断整行，再也不能被字面转义骗过 |
 | **快任务「状态先到、日志后到」**（2026-10-25，Playwright 发现） | 示例 UI 在 `refresh()` 看到终态就 `closeStream()`，而 EventSource 是之后才打开的——SSE 重放日志尾巴的流被自己提前关掉，页面显示 `succeeded` 但日志是空的。修法：提交后**先开流再轮询**；轮询到终态**不要**关流，让 SSE 的 `end` 事件关；状态仍以 `/api/jobs/<id>` 为准。 |
 
 ---

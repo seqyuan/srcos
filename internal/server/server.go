@@ -655,8 +655,9 @@ func (s *Server) Handler() http.Handler {
 		s.handleRoot(w, r)
 	})
 
-	// Wrap with panic recovery
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Wrap with request ID / access logging, then panic recovery. The request
+	// writer is outside the panic handler so a 500 still carries the header.
+	return requestIDHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				// net/http aborts handlers with ErrAbortHandler when the client
@@ -672,5 +673,5 @@ func (s *Server) Handler() http.Handler {
 			}
 		}()
 		mux.ServeHTTP(w, r)
-	})
+	}))
 }

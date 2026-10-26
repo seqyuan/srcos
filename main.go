@@ -19,6 +19,7 @@ import (
 	"github.com/seqyuan/srcos/internal/auth"
 	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/execute"
+	"github.com/seqyuan/srcos/internal/logging"
 	"github.com/seqyuan/srcos/internal/server"
 )
 
@@ -45,6 +46,9 @@ const usage = `Usage:
                                 tools: pull | list
   srcos sso [options]          Show or configure lightweight SSO (identity
                                 header forwarded to backends; see below)
+  srcos doctor [options]       Check this deployment offline: config/data
+                                writability, claim flock support, tools/flows,
+                                storages and environments
 
 Options:
   -d, --config-dir <dir>  Config directory (default: <program dir>/config)
@@ -70,6 +74,8 @@ Options:
                           quota). Default 4.
   --no-task-drainer       Do not run the task queue in this process: submitted
                           jobs wait for: srcos job run
+  --log-format <fmt>      text (human-readable, default) or json (one object
+                          per line, including bridged log.Printf lines)
   -V, --version           Show version
   -h, --help              Show this help
 
@@ -215,6 +221,8 @@ func main() {
 		runUserDel(opts, username)
 	case "2fa-reset":
 		runTOTPReset(opts, username)
+	case "doctor":
+		runDoctor(args)
 	default:
 		if cmd == "start" || cmd == "stop" || cmd == "status" {
 			fmt.Fprintf(os.Stderr, "error: srcos %s 已移除；srcos 现为前台运行（srcos serve），停止用 Ctrl+C，后台可用 tmux/nohup\n", cmd)
@@ -245,6 +253,8 @@ type options struct {
 	// taskWorkers is how many queued submissions the gateway runs at once. 0
 	// uses the default; -1 disables the queue (drain the drop-box by hand).
 	taskWorkers int
+	// logFormat is "text" (default) or "json" for serve mode.
+	logFormat string
 }
 
 func parseOptions(args []string) (options, error) {
@@ -287,6 +297,15 @@ func parseOptions(args []string) (options, error) {
 			opts.taskWorkers = n
 		case "--no-task-drainer":
 			opts.taskWorkers = -1
+		case "--log-format":
+			v, ok := next()
+			if !ok {
+				return opts, fmt.Errorf("option %s requires a value", a)
+			}
+			if v != "text" && v != "json" {
+				return opts, fmt.Errorf("--log-format must be text or json, got %q", v)
+			}
+			opts.logFormat = v
 		case "-d", "--config-dir":
 			v, ok := next()
 			if !ok {
@@ -549,6 +568,9 @@ func maskSecret(s string) string {
 // ---- server ----
 
 func runServer(opts options) {
+	if err := logging.Install(opts.logFormat, os.Stderr); err != nil {
+		log.Fatalf("logging: %v", err)
+	}
 	configDir := opts.configDir
 
 	// Ensure the config dir exists and is writable before doing anything else.

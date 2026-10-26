@@ -137,9 +137,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# HELP srcos_up SRCOS process is running.\\n# TYPE srcos_up gauge\\nsrcos_up 1\\n")
-	fmt.Fprintf(&b, "# HELP srcos_build_info Build information.\\n# TYPE srcos_build_info gauge\\n")
-	fmt.Fprintf(&b, "srcos_build_info{version=%q} 1\\n", s.mcpVersion)
+	fmt.Fprintf(&b, "# HELP srcos_up SRCOS process is running.\n# TYPE srcos_up gauge\nsrcos_up 1\n")
+	fmt.Fprintf(&b, "# HELP srcos_build_info Build information.\n# TYPE srcos_build_info gauge\n")
+	fmt.Fprintf(&b, "srcos_build_info{version=%q} 1\n", s.mcpVersion)
 
 	counts := map[string]int{}
 	if insts, err := runtime.ListInstances(config.DirOf(s.registry)); err == nil {
@@ -152,15 +152,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		states = append(states, state)
 	}
 	sort.Strings(states)
-	fmt.Fprintf(&b, "# HELP srcos_instances Instance records by state.\\n# TYPE srcos_instances gauge\\n")
+	fmt.Fprintf(&b, "# HELP srcos_instances Instance records by state.\n# TYPE srcos_instances gauge\n")
 	for _, state := range states {
-		fmt.Fprintf(&b, "srcos_instances{state=%q} %d\\n", state, counts[state])
+		fmt.Fprintf(&b, "srcos_instances{state=%q} %d\n", state, counts[state])
 	}
 	inflight := 0
 	if s.taskQueue != nil {
 		inflight = s.taskQueue.InFlight()
 	}
-	fmt.Fprintf(&b, "# HELP srcos_queue_inflight Task runs currently in flight.\\n# TYPE srcos_queue_inflight gauge\\nsrcos_queue_inflight %d\\n", inflight)
+	fmt.Fprintf(&b, "# HELP srcos_queue_inflight Task runs currently in flight.\n# TYPE srcos_queue_inflight gauge\nsrcos_queue_inflight %d\n", inflight)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, b.String())

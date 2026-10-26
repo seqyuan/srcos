@@ -101,14 +101,20 @@ func TestMetricsExposeInstanceState(t *testing.T) {
 		t.Fatalf("metrics = %d %s", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
+	// Assert whole lines: a literal "\\n" would satisfy a substring check while
+	// exposing no metric at all.
+	lines := map[string]bool{}
+	for _, line := range strings.Split(body, "\n") {
+		lines[line] = true
+	}
 	for _, want := range []string{
 		"srcos_up 1",
 		`srcos_build_info{version="test-version"} 1`,
 		`srcos_instances{state="running"} 1`,
 		"srcos_queue_inflight 0",
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("metrics missing %q:\n%s", want, body)
+		if !lines[want] {
+			t.Errorf("metrics missing the line %q:\n%s", want, body)
 		}
 	}
 }

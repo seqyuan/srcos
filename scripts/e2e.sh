@@ -488,6 +488,14 @@ done
 [ -n "$INSTANCE" ] || fail "timed out waiting for a succeeded instance"
 pass "instance $INSTANCE succeeded (state from its own record)"
 
+# The authoritative lease lives outside the tool-writable job directory; the
+# old marker must not be created by the new code.
+[ -f "$DATA/claims/$USER_NAME/$TOOL/$JOB_ID.lock" ] \
+  || fail "no control-directory lease for $JOB_ID"
+[ ! -e "$DATA/ws/$USER_NAME/$TOOL/jobs/$JOB_ID/.srcos-claimed" ] \
+  || fail "the new claim path still writes the legacy marker"
+pass "claim lease lives in data/claims (not the job directory)"
+
 # ── 6. 判定文件（ADR-022：退出码活得比等待者长）───────────────────────
 step 6 "校验 systemd 判定文件与日志"
 LOGDIR="$DATA/logs/$USER_NAME/$TOOL"
@@ -902,13 +910,25 @@ step 22 "healthz / readyz / metrics（无需认证）"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")" = "200" ] \
   || fail "/-/healthz is not 200"
 curl -fsS "$BASE/-/healthz" | grep -q '^ok' || fail "/-/healthz body"
+curl -fsS -D - -o /dev/null "$BASE/-/healthz" | grep -qi '^X-Request-ID:' \
+  || fail "/-/healthz has no X-Request-ID"
+[ "$(curl -fsS -D - -o /dev/null -H 'X-Request-ID: e2e-trace-1' "$BASE/-/healthz" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-request-id"{print $2}')" = "e2e-trace-1" ] \
+  || fail "a valid X-Request-ID was not echoed"
 READY_JSON="$(curl -fsS "$BASE/-/readyz")" || fail "/-/readyz is not 200"
 printf '%s' "$READY_JSON" | grep -q '"ready":true' || fail "readyz is not ready: $READY_JSON"
 METRICS="$(curl -fsS "$BASE/-/metrics")" || fail "/-/metrics is not 200"
-printf '%s' "$METRICS" | grep -q 'srcos_up 1' || fail "metrics has no srcos_up"
+printf '%s' "$METRICS" | grep -qx 'srcos_up 1' || fail "metrics has no srcos_up line"
 printf '%s' "$METRICS" | grep -q 'srcos_build_info' || fail "metrics has no build info"
-printf '%s' "$METRICS" | grep -q 'srcos_instances{state="succeeded"}' || fail "metrics has no instance states"
+printf '%s' "$METRICS" | grep -qx 'srcos_instances{state="succeeded"} [0-9]*' || fail "metrics has no instance states"
 pass "healthz/readyz/metrics answer without a session"
 
+# ── 23. srcos doctor（离线自检）────────────────────────────────
+step 23 "srcos doctor 离线自检"
+"$BIN" doctor -d "$CFG" --tools-dir "$TOOLS" --flows-dir "$TMP/flows" > "$TMP/doctor.log" 2>&1 \
+  || fail "doctor reported a failure: $(cat "$TMP/doctor.log")"
+grep -q 'OK   claims' "$TMP/doctor.log" || fail "doctor did not check the claim lease"
+grep -q 'OK   storages' "$TMP/doctor.log" || fail "doctor did not check storages"
+pass "doctor checks config/data/claims/tools/storages/environments/flows"
+
 echo
-printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment → path 闭包 → flow 重启对账 → healthz/readyz/metrics\n'
+printf '\033[32m[e2e] PASS\033[0m  提交 → 队列 → 执行 → 判定 → 日志 → 资源查看 → agent token → 审计 → 管理端 → 启动服务 → 申请审批 → 幂等键 → 审计外发 → 转发 → 自助启动/停止 → 存活对账 → script 单 job → UI 状态/产物 → environment → path 闭包 → flow 重启对账 → healthz/readyz/metrics → doctor\n'

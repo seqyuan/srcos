@@ -134,6 +134,9 @@ TLS 设置会持久化到 `state.yaml`（`tls_cert` / `tls_key`），之后的 `
 ./srcos image pull docker://ubuntu:22.04 --to /share/srcos/img/ubuntu-22.04.sif
 ./srcos image list --dir /share/srcos/img   列出已预热的镜像
 
+# 离线自检（配置/数据目录、claim flock、工具/流程、storage/environment）
+./srcos doctor -d /opt/srcos/config --tools-dir /opt/srcos/srcos-tools
+
 Options:
   -d, --config-dir <dir>  配置目录（默认 <程序目录>/config）
   --host <host>           监听地址（默认 0.0.0.0）
@@ -145,6 +148,8 @@ Options:
   --tls-selfsigned        生成自签证书并启用 HTTPS（覆盖 localhost + 局域网 IP）
   --title <text>          页面左上角显示的站点标题（默认 SRCOS），
                           支持中文/emoji，如 --title "🧬 生信分析平台"
+  --log-format <fmt>      text（人类可读，默认）或 json（逐行 JSON，含
+                          log.Printf 桥接；请求行带 X-Request-ID）
   -h, --help              显示帮助
 ```
 
@@ -1036,8 +1041,9 @@ agent: { mcp: [read], tools: [scrna_qc] }   # scope 与白名单来自这里
   （`srcos job submit`）都只是写 `job.json`；提交会**唤醒**队列，通常毫秒级开始跑。
 - **持久**：投递是文件，网关不在时也不会丢。重启后第一轮扫描就会把还没跑过的提交捡起来
   （`--no-task-drainer` 可关掉，交给 `srcos job run`）。
-- **一次提交自动执行一次**。投递目录里会留下一个认领标记（`.srcos-claimed`），所以网关的队列与
-  另一个进程里的 `srcos job run` 不会把同一个任务跑两遍；`--force` 是显式重跑的入口。
+- **一次提交自动执行一次**。权威认领标记在 `data/claims/<user>/<tool>/<job>.lock`（不在工具可写的
+  `/workspace` 里），用 flock 仲裁；所以网关的队列与另一个进程里的 `srcos job run` 不会把同一个
+  任务跑两遍，进程崩溃也会自动释放。`--force` 是显式重跑的入口。
 - **准入在排队时判**：每次真正启动前重新检查 Grant 授权与配额（所以撤权后不会偷偷跑，配额是
   「同时占用」的上限——队列里排着不算占用）；每 5 秒一轮退避，没有额度就等下一轮。
 - **按 (用户, 工具) 串行**，全局并发由 `--task-workers`（默认 4）封顶：同一工具的两个运行不会
