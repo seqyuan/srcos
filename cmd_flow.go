@@ -298,6 +298,9 @@ func runFlowResume(args []string) {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	if reason := flowrun.ResumeBlocked(dataDir, record); reason != "" {
+		fatalf("%s", reason)
+	}
 	f, err := flow.Find(flowsRoot, record.FlowID)
 	if err != nil {
 		fatalf("%v", err)
@@ -393,6 +396,9 @@ func runFlowCancel(args []string) {
 	record, err := flowrun.LoadRunRecord(dataDir, user, runID)
 	if err != nil {
 		fatalf("%v", err)
+	}
+	if reason := flowrun.ResumeBlocked(dataDir, record); reason != "" {
+		fatalf("%s", reason)
 	}
 	f, err := flow.Find(flowsRoot, record.FlowID)
 	if err != nil {

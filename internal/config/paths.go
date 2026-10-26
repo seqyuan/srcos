@@ -157,6 +157,19 @@ func ResolveToolsDir(configDir string) string {
 	return ToolsDir(configDir)
 }
 
+// ClaimsDir is the control directory for one (user, tool)'s job leases.
+//
+// It is deliberately outside data/ws: a claim marker a tool can delete is not a
+// reliable arbiter. The directory is never mounted into a sandbox.
+func ClaimsDir(configDir, user, toolID string) string {
+	return filepath.Join(DataDir(configDir), "claims", user, toolID)
+}
+
+// ClaimPath is one job's lease file in the control directory.
+func ClaimPath(configDir, user, toolID, jobID string) string {
+	return filepath.Join(ClaimsDir(configDir, user, toolID), jobID+".lock")
+}
+
 // WorkspaceDir is the registered user's /workspace for one tool. Per user and
 // per tool: two tools never share a writable directory implicitly.
 func WorkspaceDir(configDir, user, toolID string) string {

@@ -175,7 +175,8 @@ func (q *Queue) Tick(ctx context.Context) int {
 				q.release(user, toolID)
 				continue // quota backpressure: leave it queued for the next tick
 			}
-			lease, err := job.Claim(loaded.Dir)
+			claimPath, legacyPath := job.ClaimPair(q.ctrl.opts.ConfigDir, user, t.ID, loaded.ID, loaded.Dir)
+			lease, err := job.Claim(claimPath, legacyPath, job.LegacyClaimMaxAge(t, loaded.Job))
 			if err != nil {
 				reservation.Release()
 				// A permanent EACCES/read-only marker would otherwise fill the
@@ -256,7 +257,8 @@ func (q *Queue) nextJob(user, toolID string) (*job.Loaded, *tool.Tool, bool) {
 	for _, loaded := range ordered {
 		// A live lease means a runner owns it. A crashed runner's lock was
 		// released by the kernel, so its marker does not park the submission.
-		if job.Claimed(loaded.Dir) {
+		claimPath, legacyPath := job.ClaimPair(q.ctrl.opts.ConfigDir, user, t.ID, loaded.ID, loaded.Dir)
+		if job.Claimed(claimPath, legacyPath, job.LegacyClaimMaxAge(t, loaded.Job)) {
 			continue
 		}
 		// A flow node is not a queue item. The flow runner schedules its own
@@ -279,7 +281,8 @@ func (q *Queue) nextJob(user, toolID string) (*job.Loaded, *tool.Tool, bool) {
 			// A submission that cannot pass the tool's own contract will never
 			// run; record why (visible in the UI) instead of retrying it
 			// forever. The claim keeps it from being rescanned.
-			if lease, cerr := job.Claim(loaded.Dir); cerr == nil && lease != nil {
+			claimPath, legacyPath := job.ClaimPair(q.ctrl.opts.ConfigDir, user, t.ID, loaded.ID, loaded.Dir)
+			if lease, cerr := job.Claim(claimPath, legacyPath, job.LegacyClaimMaxAge(t, loaded.Job)); cerr == nil && lease != nil {
 				lease.Release()
 				q.recordFailure(user, t, loaded, fmt.Errorf("invalid submission: %w", err))
 			}

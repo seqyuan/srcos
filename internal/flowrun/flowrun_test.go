@@ -782,3 +782,56 @@ func TestCheckProvidesVerifiesThePromisedFiles(t *testing.T) {
 		t.Fatalf("present provided file rejected: %v", err)
 	}
 }
+
+// An interrupted run is a normal resume input: Run clears the interruption
+// reason, takes a fresh owner generation and continues the pending nodes.
+func TestResumeInterruptedRunContinues(t *testing.T) {
+	f := newFixture(t)
+	units, _, err := f.runner.Plan(f.flow, f.samples, nil, "run-int")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := &flow.Run{
+		FlowID: f.flow.ID, FlowVersion: f.flow.Version, User: f.user, ID: "run-int",
+		State: flow.RunInterrupted, Error: "old owner is gone", OwnerPID: 999999, OwnerStart: 1,
+	}
+	if err := f.runner.Run(context.Background(), f.flow, units, record, f.samples,
+		flow.RunDir(config.DataDir(f.configDir), f.user, "run-int")); err != nil {
+		t.Fatal(err)
+	}
+	if record.State != flow.RunSucceeded || record.Error != "" {
+		t.Fatalf("resumed run = %s %q", record.State, record.Error)
+	}
+	if record.OwnerPID != os.Getpid() {
+		t.Fatalf("owner not rewritten: pid=%d", record.OwnerPID)
+	}
+	dataDir := config.DataDir(f.configDir)
+	for _, node := range []string{"count", "qc"} {
+		if !flow.IsSigned(flow.SignPath(dataDir, f.user, "run-int", node)) {
+			t.Fatalf("node %s was not signed after resume", node)
+		}
+	}
+}
+
+func TestResumeBlockedRefusesALiveOwnerAndACancelledRun(t *testing.T) {
+	dataDir := t.TempDir()
+	start, ok := runtime.ProcessStartTime(os.Getpid())
+	if !ok {
+		t.Skip("no /proc process start time")
+	}
+	live := &flow.Run{ID: "run-live", User: "alice", State: flow.RunRunning, OwnerPID: os.Getpid(), OwnerStart: start}
+	if reason := ResumeBlocked(dataDir, live); !strings.Contains(reason, "still owned") {
+		t.Fatalf("live run reason = %q", reason)
+	}
+	dead := &flow.Run{ID: "run-dead", User: "alice", State: flow.RunInterrupted, OwnerPID: 999999, OwnerStart: 1}
+	if reason := ResumeBlocked(dataDir, dead); reason != "" {
+		t.Fatalf("dead run reason = %q", reason)
+	}
+	if err := flow.RequestCancel(dataDir, flow.CancelPath(dataDir, "alice", "run-cancel")); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := &flow.Run{ID: "run-cancel", User: "alice", State: flow.RunCancelled}
+	if reason := ResumeBlocked(dataDir, cancelled); !strings.Contains(reason, "cancelled") {
+		t.Fatalf("cancelled run reason = %q", reason)
+	}
+}

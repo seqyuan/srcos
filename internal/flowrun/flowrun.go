@@ -783,7 +783,8 @@ func (r *Runner) runJob(ctx context.Context, u flow.Unit, jobID string, onStarte
 	if err != nil {
 		return err
 	}
-	lease, err := job.Claim(dir)
+	claimPath, legacyPath := job.ClaimPair(r.Opts.ConfigDir, r.Opts.User, u.ToolID, jobID, dir)
+	lease, err := job.Claim(claimPath, legacyPath, job.LegacyClaimMaxAge(u.Tool, j))
 	if err != nil {
 		return err
 	}
@@ -1032,6 +1033,26 @@ func ReconcileInterrupted(dataDir, user string) ([]string, error) {
 		interrupted = append(interrupted, rec.ID)
 	}
 	return interrupted, nil
+}
+
+// ResumeBlocked explains why `flow resume` must not start another scheduler.
+// It returns "" when resuming is safe.
+//
+// A live `running` run may belong to a CLI process in another terminal; starting
+// a second scheduler would fight it job-by-job (the claim makes the jobs fail,
+// not duplicate, but the run record is still corrupted). A cancelled run keeps
+// its cancel flag forever, so Run would stop scheduling immediately; resuming
+// it without removing the flag would look like a hang.
+func ResumeBlocked(dataDir string, rec *flow.Run) string {
+	if rec.State == flow.RunRunning && runtime.ProcessAlive(rec.OwnerPID, rec.OwnerStart) {
+		return fmt.Sprintf("run %s is still owned by pid %d; wait for it or cancel it first",
+			rec.ID, rec.OwnerPID)
+	}
+	cancel := flow.CancelPath(dataDir, rec.User, rec.ID)
+	if flow.IsCancelled(cancel) {
+		return fmt.Sprintf("run %s was cancelled; remove %s to resume it", rec.ID, cancel)
+	}
+	return ""
 }
 
 // LoadRunRecord reads a run by id (for `flow resume` and `flow status`).

@@ -396,7 +396,8 @@ func runJobRun(args []string) {
 			// `job run`. Skipping is only right while that run is still coming: a
 			// *terminal* record means it is over, so this invocation may retry it
 			// (which is what running `job run` on a failed job has always meant).
-			if job.Claimed(loaded.Dir) && (prevErr != nil || prev.State == runtime.StatePending) {
+			claimPath, legacyPath := job.ClaimPair(*jf.configDir, user, t.ID, loaded.ID, loaded.Dir)
+			if job.Claimed(claimPath, legacyPath, job.LegacyClaimMaxAge(t, loaded.Job)) && (prevErr != nil || prev.State == runtime.StatePending) {
 				fmt.Printf("skip %s (a runner already has it in flight; use --force to run it anyway)\n", loaded.ID)
 				continue
 			}
@@ -413,7 +414,8 @@ func runJobRun(args []string) {
 		// Take the lease, so the gateway's task loop does not start it too. A
 		// crash releases it automatically (flock is freed when the process
 		// exits), which is what keeps a submission from parking forever.
-		lease, cerr := job.Claim(loaded.Dir)
+		claimPath, legacyPath := job.ClaimPair(*jf.configDir, user, t.ID, loaded.ID, loaded.Dir)
+		lease, cerr := job.Claim(claimPath, legacyPath, job.LegacyClaimMaxAge(t, loaded.Job))
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not claim %s: %v\n", loaded.ID, cerr)
 		}

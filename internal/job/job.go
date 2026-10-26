@@ -365,20 +365,34 @@ func randomSuffix() string {
 	return hex.EncodeToString(b[:])
 }
 
-// claimFile is the drop-box's "a runner took this" marker.
+// claimFile is the *legacy* claim marker inside the job directory.
 //
-// Two consumers share one queue: the gateway's task runner (which drains it
-// automatically) and `srcos job run` (a human asking for it now, in another
-// process). The marker is an advisory *lease*: Claim takes an exclusive flock
-// on the file and the lock is released automatically when the owning process
-// exits. A crash therefore frees the submission immediately, while a live run
-// keeps it until it is done. The instance record (outside the tool-writable
-// workspace) remains the authority on what actually ran; this file only decides
-// who starts it.
+// Older builds wrote it with O_EXCL and never refreshed it. The authoritative
+// lease now lives in data/claims/<user>/<tool>/<job>.lock, outside every sandbox
+// mount, because a marker in a tool-writable directory can be deleted by the
+// tool. The legacy file is only read for one migration window; see Claim.
 const claimFile = ".srcos-claimed"
 
-// ClaimPath is the claim marker of one job directory.
-func ClaimPath(jobDir string) string { return filepath.Join(jobDir, claimFile) }
+// LegacyClaimPath is the old marker's location (inside the job directory).
+func LegacyClaimPath(jobDir string) string { return filepath.Join(jobDir, claimFile) }
+
+// ClaimPair derives the authoritative lease path and the legacy marker path for
+// one job. Every caller uses this, so the two derivations cannot drift.
+func ClaimPair(configDir, user, toolID, jobID, jobDir string) (claimPath, legacyPath string) {
+	return config.ClaimPath(configDir, user, toolID, jobID), LegacyClaimPath(jobDir)
+}
+
+// LegacyClaimMaxAge bounds how long a marker left by an old (pre-flock) build is
+// honored. The old build wrote it once and never refreshed it, so a live old
+// runner can hold it for the whole job; the job's declared walltime plus a
+// margin is the honest upper bound. Unknown/zero walltime falls back to 12h.
+func LegacyClaimMaxAge(t *tool.Tool, j *Job) time.Duration {
+	res := EffectiveResources(j, t)
+	if secs, err := tool.ParseWalltime(res.Walltime); err == nil && secs > 0 {
+		return time.Duration(secs)*time.Second + 10*time.Minute
+	}
+	return 12 * time.Hour
+}
 
 // Lease is a held claim. Release (or process exit) frees it; the file itself
 // stays as a human-readable hint.
@@ -403,11 +417,21 @@ func (l *Lease) Release() {
 
 // Claim tries to take the lease for one submission. A non-nil lease means this
 // caller owns it until Release. A nil lease with a nil error means another
-// runner holds it. The marker is created on first use and rewritten with the
-// claimant's pid/time while the lock is held; the content is a hint, the flock
-// is what arbitrates.
-func Claim(jobDir string) (*Lease, error) {
-	f, err := os.OpenFile(ClaimPath(jobDir), os.O_CREATE|os.O_RDWR, 0o644)
+// runner holds it (or a live old build still owns the legacy marker).
+//
+// The decision is the flock on claimPath. The legacy marker cannot be locked
+// (old builds never took a lock), so it is honored only while it is younger
+// than legacyMaxAge; otherwise it is treated as a crashed old runner and
+// removed best-effort. Running two binary versions against one data/ is not a
+// supported state; this window exists to survive a rolling restart.
+func Claim(claimPath, legacyPath string, legacyMaxAge time.Duration) (*Lease, error) {
+	if strings.TrimSpace(claimPath) == "" {
+		return nil, errors.New("empty claim path")
+	}
+	if err := os.MkdirAll(filepath.Dir(claimPath), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(claimPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -417,6 +441,18 @@ func Claim(jobDir string) (*Lease, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if legacyFresh(legacyPath, legacyMaxAge) {
+		// A live old build owns it. Give the new lock back; the old runner is
+		// still working and its instance record will protect the next ticks.
+		_ = unlockFile(f)
+		_ = f.Close()
+		return nil, nil
+	}
+	if legacyPath != "" {
+		// Stale (or absent): remove it best-effort. A read-only job directory
+		// must not make the new lease unusable.
+		_ = os.Remove(legacyPath)
 	}
 	// We hold the lock: refresh the human-readable hint. A write failure does
 	// not invalidate the lease (the lock is the decision), so keep it.
@@ -428,19 +464,40 @@ func Claim(jobDir string) (*Lease, error) {
 }
 
 // Claimed reports whether another runner currently holds this submission's
-// lease. It is a best-effort early check: Claim is the decision, so a false
-// positive/negative here only costs one extra attempt.
-func Claimed(jobDir string) bool {
-	f, err := os.OpenFile(ClaimPath(jobDir), os.O_RDWR, 0o644)
+// lease. It is a best-effort early check: Claim is the decision.
+//
+// It never creates the legacy marker (an old binary would then see it and park
+// the job forever), and an unreadable legacy path is treated as stale.
+func Claimed(claimPath, legacyPath string, legacyMaxAge time.Duration) bool {
+	if claimPath != "" {
+		f, err := os.OpenFile(claimPath, os.O_RDONLY, 0)
+		if err == nil {
+			if err := lockFile(f); err != nil {
+				_ = f.Close()
+				if errors.Is(err, errLeaseHeld) {
+					return true
+				}
+			} else {
+				_ = unlockFile(f)
+				_ = f.Close()
+			}
+		}
+	}
+	return legacyFresh(legacyPath, legacyMaxAge)
+}
+
+// legacyFresh reports whether an old-build marker is still young enough to be
+// honored. Lstat (not Stat) keeps a symlink planted by a tool from pointing at
+// an unrelated file; any stat error is treated as stale, never as held.
+func legacyFresh(path string, maxAge time.Duration) bool {
+	if path == "" || maxAge <= 0 {
+		return false
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
-	if err := lockFile(f); err != nil {
-		return errors.Is(err, errLeaseHeld)
-	}
-	_ = unlockFile(f)
-	return false
+	return time.Since(info.ModTime()) <= maxAge
 }
 
 // Submit writes a job into the drop-box and returns its id.
@@ -539,4 +596,39 @@ func SubmitAs(configDir, user, toolID string, j *Job, id string) (string, string
 		return "", "", err
 	}
 	return id, dir, nil
+}
+
+// ProbeLease verifies that this filesystem can arbitrate leases: it creates two
+// descriptors for one file, takes the flock on the first and expects the second
+// to report "held". run doctor uses it because a filesystem without flock would
+// make every job unclaimable.
+func ProbeLease(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, ".lease-probe")
+	f1, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(path) }()
+	defer f1.Close()
+	if err := lockFile(f1); err != nil {
+		return fmt.Errorf("first flock: %w", err)
+	}
+	defer unlockFile(f1)
+	f2, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f2.Close()
+	err = lockFile(f2)
+	if err == nil {
+		_ = unlockFile(f2)
+		return errors.New("flock did not arbitrate: a second descriptor took the lock")
+	}
+	if !errors.Is(err, errLeaseHeld) {
+		return fmt.Errorf("second flock: %w", err)
+	}
+	return nil
 }

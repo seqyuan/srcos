@@ -130,7 +130,9 @@ func TestQueueLeavesUngrantedWorkAlone(t *testing.T) {
 	if _, err := os.Stat(runtime.InstancePath(f.configDir, runtime.InstanceID("alice", "demo", id))); !os.IsNotExist(err) {
 		t.Fatalf("an unauthorized submission must not get a record (%v)", err)
 	}
-	if job.Claimed(filepath.Join(f.configDir, "..", "data", "ws", "alice", "demo", "jobs", id)) {
+	claimPath, legacyPath := job.ClaimPair(f.configDir, "alice", "demo", id,
+		filepath.Join(f.configDir, "..", "data", "ws", "alice", "demo", "jobs", id))
+	if job.Claimed(claimPath, legacyPath, time.Hour) {
 		t.Error("an unauthorized submission must not be claimed")
 	}
 }
@@ -152,7 +154,8 @@ func TestQueueRecordsAnInvalidSubmissionAsFailed(t *testing.T) {
 	}
 	// The lease is released immediately for an invalid submission: the failed
 	// record, not a permanent marker, is what stops it being rescanned.
-	if job.Claimed(dir) {
+	claimPath, legacyPath := job.ClaimPair(f.configDir, "alice", "demo", id, dir)
+	if job.Claimed(claimPath, legacyPath, time.Hour) {
 		t.Error("an invalid submission should not leave a held lease")
 	}
 	// A second pass must not touch it again.
@@ -172,7 +175,8 @@ func TestQueueLeavesFlowNodesToTheFlowRunner(t *testing.T) {
 	if n := f.drain(t); n != 0 {
 		t.Fatalf("the queue ran a flow node (%d)", n)
 	}
-	if job.Claimed(dir) {
+	claimPath, legacyPath := job.ClaimPair(f.configDir, "alice", "demo", id, dir)
+	if job.Claimed(claimPath, legacyPath, time.Hour) {
 		t.Error("the queue must not even claim a flow node")
 	}
 	if _, err := os.Stat(runtime.InstancePath(f.configDir, runtime.InstanceID("alice", "demo", id))); !os.IsNotExist(err) {
@@ -183,7 +187,8 @@ func TestQueueLeavesFlowNodesToTheFlowRunner(t *testing.T) {
 func TestQueueSkipsClaimedJobs(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	id, dir := submitRaw(t, f, "alice", "demo", "taken")
-	lease, err := job.Claim(dir)
+	claimPath, legacyPath := job.ClaimPair(f.configDir, "alice", "demo", id, dir)
+	lease, err := job.Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || lease == nil {
 		t.Fatalf("claim: %v %v", lease, err)
 	}
@@ -232,7 +237,8 @@ func writeRecord(t *testing.T, configDir, id string, state runtime.State) {
 func TestQueueReclaimsAJobAfterACrashedClaim(t *testing.T) {
 	f := newFixture(t, allowAll(t))
 	id, dir := submitRaw(t, f, "alice", "demo", "crashed")
-	lease, err := job.Claim(dir)
+	claimPath, legacyPath := job.ClaimPair(f.configDir, "alice", "demo", id, dir)
+	lease, err := job.Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || lease == nil {
 		t.Fatalf("claim = %v %v", lease, err)
 	}

@@ -8,7 +8,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/seqyuan/srcos/internal/config"
 	"github.com/seqyuan/srcos/internal/tool"
 )
 
@@ -368,23 +370,33 @@ func TestSubmitAsRefusesAnExistingKeyedJob(t *testing.T) {
 	}
 }
 
+func claimFixture(t *testing.T) (claimPath, legacyPath, jobDir string) {
+	t.Helper()
+	jobDir = filepath.Join(t.TempDir(), "job")
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claimPath = filepath.Join(t.TempDir(), "claims", "id.lock")
+	return claimPath, LegacyClaimPath(jobDir), jobDir
+}
+
 func TestClaimIsExclusiveUntilReleased(t *testing.T) {
-	dir := t.TempDir()
-	lease, err := Claim(dir)
+	claimPath, legacyPath, _ := claimFixture(t)
+	lease, err := Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || lease == nil {
 		t.Fatalf("first claim = %v %v", lease, err)
 	}
-	if !Claimed(dir) {
+	if !Claimed(claimPath, legacyPath, time.Hour) {
 		t.Fatal("a held lease must read as claimed")
 	}
-	if second, err := Claim(dir); err != nil || second != nil {
+	if second, err := Claim(claimPath, legacyPath, time.Hour); err != nil || second != nil {
 		t.Fatalf("second claim = %v %v, want nil (held)", second, err)
 	}
 	lease.Release()
-	if Claimed(dir) {
+	if Claimed(claimPath, legacyPath, time.Hour) {
 		t.Fatal("a released lease must not read as claimed")
 	}
-	again, err := Claim(dir)
+	again, err := Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || again == nil {
 		t.Fatalf("claim after release = %v %v", again, err)
 	}
@@ -392,8 +404,8 @@ func TestClaimIsExclusiveUntilReleased(t *testing.T) {
 }
 
 func TestClaimIsReleasedWhenTheProcessDies(t *testing.T) {
-	dir := t.TempDir()
-	lease, err := Claim(dir)
+	claimPath, legacyPath, _ := claimFixture(t)
+	lease, err := Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || lease == nil {
 		t.Fatalf("claim = %v %v", lease, err)
 	}
@@ -403,10 +415,10 @@ func TestClaimIsReleasedWhenTheProcessDies(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease.file = nil
-	if Claimed(dir) {
+	if Claimed(claimPath, legacyPath, time.Hour) {
 		t.Fatal("a closed lease must not read as claimed")
 	}
-	next, err := Claim(dir)
+	next, err := Claim(claimPath, legacyPath, time.Hour)
 	if err != nil || next == nil {
 		t.Fatalf("claim after crash = %v %v", next, err)
 	}
@@ -414,7 +426,7 @@ func TestClaimIsReleasedWhenTheProcessDies(t *testing.T) {
 }
 
 func TestClaimHasOneWinner(t *testing.T) {
-	dir := t.TempDir()
+	claimPath, legacyPath, _ := claimFixture(t)
 	const n = 8
 	var wg sync.WaitGroup
 	leases := make(chan *Lease, n)
@@ -424,7 +436,7 @@ func TestClaimHasOneWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			lease, err := Claim(dir)
+			lease, err := Claim(claimPath, legacyPath, time.Hour)
 			if err != nil {
 				t.Errorf("claim: %v", err)
 				return
@@ -448,5 +460,69 @@ func TestClaimHasOneWinner(t *testing.T) {
 	}
 	if len(held) != 1 {
 		t.Fatalf("claim winners = %d, want exactly 1", len(held))
+	}
+}
+
+func TestClaimedNeverCreatesAMarker(t *testing.T) {
+	claimPath, legacyPath, jobDir := claimFixture(t)
+	if Claimed(claimPath, legacyPath, time.Hour) {
+		t.Fatal("an absent lease cannot be held")
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("Claimed created the legacy marker: %v", err)
+	}
+	if _, err := os.Stat(claimPath); !os.IsNotExist(err) {
+		t.Fatalf("Claimed created the control marker: %v", err)
+	}
+	entries, err := os.ReadDir(jobDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Claimed changed the job directory: %v", entries)
+	}
+}
+
+func TestLegacyMarkerBlocksWhileFresh(t *testing.T) {
+	claimPath, legacyPath, _ := claimFixture(t)
+	if err := os.WriteFile(legacyPath, []byte("claimed by pid 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !Claimed(claimPath, legacyPath, time.Hour) {
+		t.Fatal("a fresh legacy marker must read as claimed")
+	}
+	if lease, err := Claim(claimPath, legacyPath, time.Hour); err != nil || lease != nil {
+		t.Fatalf("fresh legacy claim = %v %v, want nil", lease, err)
+	}
+}
+
+func TestLegacyMarkerStaleIsIgnoredAndRemoved(t *testing.T) {
+	claimPath, legacyPath, _ := claimFixture(t)
+	if err := os.WriteFile(legacyPath, []byte("claimed by pid 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(legacyPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := Claim(claimPath, legacyPath, time.Hour)
+	if err != nil || lease == nil {
+		t.Fatalf("stale legacy claim = %v %v, want a lease", lease, err)
+	}
+	lease.Release()
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("the stale legacy marker was not removed: %v", err)
+	}
+}
+
+func TestClaimPairUsesTheControlDirectory(t *testing.T) {
+	configDir := t.TempDir()
+	jobDir := filepath.Join(config.DataDir(configDir), "ws", "alice", "demo", "jobs", "job-1")
+	claimPath, legacyPath := ClaimPair(configDir, "alice", "demo", "job-1", jobDir)
+	if !strings.HasPrefix(claimPath, filepath.Join(config.DataDir(configDir), "claims", "alice", "demo")) {
+		t.Fatalf("claim path = %s", claimPath)
+	}
+	if legacyPath != filepath.Join(jobDir, claimFile) {
+		t.Fatalf("legacy path = %s", legacyPath)
 	}
 }
