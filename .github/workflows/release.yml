@@ -1,0 +1,118 @@
+name: Release
+
+# Publishing is tag-driven: an annotated vX.Y.Z tag is the version source.
+# workflow_dispatch exists to rebuild an existing tag (or to retry a failed
+# publish) without moving the tag.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build linux packages and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: resolve and validate the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid release tag: $tag (want vX.Y.Z)" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: build the frontend bundle
+        working-directory: webui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: build static binaries and packages
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          rm -f dist/SHA256SUMS
+          for arch in amd64 arm64; do
+            dir="dist/srcos-${TAG}-linux-${arch}"
+            mkdir -p "$dir"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${TAG}" \
+              -o "$dir/srcos" .
+            cp README.md LICENSE CHANGELOG.md "$dir/"
+            tar -czf "dist/srcos-${TAG}-linux-${arch}.tar.gz" -C "$dir" .
+            (cd dist && sha256sum "srcos-${TAG}-linux-${arch}.tar.gz" >> SHA256SUMS)
+          done
+          sort -o dist/SHA256SUMS dist/SHA256SUMS
+          ls -lh dist
+
+      - name: extract release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          awk -v tag="$TAG" '
+            $0 ~ "^## " tag "( |$)" { on=1; next }
+            on && /^## v[0-9]/ { on=0 }
+            on { print }
+          ' CHANGELOG.md > dist/release-notes.md
+          if [ ! -s dist/release-notes.md ]; then
+            echo "SRCOS $TAG" > dist/release-notes.md
+          fi
+
+      - name: publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A manual/pre-created release: replace assets and notes, never move
+            # the tag or create a second release.
+            gh release upload "$TAG" dist/srcos-*.tar.gz dist/SHA256SUMS --clobber
+            gh release edit "$TAG" --title "SRCOS $TAG" --notes-file dist/release-notes.md
+          else
+            gh release create "$TAG" dist/srcos-*.tar.gz dist/SHA256SUMS \
+              --title "SRCOS $TAG" \
+              --notes-file dist/release-notes.md \
+              --verify-tag
+          fi
+          gh release view "$TAG" --json url,assets \
+            --jq '{url:.url, assets:[.assets[].name]}'
